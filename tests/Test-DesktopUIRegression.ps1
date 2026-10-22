@@ -49,14 +49,15 @@ Write-Output '  [PASS] Show-AddCloudDiskModal definition verified'
 $createdNew = $false
 $testMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$createdNew)
 try {
-    $secondInstanceOutput = powershell.exe -NoProfile -STA -File (Join-Path $PSScriptRoot '..\src\NSCloudDrive.ps1') 2>&1 | Out-String
+    if (-not $createdNew) {
+        try { [void]$testMutex.WaitOne(1000) } catch { }
+    }
+    $secondInstanceOutput = powershell.exe -NoProfile -STA -File (Join-Path $PSScriptRoot '..\src\NSCloudDrive.ps1') -Minimized 2>&1 | Out-String
     if ($secondInstanceOutput -notmatch 'NS Cloud Drive is already running') {
         throw "Expected single-instance detection message, got: $secondInstanceOutput"
     }
 } finally {
-    if ($createdNew) {
-        $testMutex.ReleaseMutex()
-    }
+    try { $testMutex.ReleaseMutex() } catch { }
     $testMutex.Dispose()
 }
 Write-Output '  [PASS] NSCloudDrive.ps1 detects running instance, restores foreground window, and exits cleanly'

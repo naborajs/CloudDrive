@@ -892,31 +892,33 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
-# Initial UI population
-Update-AllUIState
+if ($MyInvocation.InvocationName -ne '.') {
+    # Initial UI population
+    Update-AllUIState
 
-# --- Auto-Mount on Startup ---
-if ($script:Settings.AutoMountDrives) {
-    try {
-        $gdCheck = Test-GoogleDriveBackendSession
-        if ($gdCheck.IsValid) {
-            $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-            if (-not $gdStatus.IsMounted) {
-                $envVars = Get-GoogleDriveRcloneEnvironment
-                Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+    # --- Auto-Mount on Startup ---
+    if ($script:Settings.AutoMountDrives) {
+        try {
+            $gdCheck = Test-GoogleDriveBackendSession
+            if ($gdCheck.IsValid) {
+                $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+                if (-not $gdStatus.IsMounted) {
+                    $envVars = Get-GoogleDriveRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                }
             }
-        }
 
-        $tbCheck = Test-TeraBoxBackendSession
-        if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-            $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-            if (-not $tbStatus.IsMounted) {
-                $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+            $tbCheck = Test-TeraBoxBackendSession
+            if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
+                $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+                if (-not $tbStatus.IsMounted) {
+                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                }
             }
-        }
-        Update-AllUIState
-    } catch { }
+            Update-AllUIState
+        } catch { }
+    }
 }
 
 if ($Minimized) {
