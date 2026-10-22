@@ -69,6 +69,12 @@ powershell.exe -NoProfile -File .\scripts\RcloneConfigPassword.ps1 -Store
 
 The password is entered through a hidden prompt and exported as a current-user DPAPI-protected PowerShell credential under `%LOCALAPPDATA%\NSCloudDrive\credentials`, with an ACL limited to that user and SYSTEM. The launcher supplies it to rclone through its documented password-command interface. This is a convenience for unlocking the encrypted rclone file; it does not create a TeraBox login, store a TeraBox cookie, prove the backend works, or create a startup task. A process or attacker already running as the same Windows user may still be able to use or retrieve the credential. To remove it, delete `rclone-config.xml` from that folder while the mount is stopped.
 
+To run the synthetic helper regression checks without using an account credential:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Test-RcloneConfigPassword.ps1
+```
+
 No compliant sign-in flow for the unofficial cookie-based backend has been established yet. Do not paste session values into chat, scripts, logs, or this repository. The launcher is scaffolding for a later locally configured and reviewed test; a successful script parse or build is not proof that a live T: mount works.
 
 ### Optional sign-in startup
