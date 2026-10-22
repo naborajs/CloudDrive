@@ -89,6 +89,7 @@ function Get-TeraBoxStoredSession {
                 $cookieVal = $secret
                 $jsTokenVal = $null
                 $baseUrlVal = 'https://www.terabox.com'
+                $userAgentVal = $null
 
                 if ($secret -and $secret.StartsWith('{') -and $secret.EndsWith('}')) {
                     try {
@@ -100,6 +101,8 @@ function Get-TeraBoxStoredSession {
                             if ($jsTokenProp) { $jsTokenVal = [string]$jsTokenProp }
                             $baseUrlProp = Get-SafeProperty $meta 'BaseUrl' $null
                             if ($baseUrlProp) { $baseUrlVal = [string]$baseUrlProp }
+                            $uaProp = Get-SafeProperty $meta 'UserAgent' $null
+                            if ($uaProp) { $userAgentVal = [string]$uaProp }
                         }
                     } catch { }
                 }
@@ -109,6 +112,7 @@ function Get-TeraBoxStoredSession {
                     Secret = $cookieVal
                     JsToken = $jsTokenVal
                     BaseUrl = $baseUrlVal
+                    UserAgent = $userAgentVal
                     RawSecret = $secret
                     StoredTime = (Get-Item -LiteralPath $credPath).LastWriteTimeUtc
                 }
@@ -129,7 +133,8 @@ function Save-TeraBoxSession(
     [string]$Type,
     [string]$Secret,
     [string]$JsToken = $null,
-    [string]$BaseUrl = $null
+    [string]$BaseUrl = $null,
+    [string]$UserAgent = $null
 ) {
     if ([string]::IsNullOrEmpty($Secret)) {
         throw 'Cannot store empty TeraBox session secret.'
@@ -144,11 +149,14 @@ function Save-TeraBoxSession(
     }
 
     $secretToStore = $Secret
-    if (-not [string]::IsNullOrEmpty($JsToken) -or (-not [string]::IsNullOrEmpty($BaseUrl) -and $BaseUrl -ne 'https://www.terabox.com')) {
+    if (-not [string]::IsNullOrEmpty($JsToken) -or
+        (-not [string]::IsNullOrEmpty($BaseUrl) -and $BaseUrl -ne 'https://www.terabox.com') -or
+        (-not [string]::IsNullOrEmpty($UserAgent))) {
         $metaObj = [ordered]@{
             Cookie = $Secret
             JsToken = $JsToken
             BaseUrl = $(if ($BaseUrl) { $BaseUrl } else { 'https://www.terabox.com' })
+            UserAgent = $UserAgent
         }
         $secretToStore = ConvertTo-Json $metaObj -Compress
     }
@@ -296,14 +304,25 @@ function Invoke-TeraBoxHttp(
         }
 
         $body = $readTask.Result
+        $prefix = $null
+        if ($resp.Headers.Contains('Url-Domain-Prefix')) {
+            $prefix = ($resp.Headers.GetValues('Url-Domain-Prefix') | Select-Object -First 1)
+        }
+
         if (-not [string]::IsNullOrWhiteSpace($body)) {
             $parsed = ConvertFrom-Json $body -ErrorAction SilentlyContinue
-            if ($parsed) { return $parsed }
+            if ($parsed) {
+                if ($prefix) {
+                    $parsed | Add-Member -NotePropertyName 'UrlDomainPrefix' -NotePropertyValue $prefix -Force -ErrorAction SilentlyContinue
+                }
+                return $parsed
+            }
         }
 
         return [ordered]@{
             errno = -1
             error = 'Received non-JSON response from TeraBox.'
+            UrlDomainPrefix = $prefix
         }
     } finally {
         $client.Dispose()
@@ -326,10 +345,14 @@ function Test-TeraBoxBackendSession(
     }
 
     try {
-        $standardUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        $activeUserAgent = if ($session.UserAgent) {
+            $session.UserAgent
+        } else {
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         $headers = @{
             'Accept' = 'application/json, text/plain, */*'
-            'User-Agent' = $standardUserAgent
+            'User-Agent' = $activeUserAgent
         }
 
         $checkUrl = ''
@@ -341,7 +364,7 @@ function Test-TeraBoxBackendSession(
             $headers['Referer'] = "$baseUrl/"
             $headers['X-Requested-With'] = 'XMLHttpRequest'
             $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
-            $checkUrl = "$baseUrl/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1"
+            $checkUrl = "$baseUrl/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0"
             if ($session.JsToken) {
                 $checkUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
             }
@@ -355,6 +378,28 @@ function Test-TeraBoxBackendSession(
         }
 
         $errno = Get-SafeProperty $response 'errno' $null
+        $prefix = Get-SafeProperty $response 'UrlDomainPrefix' $null
+
+        # If error is -6 and TeraBox indicated an account host prefix (e.g. dm.terabox.com)
+        if (($null -eq $errno -or [int]$errno -eq -6) -and -not [string]::IsNullOrEmpty($prefix) -and $session.Type -ne 'open-api') {
+            $switchedBaseUrl = "https://$prefix.terabox.com"
+            if ($switchedBaseUrl -ne $baseUrl) {
+                $headers['Referer'] = "$switchedBaseUrl/"
+                $retryUrl = "$switchedBaseUrl/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0"
+                if ($session.JsToken) {
+                    $retryUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+                }
+                if ($Window) {
+                    $response = Invoke-TeraBoxHttp -Url $retryUrl -Headers $headers -TimeoutSec 15 -Window $Window
+                } else {
+                    $response = Invoke-RestMethod -Uri $retryUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
+                }
+                $errno = Get-SafeProperty $response 'errno' $null
+                if ($null -ne $errno -and [int]$errno -eq 0) {
+                    $baseUrl = $switchedBaseUrl
+                }
+            }
+        }
         if ($null -ne $errno -and [int]$errno -eq 0) {
             $uk = Get-SafeProperty $response 'uk' $null
             $uname = Get-SafeProperty $response 'username' $null
@@ -379,6 +424,8 @@ function Test-TeraBoxBackendSession(
                     Type = $session.Type
                     UserName = $displayName
                     Uk = $uk
+                    BaseUrl = $baseUrl
+                    UserAgent = $activeUserAgent
                 }
             }
         } else {
@@ -462,10 +509,14 @@ function Get-TeraBoxFileList(
 
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
     try {
-        $standardUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        $activeUserAgent = if ($session.UserAgent) {
+            $session.UserAgent
+        } else {
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         $headers = @{
             'Accept' = 'application/json, text/plain, */*'
-            'User-Agent' = $standardUserAgent
+            'User-Agent' = $activeUserAgent
         }
 
         $listUrl = ''
@@ -479,7 +530,7 @@ function Get-TeraBoxFileList(
             $headers['X-Requested-With'] = 'XMLHttpRequest'
             $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
             $dirParam = [System.Uri]::EscapeDataString($Directory)
-            $listUrl = "$baseUrl/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1&dir=$dirParam&page=1&num=100"
+            $listUrl = "$baseUrl/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&dir=$dirParam&page=1&num=100"
             if ($session.JsToken) {
                 $listUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
             }
