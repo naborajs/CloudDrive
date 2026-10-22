@@ -1,0 +1,22 @@
+# Local provider credentials and session material
+.env
+.env.*
+*.cookie
+*.cookies
+*.session
+*.token
+/rclone.conf
+/config/rclone.conf
+/credentials/
+
+# Local runtime state and diagnostics
+/cache/
+/Cache/
+/logs/
+*.log
+
+# Generated local build outputs
+/build/
+/dist/
+/rclone.exe
+/rclone.build.json
