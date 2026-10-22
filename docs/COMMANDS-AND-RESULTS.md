@@ -7,6 +7,9 @@
 | Inspect the supplied `terabox-drive-starter` README, five scripts, and six research files | Completed. | Starter read-only mount scaffold and plans were preserved as references; the original sign-in task was not run. |
 | Verify CloudDrive branch, origin, and working tree | `main`, origin is `https://github.com/naborajs/CloudDrive.git`, clean after each push. | Current Git state only. |
 | `git ls-remote --symref` on requested backend repositories and REA | Current ref hashes and tags recorded in [FEASIBILITY.md](FEASIBILITY.md). | Read-only GitHub ref query; no repository binary downloaded or executed. |
+| Shallow-clone `gulp79/rclone-extra` tag `v1.75.2-extra` and verify `HEAD` | `56bf13885494819bc801302ddf881279bdac7262`. | Public source checkout only; no release binary was downloaded or executed. |
+| Apply the committed cookie-safety patch to a clean detached worktree at that tag | `git apply --check`, patch application, and `git diff --check` passed; the changed source file is `backend/terabox/terabox.go`. | Static patch-application test only; no Go compiler is installed and no runtime secret-redaction test ran. |
+| Inspect pinned backend debug calls and option registry | `fs.Option.Sensitive` exists in the pinned rclone source; backend `debug()` returns when `DebugLevel < level`; `NewFs` contains the complete-options debug call removed by the patch. | Source review only. The patch pins backend debug level to zero, disabling all backend-specific debug traces. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Parse the supplied five PowerShell starter scripts | All five parsed. | Syntax check only; no mount or account operation. |
 | Parse `src/NSCloudDrive.ps1` with `System.Management.Automation.Language.Parser` | Passed. | Does not prove rendered UI or button behavior. |
@@ -32,11 +35,12 @@ Each commit changed one file and was pushed to `origin/main`:
 - `330d70b` — current backend feasibility audit.
 - `4914cb4` — backend compatibility matrix.
 - `7023470` — Windows desktop architecture decision.
+- `0bdeb8e` — pinned TeraBox cookie-safety patch.
+- `68712f2` — pinned source audit results.
 
 ## Required next evidence
 
-1. Pin the selected backend tag/commit and review license notices.
-2. Patch cookie sensitivity and secret-safe debug output; add synthetic-secret tests.
-3. Build and inspect a backend-enabled Windows binary with WinFsp mount support.
-4. Verify provider registration without exposing config, then perform user-controlled read-only account tests locally.
-5. Only after read tests pass, run disposable writable/recovery/cache tests and update this record with exact versions and observed results.
+1. Add and run synthetic-secret tests for config redaction and diagnostic logs; compilation remains blocked by the absent Go 1.26 toolchain.
+2. Audit the exact pinned build's license notices and prepare a reproducible Windows build with WinFsp `cmount` support.
+3. Verify provider registration without exposing config, then perform user-controlled read-only account tests locally.
+4. Only after read tests pass, run disposable writable/recovery/cache tests and update this record with exact versions and observed results.
