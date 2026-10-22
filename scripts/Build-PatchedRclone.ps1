@@ -92,10 +92,12 @@ $manifest = [ordered]@{
     sourceRepository = $repository
     sourceTag = $tag
     sourceCommit = $actualCommit
+    goVersion = $goVersionText
     patchSha256 = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
     executableSha256 = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
     target = 'windows/amd64'
     buildTag = 'cmount'
+    cgoEnabled = $false
     backend = 'terabox'
 }
 $manifestPath = Join-Path $BuildRoot 'rclone.build.json'
