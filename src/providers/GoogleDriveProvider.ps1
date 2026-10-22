@@ -146,42 +146,91 @@ function Remove-GoogleDriveSession {
 }
 
 function Get-GoogleOAuthConfig {
-    $configDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
-    $configPath = Join-Path $configDirectory 'google-oauth.json'
+    $userConfigDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    $appConfigDirectory = Join-Path $PSScriptRoot '..\config'
 
     $clientId = $env:GOOGLE_CLIENT_ID
     $clientSecret = $env:GOOGLE_CLIENT_SECRET
-    $foundPath = $configPath
+    $foundPath = $null
+    $configSource = 'None'
 
-    if (-not $clientId) {
-        $candidateFiles = @(
-            $configPath,
-            (Join-Path $configDirectory 'client_secret.json'),
-            (Join-Path $configDirectory 'credentials.json')
+    if ($clientId) {
+        $configSource = 'EnvironmentVariable'
+        $foundPath = 'env:GOOGLE_CLIENT_ID'
+    } else {
+        # 1. Check publisher bundled configuration in repo/application directory
+        $bundledCandidates = @(
+            (Join-Path $appConfigDirectory 'google-oauth.json'),
+            (Join-Path $appConfigDirectory 'client_secret.json'),
+            (Join-Path $PSScriptRoot '..\google-client.json'),
+            (Join-Path $PSScriptRoot '..\google-oauth.json')
         )
-        if (Test-Path -LiteralPath $configDirectory -PathType Container) {
-            $globMatches = Get-ChildItem -Path $configDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
-            if ($globMatches) {
-                $candidateFiles += ($globMatches | Select-Object -ExpandProperty FullName)
+        if (Test-Path -LiteralPath $appConfigDirectory -PathType Container) {
+            $appGlob = Get-ChildItem -Path $appConfigDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
+            if ($appGlob) { $bundledCandidates += ($appGlob | Select-Object -ExpandProperty FullName) }
+        }
+
+        # 2. Check user LocalAppData configuration
+        $userCandidates = @(
+            (Join-Path $userConfigDirectory 'google-oauth.json'),
+            (Join-Path $userConfigDirectory 'client_secret.json'),
+            (Join-Path $userConfigDirectory 'credentials.json')
+        )
+        if (Test-Path -LiteralPath $userConfigDirectory -PathType Container) {
+            $userGlob = Get-ChildItem -Path $userConfigDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
+            if ($userGlob) { $userCandidates += ($userGlob | Select-Object -ExpandProperty FullName) }
+        }
+
+        # 3. Check user Downloads and Desktop directories for downloaded Google Cloud client files
+        $userHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        $downloadsCandidates = @()
+        $dlDir = Join-Path $userHome 'Downloads'
+        $dtDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+        foreach ($dir in @($dlDir, $dtDir)) {
+            if (Test-Path -LiteralPath $dir -PathType Container) {
+                $matches = Get-ChildItem -Path $dir -Filter 'client_secret*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+                if ($matches) { $downloadsCandidates += ($matches | Select-Object -ExpandProperty FullName) }
             }
         }
 
-        foreach ($file in $candidateFiles) {
+        $allCandidates = @()
+        foreach ($c in $bundledCandidates) { $allCandidates += [ordered]@{ Path = $c; Source = 'BundledPublisher' } }
+        foreach ($c in $userCandidates) { $allCandidates += [ordered]@{ Path = $c; Source = 'UserConfig' } }
+        foreach ($c in $downloadsCandidates) { $allCandidates += [ordered]@{ Path = $c; Source = 'UserDownloaded' } }
+
+        foreach ($item in $allCandidates) {
+            $file = $item.Path
             if (Test-Path -LiteralPath $file -PathType Leaf) {
                 try {
                     $json = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-                    if ($json.installed) {
-                        if ($json.installed.client_id) { $clientId = [string]$json.installed.client_id }
-                        if ($json.installed.client_secret) { $clientSecret = [string]$json.installed.client_secret }
-                    } elseif ($json.web) {
-                        if ($json.web.client_id) { $clientId = [string]$json.web.client_id }
-                        if ($json.web.client_secret) { $clientSecret = [string]$json.web.client_secret }
-                    } elseif ($json.client_id) {
-                        $clientId = [string]$json.client_id
-                        if ($json.client_secret) { $clientSecret = [string]$json.client_secret }
+                    $parsedId = $null
+                    $parsedSecret = $null
+                    if ($json.PSObject.Properties['installed'] -and $json.installed) {
+                        if ($json.installed.PSObject.Properties['client_id'] -and $json.installed.client_id) {
+                            $parsedId = [string]$json.installed.client_id
+                        }
+                        if ($json.installed.PSObject.Properties['client_secret'] -and $json.installed.client_secret) {
+                            $parsedSecret = [string]$json.installed.client_secret
+                        }
+                    } elseif ($json.PSObject.Properties['web'] -and $json.web) {
+                        if ($json.web.PSObject.Properties['client_id'] -and $json.web.client_id) {
+                            $parsedId = [string]$json.web.client_id
+                        }
+                        if ($json.web.PSObject.Properties['client_secret'] -and $json.web.client_secret) {
+                            $parsedSecret = [string]$json.web.client_secret
+                        }
+                    } elseif ($json.PSObject.Properties['client_id'] -and $json.client_id) {
+                        $parsedId = [string]$json.client_id
+                        if ($json.PSObject.Properties['client_secret'] -and $json.client_secret) {
+                            $parsedSecret = [string]$json.client_secret
+                        }
                     }
-                    if ($clientId) {
+
+                    if ($parsedId -and $parsedId -notmatch 'YOUR_CLIENT_ID_HERE|YOUR_GOOGLE_CLIENT_ID') {
+                        $clientId = $parsedId
+                        $clientSecret = $parsedSecret
                         $foundPath = $file
+                        $configSource = $item.Source
                         break
                     }
                 } catch { }
@@ -190,13 +239,29 @@ function Get-GoogleOAuthConfig {
     }
 
     $isConfigured = (-not [string]::IsNullOrEmpty($clientId))
+    $defaultUserConfig = Join-Path $userConfigDirectory 'google-oauth.json'
     return [ordered]@{
         ClientId = $clientId
         ClientSecret = $clientSecret
         IsConfigured = $isConfigured
-        ConfigPath = $foundPath
-        ConfigDirectory = $configDirectory
+        ConfigSource = $configSource
+        ConfigPath = if ($foundPath) { $foundPath } else { $defaultUserConfig }
+        ConfigDirectory = $userConfigDirectory
+        AppConfigDirectory = $appConfigDirectory
     }
+}
+
+function Import-GoogleOAuthConfigFile([string]$SourceFilePath) {
+    if (-not (Test-Path -LiteralPath $SourceFilePath -PathType Leaf)) {
+        throw "Source configuration file does not exist: $SourceFilePath"
+    }
+    $userConfigDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    if (-not (Test-Path -LiteralPath $userConfigDirectory)) {
+        New-Item -ItemType Directory -Path $userConfigDirectory -Force | Out-Null
+    }
+    $dest = Join-Path $userConfigDirectory 'google-oauth.json'
+    Copy-Item -LiteralPath $SourceFilePath -Destination $dest -Force
+    return Get-GoogleOAuthConfig
 }
 
 function Build-GoogleAuthorizationUrl(
