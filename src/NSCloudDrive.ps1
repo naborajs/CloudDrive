@@ -28,15 +28,41 @@ $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
 $script:IsExiting = $false
 $script:AppMutex = $null
+$script:RestoreEvent = $null
+$script:LastFullUpdate = [DateTime]::UtcNow
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
     $isNewInstance = $false
-    $script:AppMutex = [System.Threading.Mutex]::new($true, 'Global\NSCloudDrive_SingleInstance_AppMutex', [ref]$isNewInstance)
+    try {
+        $script:AppMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$isNewInstance)
+    } catch [System.Threading.AbandonedMutexException] {
+        # Previous instance was abruptly terminated without releasing the mutex; we now own it
+        $isNewInstance = $true
+    } catch {
+        # Fail open to allow desktop launch if mutex inspection encounters environment policy limits
+        $isNewInstance = $true
+    }
+
     if (-not $isNewInstance) {
-        [System.Windows.Forms.MessageBox]::Show('NS Cloud Drive is already running in your system tray.', 'NS Cloud Drive', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        Write-Host 'NS Cloud Drive is already running. Restoring window to foreground...'
+        try {
+            $existingEvent = [System.Threading.EventWaitHandle]::OpenExisting('Local\NSCloudDrive_RestoreWindow_Event')
+            $existingEvent.Set() | Out-Null
+            $existingEvent.Dispose()
+        } catch { }
+
+        try {
+            $wshell = New-Object -ComObject WScript.Shell
+            $wshell.AppActivate('NS Cloud Drive') | Out-Null
+        } catch { }
+
         exit 0
     }
+
+    try {
+        $script:RestoreEvent = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset, 'Local\NSCloudDrive_RestoreWindow_Event')
+    } catch { }
 }
 
 function New-Label([string]$Text, [int]$Size = 14, [string]$Color = '#172033', [bool]$Bold = $false) {
@@ -630,9 +656,14 @@ $menuExit.Add_Click({
     Stop-VirtualDriveMount | Out-Null
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
+    if ($script:RestoreEvent) {
+        try { $script:RestoreEvent.Dispose() } catch { }
+        $script:RestoreEvent = $null
+    }
     if ($script:AppMutex) {
         try { $script:AppMutex.ReleaseMutex() } catch { }
         $script:AppMutex.Dispose()
+        $script:AppMutex = $null
     }
     $window.Close()
 })
@@ -642,6 +673,10 @@ $notifyIcon.Add_DoubleClick({
     $window.Show()
     $window.WindowState = [System.Windows.WindowState]::Normal
     $window.Activate() | Out-Null
+    try {
+        $wshell = New-Object -ComObject WScript.Shell
+        $wshell.AppActivate('NS Cloud Drive') | Out-Null
+    } catch { }
     Update-AllUIState
 })
 
@@ -653,32 +688,71 @@ $window.Add_Closing({
             $eventArgs.Cancel = $true
             $window.Hide()
             $notifyIcon.ShowBalloonTip(2000, 'NS Cloud Drive', 'Running in background. Double-click tray icon to open.', [System.Windows.Forms.ToolTipIcon]::Info)
-            # Throttle UI timer to 60s when hidden to minimize CPU and RAM
-            $timer.Interval = [TimeSpan]::FromSeconds(60)
         } else {
             $script:IsExiting = $true
             Stop-VirtualDriveMount | Out-Null
             $notifyIcon.Visible = $false
             $notifyIcon.Dispose()
+            if ($script:RestoreEvent) {
+                try { $script:RestoreEvent.Dispose() } catch { }
+                $script:RestoreEvent = $null
+            }
             if ($script:AppMutex) {
                 try { $script:AppMutex.ReleaseMutex() } catch { }
                 $script:AppMutex.Dispose()
+                $script:AppMutex = $null
             }
         }
     }
 })
 
 $window.Add_Activated({
-    # Reset UI timer to 3s when window is active
-    $timer.Interval = [TimeSpan]::FromSeconds(3)
     Update-AllUIState
 })
 
-# --- Background UI Polling Timer ---
+$window.Add_Loaded({
+    if (-not $Minimized) {
+        $window.Activate() | Out-Null
+        try {
+            $wshell = New-Object -ComObject WScript.Shell
+            $wshell.AppActivate('NS Cloud Drive') | Out-Null
+        } catch { }
+    }
+})
+
+# --- Background UI Polling & Restore Event Listener Timer ---
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
-$timer.Interval = [TimeSpan]::FromSeconds(3)
+$timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
-    Update-AllUIState
+    # Check if a second instance signaled to restore the window to foreground
+    if ($script:RestoreEvent) {
+        try {
+            if ($script:RestoreEvent.WaitOne(0)) {
+                $window.Show()
+                $window.WindowState = [System.Windows.WindowState]::Normal
+                $window.Activate() | Out-Null
+                try {
+                    $wshell = New-Object -ComObject WScript.Shell
+                    $wshell.AppActivate('NS Cloud Drive') | Out-Null
+                } catch { }
+                Update-AllUIState
+                return
+            }
+        } catch { }
+    }
+
+    # Throttle full remote status polling: every 3s when visible, every 30s when hidden in tray
+    if ($window.IsVisible) {
+        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 3) {
+            Update-AllUIState
+            $script:LastFullUpdate = [DateTime]::UtcNow
+        }
+    } else {
+        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 30) {
+            Update-AllUIState
+            $script:LastFullUpdate = [DateTime]::UtcNow
+        }
+    }
 })
 $timer.Start()
 
@@ -721,6 +795,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Keep application alive in tray even if window is hidden
         $app.Run()
     } else {
+        $window.Show()
+        $window.Activate() | Out-Null
+        try {
+            $wshell = New-Object -ComObject WScript.Shell
+            $wshell.AppActivate('NS Cloud Drive') | Out-Null
+        } catch { }
         [void]$app.Run($window)
     }
 }
