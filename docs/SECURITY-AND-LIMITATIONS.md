@@ -5,7 +5,7 @@
 ## Current security posture
 
 - The only current app code is a WPF preview. It does not read rclone configuration, sign in, request secrets, or mount a drive.
-- All TeraBox implementations reviewed are unofficial. The inspected backend relies on a web-session token, not an official OAuth integration.
+- The selected rclone TeraBox backend is unofficial and relies on a web-session token, not TeraBox's official OAuth integration. TeraBox documents an official QR/device-code flow for separately registered applications, but its API is scoped to an application-assigned folder; access to the user's existing full-drive root has not been established.
 - In the reviewed backend, the `cookie` field is required but not marked sensitive. The backend constructor's level-1 debug statement formats the full options struct, which contains that cookie. Higher debug levels are documented to include request/response parameters or bodies.
 - A patch is committed for the pinned `v1.75.2-extra` source: it marks the cookie option sensitive, removes the options-struct debug statement, and disables backend-specific debug output. It has only passed patch-application checks; it has not been compiled or tested with synthetic credentials.
 - A pinned-source Windows build helper and a read-only mount launcher are committed. The launcher checks the build manifest and hashes, requires an encrypted/decryptable rclone config, uses a 20 GiB best-effort cache, sets backend debug to zero, and runs in the current user session. Both scripts are syntax/preflight-tested only; no executable or mount exists on this PC.
@@ -42,7 +42,7 @@
 
 ## Operational limits
 
-- This provider is unofficial, has no supported OAuth/session renewal contract, and may stop working after server changes.
+- The selected provider is unofficial, has no supported OAuth/session renewal contract, and may stop working after server changes. TeraBox's official Open API is a separate option requiring registered app credentials and application-folder scope; it is not verified as full-drive access.
 - The inspected backend source refuses zero-byte and unknown-size uploads, does not advertise rclone hash support, and cannot set modification time. Report these as limitations unless later source/build evidence changes.
 - Published 4 GB free/128 GB premium upload limits, session lifetime, and transfer speeds are backend-maintainer reports, not guarantees.
 - Rclone and WinFsp provide filesystem plumbing, not a promise that every Windows application will behave as if T: were a local SSD.
