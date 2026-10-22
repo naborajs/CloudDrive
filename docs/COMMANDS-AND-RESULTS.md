@@ -113,6 +113,8 @@ Each commit changed one file and was pushed to `origin/main`:
 - `1fb4d03` — record current builder execution policy block.
 - `f9edfca` — redact TeraBox cookies from HTTP dumps.
 - `23ba3c4` — document expanded cookie dump redaction.
+- `5af6ea8` — record pinned HTTP redaction audit.
+- `6d8d2e2` — clarify HTTP dump redaction limits.
 
 ## Required next evidence
 
