@@ -8,6 +8,7 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot 'EmbeddedBrowserWindow.ps1')
 
 function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#172033', [bool]$Bold = $false) {
     $block = [System.Windows.Controls.TextBlock]::new()
@@ -278,12 +279,71 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     }
 
     if ($ProviderId -eq 'terabox') {
-        $actionStack.Children.Add((New-UIElement-Label 'TeraBox Authentication & Feasibility' 15 '#0F172A' $true)) | Out-Null
-        $methodDesc = New-UIElement-Label 'TeraBox does not provide an automated desktop OAuth flow. Authentication requires an authorized local session.' 12 '#64748B'
+        $actionStack.Children.Add((New-UIElement-Label 'TeraBox Authentication' 15 '#0F172A' $true)) | Out-Null
+        $methodDesc = New-UIElement-Label 'Sign in using the embedded browser. NS Cloud Drive will automatically detect, validate, and protect your session.' 12 '#64748B'
         $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
         $actionStack.Children.Add($methodDesc) | Out-Null
 
-        # Session connection input card
+        # 1. Primary Action: Embedded Browser Sign-In Card
+        $tbBrowserCard = [System.Windows.Controls.Border]::new()
+        $tbBrowserCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+        $tbBrowserCard.Padding = [System.Windows.Thickness]::new(16)
+        $tbBrowserCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+        $tbBrowserCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EFF6FF')
+        $tbBrowserCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#BFDBFE')
+        $tbBrowserCard.BorderThickness = [System.Windows.Thickness]::new(1)
+
+        $tbBrowserStack = [System.Windows.Controls.StackPanel]::new()
+        $tbBrowserCard.Child = $tbBrowserStack
+
+        $tbBrowserTitle = New-UIElement-Label 'Sign In with Embedded Browser (Recommended)' 14 '#1E3A8A' $true
+        $tbBrowserStack.Children.Add($tbBrowserTitle) | Out-Null
+
+        $tbBrowserDesc = New-UIElement-Label 'Opens a dedicated Microsoft Edge sign-in window. Log in to TeraBox with your account (Google, Email, QR code). When your files load, the connection is automatically completed and verified.' 12 '#3B82F6'
+        $tbBrowserDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+        $tbBrowserStack.Children.Add($tbBrowserDesc) | Out-Null
+
+        $openBrowserBtn = [System.Windows.Controls.Button]::new()
+        $openBrowserBtn.Content = 'Open Embedded Sign-In Browser'
+        $openBrowserBtn.Padding = [System.Windows.Thickness]::new(18, 10, 18, 10)
+        $openBrowserBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+        $openBrowserBtn.Foreground = [System.Windows.Media.Brushes]::White
+        $openBrowserBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+        $openBrowserBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+        $openBrowserBtn.HorizontalAlignment = 'Left'
+        $openBrowserBtn.Add_Click({
+            & $UpdateState 'OpeningSignIn' 'Launching embedded sign-in browser...'
+            $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $win -OnLoginSucceeded {
+                param($res)
+                & $UpdateState 'Connected' "Connected as $($res.UserName) ($($res.ItemCount) files found in root). Secured with DPAPI."
+            } -OnStateChanged {
+                param($st, $msg)
+                & $UpdateState $st $msg
+            }
+
+            if ($loginRes.Success) {
+                & $UpdateState 'Connected' "Connected as $($loginRes.UserName) ($($loginRes.ItemCount) files found in root). Secured with DPAPI."
+                [System.Windows.MessageBox]::Show(
+                    "Successfully connected to TeraBox as $($loginRes.UserName)!`nRoot directory contains $($loginRes.ItemCount) files.`nYou can now mount drive T: from the main window.",
+                    'TeraBox Connected',
+                    [System.Windows.MessageBoxButton]::OK,
+                    [System.Windows.MessageBoxImage]::Information
+                ) | Out-Null
+            } elseif ($loginRes.Cancelled) {
+                $check = Test-TeraBoxBackendSession
+                if ($check.IsValid) {
+                    & $UpdateState 'Connected' "Connected as $($check.UserInfo.UserName)."
+                } else {
+                    & $UpdateState 'Disconnected' 'Sign-in cancelled or closed.'
+                }
+            } else {
+                & $UpdateState 'Error' $loginRes.Error
+            }
+        })
+        $tbBrowserStack.Children.Add($openBrowserBtn) | Out-Null
+        $actionStack.Children.Add($tbBrowserCard) | Out-Null
+
+        # Session connection input card (Advanced/Manual BYOC)
         $tbConnectCard = [System.Windows.Controls.Border]::new()
         $tbConnectCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
         $tbConnectCard.Padding = [System.Windows.Thickness]::new(14)
@@ -295,7 +355,7 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $tbConnectStack = [System.Windows.Controls.StackPanel]::new()
         $tbConnectCard.Child = $tbConnectStack
 
-        $tbConnectTitle = New-UIElement-Label 'Connect Personal Account Session (BYOC)' 13 '#0F172A' $true
+        $tbConnectTitle = New-UIElement-Label 'Manual Session Import (Advanced)' 13 '#0F172A' $true
         $tbConnectStack.Children.Add($tbConnectTitle) | Out-Null
 
         $tbConnectDesc = New-UIElement-Label 'Enter your personal session cookie (ndus) or Open Platform token. Credentials will be verified against the live TeraBox API and secured using Windows DPAPI with restricted NTFS permissions.' 11 '#64748B'
