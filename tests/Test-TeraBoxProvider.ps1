@@ -49,6 +49,24 @@ try {
     } else {
         Write-Output '  [PASS] Unverified session correctly rejected for scope'
     }
+
+    # 5. Test rclone environment variable construction
+    $emptyEnv = Get-TeraBoxRcloneEnvironment
+    if ($emptyEnv.Count -ne 0) { throw 'Expected empty environment when disconnected' }
+
+    $testEnv = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Type = 'web-session'; Secret = 'my_ndus_token' }
+    if ($testEnv['RCLONE_CONFIG_TERABOX_TYPE'] -ne 'terabox') { throw 'Expected RCLONE_CONFIG_TERABOX_TYPE to be terabox' }
+    if ($testEnv['RCLONE_CONFIG_TERABOX_COOKIE'] -ne 'ndus=my_ndus_token') { throw 'Expected RCLONE_CONFIG_TERABOX_COOKIE to be ndus=my_ndus_token' }
+
+    # Preserves already formatted ndus= prefix
+    $prefixedEnv = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Type = 'web-session'; Secret = 'ndus=prefixed_token' }
+    if ($prefixedEnv['RCLONE_CONFIG_TERABOX_COOKIE'] -ne 'ndus=prefixed_token') { throw 'Expected already prefixed cookie to be preserved' }
+    Write-Output '  [PASS] TeraBox rclone environment variable construction verified'
+
+    # 6. Test manual session setter fails closed on invalid credentials
+    $manualRes = Set-TeraBoxManualSession -SessionSecret 'invalid_test_secret_123'
+    if ($manualRes.Success -ne $false) { throw 'Expected invalid manual session to fail closed' }
+    Write-Output '  [PASS] Manual session validation fails closed on invalid credentials'
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
