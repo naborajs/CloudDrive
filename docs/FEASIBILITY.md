@@ -5,7 +5,7 @@
 
 ## Decision
 
-A Windows virtual drive is technically plausible with rclone and WinFsp. The TeraBox backend is unofficial and depends on a web-session credential. No current candidate is verified against this Windows PC or the user's account. Keep the mount action disabled until the backend is pinned, its secret handling is corrected or independently guarded, a Windows build is reviewed, and a read-only live test passes.
+A Windows virtual drive is technically plausible with rclone and WinFsp. The selected full-drive backend is unofficial and depends on a web-session credential. TeraBox also documents an official Open API with QR/device authorization, but it requires a separately registered app and confines file paths to an application-assigned directory; the docs do not establish access to the user's existing full drive. No backend is verified against this Windows PC or the user's account. Keep the mount action disabled until the chosen scope, secret handling, Windows build, and read-only live test pass.
 
 For a future Windows build, `gulp79/rclone-extra` is currently the strongest source candidate of those reviewed because it publishes signed rclone-based releases and contains the TeraBox backend. This is a **candidate, not an approved binary or verified Windows release**. The requested `derrundetisch/rclone-extra` repository is a separate fork with an older source tag and its README points users to `gulp79`'s releases. The `mill-master/rclone-terabox` project offers a QR login helper but its own documented build and mount instructions target Linux/macOS and FUSE. None is independently validated against a live account.
 
@@ -24,6 +24,12 @@ These refs were checked read-only with `git ls-remote --symref` on 2026-10-22:
 
 The `derrundetisch` README explicitly says it is an unofficial fork, attributes TeraBox to x1arch, and directs its release badge to `gulp79`. `gulp79` and `mill-master` both incorporate x1arch's TeraBox implementation. Their shared ancestry means their READMEs are not independent evidence of protocol correctness.
 
+## Official Open API alternative
+
+TeraBox's [Open API integration documentation](https://www.terabox.com/integrations/docs/chinese) describes authorization-code and device-code QR flows. It says an integration vendor must separately apply for `client_id`, `client_secret`, and `private_secret`; the access token lasts two days and refresh tokens last 30 days, with each refresh token usable once. The same docs constrain file paths to the directory assigned to that application under `From: Other Applications/...` (the list API likewise requires a path under the assigned application ID).
+
+This is a genuine official, user-authorized integration path, unlike the website-cookie backend. It may be suitable for a future app-specific folder, but we have no application credentials and no evidence that this API can access the user's existing TeraBox root or provide the requested full-drive view. The project therefore keeps the unofficial backend as a **research candidate** for the full-drive scope while recording the official API as a separate, potentially narrower provider option. No OAuth request was made and no app was registered.
+
 ## Source-level capability review
 
 The current `derrundetisch/master` backend source at the ref above advertises rclone interfaces for listing, quota reporting, server-side copy/move, directory move, purge, cleanup, unchecked put, and file operations. Source implementation is evidence of code paths only; it does not prove the remote operation succeeds or is durable.
@@ -38,7 +44,7 @@ The current `derrundetisch/master` backend source at the ref above advertises rc
 | Delete/trash | `Remove`, `Purge`, and `delete_permanently` option exist. | Potentially destructive paths; no delete test has been run. |
 | Hashes/modification times | Filesystem advertises no rclone hash types and `SetModTime` returns unsupported. An object still returns an MD5 field. | Do not rely on rclone hash-based integrity checks or preserved modification times. |
 | File-size limits | Backend docs report a 4 GB free-account upload limit, 128 GB premium limit, and minimum size of 1 byte. | Maintainer-reported only; not independently verified. |
-| Authentication/session renewal | Requested fork docs require a website cookie / `ndus`. QR wrapper says it obtains a website token through a user-confirmed QR login and stores it in rclone config. Docs report a session lifetime around one year. | No official OAuth/API flow, secure app-managed store, renewal test, or account test established. Do not manually extract or send cookies. |
+| Authentication/session renewal | Requested fork docs require a website cookie / `ndus`. QR wrapper says it obtains a website token through a user-confirmed QR login and stores it in rclone config. Docs report a session lifetime around one year. Separately, official Open API docs specify an app-registered OAuth/device-code flow for an assigned application folder. | Unofficial backend: no safe login flow or renewal test established. Official API: application credentials require separate registration and its app-folder scope does not establish access to the existing account root. No authentication was attempted. Do not manually extract or send cookies. |
 | Interrupted transfers | Rclone VFS can retain staged writes for retry when the same cache/config is reused. Backend upload idempotency and recovery guarantees are not established. | Unknown; preserve cache on any uncertain write. |
 | Concurrent reads/writes | Upload thread setting and API code exist. Wrapper docs report server-side copy may be asynchronous and concurrent copies may fail as unfinished tasks. | No stress/concurrency testing. |
 | Windows mount | Official rclone supports Windows through WinFsp. Custom backend build must also include Windows mount support. | No backend-enabled Windows build or mount tested. Candidate release asset/build flags unverified. |
@@ -86,5 +92,5 @@ The current [`morluto/rea`](https://github.com/morluto/rea) project is an MIT-li
 1. Choose and pin an exact backend source commit and record its license/notices.
 2. Resolve or guard the credential disclosure path and test logging with synthetic values.
 3. Produce a reproducible Windows build containing the backend and `cmount` support; verify `rclone config providers` reports `terabox` before any authentication.
-4. Obtain a user-confirmed account login flow that does not require asking the user to paste a cookie into chat or a script, and document secure local session storage/renewal behavior.
+4. For full-drive scope, obtain a user-confirmed login flow that does not require copying cookies into chat or scripts, and document secure local session storage/renewal. If official Open API credentials are available, assess its assigned-folder scope as a separate provider rather than assuming it can expose the existing root.
 5. Only then proceed to an actual read-only mount and File Explorer test. No account credential is needed to continue source/build work; any later interactive account test must remain local to the user.
