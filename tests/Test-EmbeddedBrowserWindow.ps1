@@ -40,4 +40,39 @@ if (-not $props.UserDataFolder.Contains('NSCloudDrive_WV_TestProfile')) {
 }
 Write-Output '  [PASS] CoreWebView2CreationProperties configured successfully'
 
+# 4. Test TeraBox host validation
+$validHosts = @('terabox.com', 'www.terabox.com', 'dm.terabox.com', 'www.1024tera.com', 'terabox.app', '1024terabox.com', 'freeterabox.com')
+foreach ($vh in $validHosts) {
+    if (-not (Test-TeraBoxHost $vh)) {
+        throw "Expected host '$vh' to be recognized as valid TeraBox host"
+    }
+}
+
+$invalidHosts = @('google.com', 'accounts.google.com', 'not-terabox.com', 'terabox.com.attacker.com', '', '   ')
+foreach ($ih in $invalidHosts) {
+    if (Test-TeraBoxHost $ih) {
+        throw "Expected host '$ih' to be rejected as invalid TeraBox host"
+    }
+}
+Write-Output '  [PASS] TeraBox host validation verified'
+
+# 5. Test Wait-WpfTask non-blocking dispatcher task execution
+$completedTask = [System.Threading.Tasks.Task]::FromResult("done")
+if (-not (Wait-WpfTask -Task $completedTask -TimeoutMs 1000)) {
+    throw 'Expected Wait-WpfTask to immediately return true for completed task'
+}
+
+$asyncTask = [System.Threading.Tasks.Task]::Delay(150)
+$waitResult = Wait-WpfTask -Task $asyncTask -TimeoutMs 2000
+if (-not $waitResult) {
+    throw 'Expected Wait-WpfTask to pump dispatcher and complete async delay task'
+}
+
+$infiniteTask = [System.Threading.Tasks.TaskCompletionSource[bool]]::new().Task
+$timeoutResult = Wait-WpfTask -Task $infiniteTask -TimeoutMs 200
+if ($timeoutResult) {
+    throw 'Expected Wait-WpfTask to return false on timeout for incomplete task'
+}
+Write-Output '  [PASS] Wait-WpfTask non-blocking dispatcher pump verified'
+
 Write-Output 'All EmbeddedBrowserWindow tests passed.'
