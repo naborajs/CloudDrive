@@ -445,6 +445,7 @@ function Update-AllUIState {
         $userDisplay = if ($gdCheck.UserInfo.DisplayName) { $gdCheck.UserInfo.DisplayName } else { $gdCheck.UserInfo.EmailAddress }
         $mountInfo = if ($gdStatus.IsMounted) { "Mounted at $($gdStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
         $gdAccountText.Text = "Account: $userDisplay   •   $mountInfo"
+        $gdErrorText.Visibility = 'Collapsed'
 
         if ($gdCheck.UserInfo.QuotaTotal -gt 0) {
             $usedGb = [Math]::Round($gdCheck.UserInfo.QuotaUsed / 1GB, 2)
@@ -475,7 +476,13 @@ function Update-AllUIState {
         $gdConnectedActions.Visibility = 'Visible'
         $gdLetterCombo.IsEnabled = (-not $gdStatus.IsMounted)
     } else {
-        $gdAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        if ($gdCheck.State -eq 'AuthenticationExpired') {
+            $gdAccountText.Text = 'Session expired. Click Connect to re-authenticate with Google Drive.'
+            $gdErrorText.Text = if ($gdCheck.Error) { $gdCheck.Error } else { 'Google Drive session has expired.' }
+            $gdErrorText.Visibility = 'Visible'
+        } else {
+            $gdAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        }
         $gdStorageBar.Visibility = 'Collapsed'
         $gdQuotaText.Visibility = 'Collapsed'
 
@@ -495,6 +502,7 @@ function Update-AllUIState {
     if ($tbCheck.IsValid) {
         $mountInfo = if ($tbStatus.IsMounted) { "Mounted at $($tbStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
         $tbAccountText.Text = "Account: $($tbCheck.UserInfo.UserName)   •   $mountInfo"
+        $tbErrorText.Visibility = 'Collapsed'
 
         $tbQuotaText.Text = 'Full drive access verified via secure web session.'
         $tbQuotaText.Visibility = 'Visible'
@@ -513,7 +521,13 @@ function Update-AllUIState {
         $tbConnectedActions.Visibility = 'Visible'
         $tbLetterCombo.IsEnabled = (-not $tbStatus.IsMounted)
     } else {
-        $tbAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        if ($tbCheck.State -eq 'AuthenticationExpired') {
+            $tbAccountText.Text = 'Session expired. Click Connect to re-authenticate with TeraBox.'
+            $tbErrorText.Text = if ($tbCheck.Error) { $tbCheck.Error } else { 'TeraBox session has expired.' }
+            $tbErrorText.Visibility = 'Visible'
+        } else {
+            $tbAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        }
         $tbQuotaText.Visibility = 'Collapsed'
 
         $tbStatusPillText.Text = '● Disconnected'
