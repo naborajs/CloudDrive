@@ -48,6 +48,9 @@ Each commit changed one file and was pushed to `origin/main`:
 - `e71fa70` — qualify patched backend security status.
 - `0beef0f` — add read-only mount launcher.
 - `372738f` — document manual mount test.
+- `7431a93` — record read-only launcher checks.
+- `a916c3d` — document mount security boundaries.
+- `d3559c4` — link acceptance gates to the scripts.
 
 ## Required next evidence
 
