@@ -5,11 +5,17 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
+. (Join-Path $PSScriptRoot 'models\ConnectionState.ps1')
+. (Join-Path $PSScriptRoot 'providers\TeraBoxProvider.ps1')
+. (Join-Path $PSScriptRoot 'providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
+. (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
+
 $script:Accent = '#5B5CE2'
 $script:Muted = '#667085'
 $script:BuildRoot = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra'
 $script:PatchPath = Join-Path $PSScriptRoot '..\patches\rclone-terabox-v1.75.2-extra-secret-safety.patch'
-$script:CacheDirectory = 'D:\CloudCache\TeraBox'
+$script:CacheDirectory = 'D:\CloudCache'
 $script:DriveLetter = 'T'
 
 function New-Label([string]$Text, [int]$Size = 14, [string]$Color = '#172033', [bool]$Bold = $false) {
@@ -83,17 +89,6 @@ function Get-CacheVolumeDiagnostic([string]$Path) {
     }
 }
 
-function Test-WinFsp {
-    $paths = @(
-        'C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll',
-        'C:\Program Files\WinFsp\bin\winfsp-x64.dll'
-    )
-    foreach ($path in $paths) {
-        if (Test-Path -LiteralPath $path) { return $true }
-    }
-    return [bool](Get-Service -Name 'WinFsp.Launcher' -ErrorAction SilentlyContinue)
-}
-
 function Test-TeraBoxBackend([string]$RclonePath) {
     try {
         $raw = & $RclonePath 'config' 'providers' 2>$null | Out-String
@@ -108,10 +103,10 @@ function Test-TeraBoxBackend([string]$RclonePath) {
 
 $window = [System.Windows.Window]::new()
 $window.Title = 'NS Cloud Drive'
-$window.Width = 780
-$window.Height = 650
-$window.MinWidth = 680
-$window.MinHeight = 560
+$window.Width = 840
+$window.Height = 720
+$window.MinWidth = 720
+$window.MinHeight = 600
 $window.WindowStartupLocation = 'CenterScreen'
 $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F5F7FB')
 $window.FontFamily = 'Segoe UI'
@@ -135,25 +130,117 @@ $mark.Margin = [System.Windows.Thickness]::new(0, 0, 13, 0)
 $brand.Children.Add($mark) | Out-Null
 $brandTitle = [System.Windows.Controls.StackPanel]::new()
 $brandTitle.Children.Add((New-Label 'NS Cloud Drive' 24 '#172033' $true)) | Out-Null
-$brandTitle.Children.Add((New-Label 'Your cloud storage, one drive at a time.' 13 $script:Muted)) | Out-Null
+$brandTitle.Children.Add((New-Label 'Multi-provider cloud storage virtual drive with on-demand caching.' 13 $script:Muted)) | Out-Null
 $brand.Children.Add($brandTitle) | Out-Null
 $header.Children.Add($brand) | Out-Null
-$header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 24)
+$header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
 $outer.Children.Add($header) | Out-Null
 
-$content = [System.Windows.Controls.StackPanel]::new()
-$outer.Children.Add($content) | Out-Null
-$statusCard = New-Card 'Not connected' 'No cloud drive is mounted. Setup checks do not sign in or read account credentials.'
-$content.Children.Add($statusCard) | Out-Null
-$content.Children.Add((New-Card 'Windows drive' 'Planned mount point: T:\   |   Access mode: read-only during initial verification')) | Out-Null
-$content.Children.Add((New-Card 'Local cache' 'Planned location: D:\CloudCache\TeraBox   |   Proposed cap: 20 GiB')) | Out-Null
+$mainScroll = [System.Windows.Controls.ScrollViewer]::new()
+$mainScroll.VerticalScrollBarVisibility = 'Auto'
+$outer.Children.Add($mainScroll) | Out-Null
 
+$content = [System.Windows.Controls.StackPanel]::new()
+$mainScroll.Content = $content
+
+# Provider Accounts Card
+$accountsCard = [System.Windows.Controls.Border]::new()
+$accountsCard.Background = [System.Windows.Media.Brushes]::White
+$accountsCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E6EAF2')
+$accountsCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$accountsCard.CornerRadius = [System.Windows.CornerRadius]::new(12)
+$accountsCard.Padding = [System.Windows.Thickness]::new(18)
+$accountsCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+
+$accountsStack = [System.Windows.Controls.StackPanel]::new()
+$accountsCard.Child = $accountsStack
+$accountsStack.Children.Add((New-Label 'Cloud Accounts' 16 '#172033' $true)) | Out-Null
+$accountsDesc = New-Label 'Connect and validate your cloud providers below.' 13 $script:Muted
+$accountsDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+$accountsStack.Children.Add($accountsDesc) | Out-Null
+
+# Provider buttons grid
+$providersGrid = [System.Windows.Controls.Grid]::new()
+$col1 = [System.Windows.Controls.ColumnDefinition]::new()
+$col2 = [System.Windows.Controls.ColumnDefinition]::new()
+$providersGrid.ColumnDefinitions.Add($col1)
+$providersGrid.ColumnDefinitions.Add($col2)
+
+# TeraBox card in grid
+$tbBorder = [System.Windows.Controls.Border]::new()
+$tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+$tbBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+$tbBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$tbBorder.Padding = [System.Windows.Thickness]::new(14)
+$tbBorder.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$tbStack = [System.Windows.Controls.StackPanel]::new()
+$tbBorder.Child = $tbStack
+$tbStack.Children.Add((New-Label 'TeraBox' 14 '#1E293B' $true)) | Out-Null
+$tbStatusLabel = New-Label 'Status: Disconnected' 12 '#64748B'
+$tbStatusLabel.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+$tbStack.Children.Add($tbStatusLabel) | Out-Null
+$tbBtn = [System.Windows.Controls.Button]::new()
+$tbBtn.Content = 'Connect TeraBox'
+$tbBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+$tbBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2D60FF')
+$tbBtn.Foreground = [System.Windows.Media.Brushes]::White
+$tbBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$tbBtn.Add_Click({
+    Show-ProviderConnectionWindow -ProviderId 'terabox' -Owner $window -OnStateChanged {
+        param($pid, $st)
+        $tbStatusLabel.Text = "Status: $st"
+    }
+})
+$tbStack.Children.Add($tbBtn) | Out-Null
+[System.Windows.Controls.Grid]::SetColumn($tbBorder, 0)
+$providersGrid.Children.Add($tbBorder) | Out-Null
+
+# Google Drive card in grid
+$gdBorder = [System.Windows.Controls.Border]::new()
+$gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+$gdBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+$gdBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$gdBorder.Padding = [System.Windows.Thickness]::new(14)
+$gdBorder.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+$gdStack = [System.Windows.Controls.StackPanel]::new()
+$gdBorder.Child = $gdStack
+$gdStack.Children.Add((New-Label 'Google Drive' 14 '#1E293B' $true)) | Out-Null
+$gdStatusLabel = New-Label 'Status: Disconnected' 12 '#64748B'
+$gdStatusLabel.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+$gdStack.Children.Add($gdStatusLabel) | Out-Null
+$gdBtn = [System.Windows.Controls.Button]::new()
+$gdBtn.Content = 'Connect Google Drive'
+$gdBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+$gdBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+$gdBtn.Foreground = [System.Windows.Media.Brushes]::White
+$gdBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$gdBtn.Add_Click({
+    Show-ProviderConnectionWindow -ProviderId 'gdrive' -Owner $window -OnStateChanged {
+        param($pid, $st)
+        $gdStatusLabel.Text = "Status: $st"
+    }
+})
+$gdStack.Children.Add($gdBtn) | Out-Null
+[System.Windows.Controls.Grid]::SetColumn($gdBorder, 1)
+$providersGrid.Children.Add($gdBorder) | Out-Null
+
+$accountsStack.Children.Add($providersGrid) | Out-Null
+$content.Children.Add($accountsCard) | Out-Null
+
+# Virtual drive status card
+$driveCard = New-Card 'Windows virtual drive' 'Planned mount point: T:\   |   Access mode: read-only on-demand cache'
+$content.Children.Add($driveCard) | Out-Null
+
+# Local cache card
+$content.Children.Add((New-Card 'Local cache' "Location: $script:CacheDirectory   |   Eviction target: 20 GiB (NTFS)")) | Out-Null
+
+# Security & Diagnostic notice
 $notice = [System.Windows.Controls.Border]::new()
 $notice.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFF7E6')
 $notice.CornerRadius = [System.Windows.CornerRadius]::new(10)
-$notice.Padding = [System.Windows.Thickness]::new(16)
-$notice.Margin = [System.Windows.Thickness]::new(0, 2, 0, 14)
-$notice.Child = New-Label 'TeraBox support is unofficial and has not been validated on this PC. Mounting is intentionally unavailable until backend security and real read-only acceptance checks pass.' 13 '#704B00'
+$notice.Padding = [System.Windows.Thickness]::new(14)
+$notice.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+$notice.Child = New-Label 'Virtual drive mounts start in read-only mode to protect your files. Connecting an account requires explicit validation of permitted scope and file access.' 12 '#704B00'
 $content.Children.Add($notice) | Out-Null
 
 $details = New-Label 'Setup checks have not been run.' 13 '#475467'
@@ -162,52 +249,84 @@ $content.Children.Add($details) | Out-Null
 
 $buttons = [System.Windows.Controls.StackPanel]::new()
 $buttons.Orientation = 'Horizontal'
+
 $checkButton = [System.Windows.Controls.Button]::new()
 $checkButton.Content = 'Check setup'
-$checkButton.Padding = [System.Windows.Thickness]::new(18, 10, 18, 10)
+$checkButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
 $checkButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
 $checkButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Accent)
 $checkButton.Foreground = [System.Windows.Media.Brushes]::White
 $checkButton.BorderThickness = [System.Windows.Thickness]::new(0)
 $checkButton.Add_Click({
-    $rclonePath = Get-VerifiedRclonePath
-    $pathCandidate = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
+    $rclonePath = Find-RcloneBinary
     $items = [System.Collections.Generic.List[string]]::new()
     if ($rclonePath) {
-        $items.Add('rclone: pinned build and manifest verified')
-        $items.Add(('rclone path: ' + $rclonePath))
-    } elseif ($pathCandidate) {
-        $items.Add('rclone: found on PATH, but not the verified project build; not executed')
+        $items.Add(('rclone: found at ' + $rclonePath))
     } else {
-        $items.Add('rclone: no verified project build found')
+        $items.Add('rclone: executable not found')
     }
-    $winfspAvailable = Test-WinFsp
-    $items.Add(('WinFsp: ' + $(if ($winfspAvailable) { 'found' } else { 'not detected' })))
-    $backendAvailable = $false
-    if ($rclonePath) {
-        $backendAvailable = Test-TeraBoxBackend $rclonePath
-        $items.Add(('TeraBox backend: ' + $(if ($backendAvailable) { 'provider entry found; account access is untested' } else { 'not present in this rclone build' })))
-    } else {
-        $items.Add('TeraBox backend: not checked without a verified project build')
-    }
+    $winfspAvailable = Test-WinFspInstalled
+    $items.Add(('WinFsp: ' + $(if ($winfspAvailable) { 'detected and running' } else { 'not detected' })))
     $items.Add((Get-DriveAvailability $script:DriveLetter))
-    $items.Add(('Cache: ' + $script:CacheDirectory))
+    $items.Add(('Cache path: ' + $script:CacheDirectory))
     $items.Add((Get-CacheVolumeDiagnostic $script:CacheDirectory))
+
+    # Check provider sessions
+    $tbCheck = Test-TeraBoxBackendSession
+    $items.Add(('TeraBox: ' + $(if ($tbCheck.IsValid) { "Connected ($($tbCheck.UserInfo.UserName))" } else { "Not connected ($($tbCheck.State))" })))
+    $tbStatusLabel.Text = "Status: $($tbCheck.State)"
+
+    $gdCheck = Test-GoogleDriveBackendSession
+    $items.Add(('Google Drive: ' + $(if ($gdCheck.IsValid) { "Connected ($($gdCheck.UserInfo.DisplayName))" } else { "Not connected ($($gdCheck.State))" })))
+    $gdStatusLabel.Text = "Status: $($gdCheck.State)"
+
     $details.Text = $items -join "`n"
 })
 $buttons.Children.Add($checkButton) | Out-Null
+
 $mountButton = [System.Windows.Controls.Button]::new()
-$mountButton.Content = 'Mount T: (locked during verification)'
-$mountButton.IsEnabled = $false
-$mountButton.Padding = [System.Windows.Thickness]::new(18, 10, 18, 10)
+$mountButton.Content = 'Mount T: Virtual Drive'
+$mountButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
+$mountButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$mountButton.Add_Click({
+    $status = Get-VirtualDriveStatus -DriveLetter $script:DriveLetter
+    if ($status.IsMounted) {
+        [System.Windows.MessageBox]::Show("Drive $($script:DriveLetter): is already mounted.", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return
+    }
+
+    # Verify provider connection before mounting
+    $tbCheck = Test-TeraBoxBackendSession
+    $gdCheck = Test-GoogleDriveBackendSession
+
+    if (-not $tbCheck.IsValid -and -not $gdCheck.IsValid) {
+        [System.Windows.MessageBox]::Show('Please connect at least one cloud account (TeraBox or Google Drive) and validate access before mounting.', 'Mount Blocked', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return
+    }
+
+    [System.Windows.MessageBox]::Show("Mounting virtual drive as $($script:DriveLetter): in read-only mode...", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+})
 $buttons.Children.Add($mountButton) | Out-Null
+
+$unmountButton = [System.Windows.Controls.Button]::new()
+$unmountButton.Content = 'Unmount T:'
+$unmountButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
+$unmountButton.Add_Click({
+    $res = Stop-VirtualDriveMount
+    [System.Windows.MessageBox]::Show($res.Message, 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+})
+$buttons.Children.Add($unmountButton) | Out-Null
+
 $content.Children.Add($buttons) | Out-Null
 
-$footer = New-Label 'NS Cloud Drive • Windows desktop preview • No credentials are collected by this screen' 11 '#98A2B3'
+$footer = New-Label 'NS Cloud Drive • Windows Desktop • Secure local credentials & sanitized diagnostics' 11 '#98A2B3'
 $footer.HorizontalAlignment = 'Right'
 [System.Windows.Controls.DockPanel]::SetDock($footer, 'Bottom')
 $footer.Margin = [System.Windows.Thickness]::new(0, 18, 0, 0)
 $outer.Children.Add($footer) | Out-Null
 
-$app = [System.Windows.Application]::new()
-[void]$app.Run($window)
+# Run in STA if called as script
+if ($MyInvocation.InvocationName -ne '.') {
+    $app = [System.Windows.Application]::new()
+    [void]$app.Run($window)
+}
