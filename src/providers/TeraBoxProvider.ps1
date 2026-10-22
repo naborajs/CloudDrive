@@ -3,10 +3,34 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 
-$script:TeraBoxCredentialDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials'
-$script:TeraBoxCredentialPath = Join-Path $script:TeraBoxCredentialDirectory 'terabox-session.xml'
+function Get-TeraBoxCredentialDirectory {
+    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+}
+
+function Get-TeraBoxCredentialFilePath {
+    return (Join-Path (Get-TeraBoxCredentialDirectory) 'terabox-session.xml')
+}
+
 $script:TeraBoxWebUrl = 'https://www.terabox.com/'
 $script:TeraBoxAppId = '250528'
+
+function Set-StrictTeraBoxCredentialAcl([string]$Path) {
+    try {
+        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($userSid, $systemSid)) {
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+            [void]$acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch { }
+}
 
 function Get-TeraBoxProviderInfo {
     return [ordered]@{
@@ -35,12 +59,13 @@ function Get-TeraBoxProviderInfo {
 }
 
 function Get-TeraBoxStoredSession {
-    if (-not (Test-Path -LiteralPath $script:TeraBoxCredentialPath -PathType Leaf)) {
+    $credPath = Get-TeraBoxCredentialFilePath
+    if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
         return $null
     }
 
     try {
-        $cred = Import-Clixml -LiteralPath $script:TeraBoxCredentialPath
+        $cred = Import-Clixml -LiteralPath $credPath
         if ($cred -is [System.Management.Automation.PSCredential]) {
             $bstr = [IntPtr]::Zero
             try {
@@ -49,7 +74,7 @@ function Get-TeraBoxStoredSession {
                 return [ordered]@{
                     Type = $cred.UserName
                     Secret = $secret
-                    StoredTime = (Get-Item -LiteralPath $script:TeraBoxCredentialPath).LastWriteTimeUtc
+                    StoredTime = (Get-Item -LiteralPath $credPath).LastWriteTimeUtc
                 }
             } finally {
                 if ($bstr -ne [IntPtr]::Zero) {
@@ -69,36 +94,28 @@ function Save-TeraBoxSession([string]$Type, [string]$Secret) {
         throw 'Cannot store empty TeraBox session secret.'
     }
 
-    if (-not (Test-Path -LiteralPath $script:TeraBoxCredentialDirectory)) {
-        New-Item -ItemType Directory -Path $script:TeraBoxCredentialDirectory | Out-Null
+    $credDir = Get-TeraBoxCredentialDirectory
+    $credPath = Get-TeraBoxCredentialFilePath
+
+    if (-not (Test-Path -LiteralPath $credDir)) {
+        New-Item -ItemType Directory -Path $credDir | Out-Null
+        Set-StrictTeraBoxCredentialAcl -Path $credDir
     }
 
     $secString = ConvertTo-SecureString -String $Secret -AsPlainText -Force
     $credential = [System.Management.Automation.PSCredential]::new($Type, $secString)
     try {
-        Export-Clixml -InputObject $credential -LiteralPath $script:TeraBoxCredentialPath
-        # Restrict ACL to current user and SYSTEM
-        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $acl = [System.Security.AccessControl.FileSecurity]::new()
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($sid in @($userSid, $systemSid)) {
-            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [System.Security.AccessControl.FileSystemRights]::FullControl,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
-            [void]$acl.AddAccessRule($rule)
-        }
-        Set-Acl -LiteralPath $script:TeraBoxCredentialPath -AclObject $acl
+        Export-Clixml -InputObject $credential -LiteralPath $credPath
+        Set-StrictTeraBoxCredentialAcl -Path $credPath
     } finally {
         $secString.Dispose()
     }
 }
 
 function Remove-TeraBoxSession {
-    if (Test-Path -LiteralPath $script:TeraBoxCredentialPath) {
-        Remove-Item -LiteralPath $script:TeraBoxCredentialPath -Force -ErrorAction SilentlyContinue
+    $credPath = Get-TeraBoxCredentialFilePath
+    if (Test-Path -LiteralPath $credPath) {
+        Remove-Item -LiteralPath $credPath -Force -ErrorAction SilentlyContinue
     }
 }
 
