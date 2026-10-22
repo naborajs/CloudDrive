@@ -27,7 +27,7 @@ Do not attempt authentication if any of the security/build checks fail.
 
 If the reviewed backend only supports cookie copying, stop and report the limitation instead of asking the user to paste a cookie.
 
-**Current blocker:** the pinned backend still documents cookie-based session configuration; no approved local sign-in or session-store flow has been established. Do not proceed to Gate 2 by manually copying browser cookies.
+**Current blocker:** the pinned backend still documents cookie-based session configuration; no approved local sign-in or session-store flow has been established. The third-party QR helper imitates browser headers, extracts `ndus`, and stores it through ordinary rclone config; it does not meet this project's no-browser-impersonation and secret-handling requirements. Do not run it or proceed to Gate 2 by manually copying browser cookies.
 
 ## Gate 2: read-only mount
 
