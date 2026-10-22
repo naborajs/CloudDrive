@@ -20,6 +20,261 @@ function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#
     return $block
 }
 
+function Show-GoogleClientConfigModal([System.Windows.Window]$Owner = $null) {
+    $cfgWin = [System.Windows.Window]::new()
+    $cfgWin.Title = 'Google Drive OAuth Setup'
+    $cfgWin.Width = 500
+    $cfgWin.Height = 260
+    $cfgWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $cfgWin.Owner = $Owner }
+    $cfgWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+    $cfgWin.ResizeMode = 'NoResize'
+
+    $stack = [System.Windows.Controls.StackPanel]::new()
+    $stack.Margin = [System.Windows.Thickness]::new(24)
+    $cfgWin.Content = $stack
+
+    $title = New-UIElement-Label 'Google Drive OAuth Client ID' 16 '#0F172A' $true
+    $stack.Children.Add($title) | Out-Null
+
+    $desc = New-UIElement-Label 'Enter your Google Cloud OAuth Client ID (or import a client_secret.json file):' 12 '#64748B'
+    $desc.Margin = [System.Windows.Thickness]::new(0, 6, 0, 12)
+    $stack.Children.Add($desc) | Out-Null
+
+    $txtClientId = [System.Windows.Controls.TextBox]::new()
+    $txtClientId.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtClientId.FontSize = 12
+    $txtClientId.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $existing = Get-GoogleOAuthConfig
+    if ($existing.ClientId -and -not $existing.ClientId.Contains('YOUR_GOOGLE_CLIENT_ID')) {
+        $txtClientId.Text = $existing.ClientId
+    }
+    $stack.Children.Add($txtClientId) | Out-Null
+
+    $btnRow = [System.Windows.Controls.DockPanel]::new()
+    $stack.Children.Add($btnRow) | Out-Null
+
+    $browseBtn = [System.Windows.Controls.Button]::new()
+    $browseBtn.Content = 'Import JSON...'
+    $browseBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    [System.Windows.Controls.DockPanel]::SetDock($browseBtn, 'Left')
+    $browseBtn.Add_Click({
+        $ofd = [Microsoft.Win32.OpenFileDialog]::new()
+        $ofd.Filter = 'JSON Credentials (*.json)|*.json|All Files (*.*)|*.*'
+        $ofd.Title = 'Select Google OAuth client_secret.json'
+        if ($ofd.ShowDialog($cfgWin) -eq $true) {
+            try {
+                $imported = Import-GoogleOAuthConfigFile -SourceFilePath $ofd.FileName
+                if ($imported.ClientId) {
+                    $txtClientId.Text = $imported.ClientId
+                }
+            } catch {
+                [System.Windows.MessageBox]::Show("Could not import: $($_.Exception.Message)", 'Import Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+        }
+    })
+    $btnRow.Children.Add($browseBtn) | Out-Null
+
+    $rightBtns = [System.Windows.Controls.StackPanel]::new()
+    $rightBtns.Orientation = 'Horizontal'
+    [System.Windows.Controls.DockPanel]::SetDock($rightBtns, 'Right')
+    $btnRow.Children.Add($rightBtns) | Out-Null
+
+    $saveBtn = [System.Windows.Controls.Button]::new()
+    $saveBtn.Content = 'Save & Continue'
+    $saveBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+    $saveBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+    $saveBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $saveBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $saveBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+
+    $cancelBtn = [System.Windows.Controls.Button]::new()
+    $cancelBtn.Content = 'Cancel'
+    $cancelBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $cancelBtn.Add_Click({ $cfgWin.Close() })
+
+    $script:CfgSuccess = $false
+    $saveBtn.Add_Click({
+        $val = $txtClientId.Text.Trim()
+        if (-not [string]::IsNullOrEmpty($val)) {
+            $configDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+            if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
+            $cfgFile = Join-Path $configDir 'google-oauth.json'
+            $json = [ordered]@{
+                installed = [ordered]@{
+                    client_id = $val
+                    auth_uri = 'https://accounts.google.com/o/oauth2/v2/auth'
+                    token_uri = 'https://oauth2.googleapis.com/token'
+                }
+            } | ConvertTo-Json -Depth 4
+            Set-Content -LiteralPath $cfgFile -Value $json -Force -Encoding UTF8
+            $script:CfgSuccess = $true
+            $cfgWin.Close()
+        }
+    })
+
+    $rightBtns.Children.Add($saveBtn) | Out-Null
+    $rightBtns.Children.Add($cancelBtn) | Out-Null
+
+    [void]$cfgWin.ShowDialog()
+    return [ordered]@{ Success = $script:CfgSuccess }
+}
+
+function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]$OnSettingsChanged = $null) {
+    $settings = Get-NSCloudDriveSettings
+
+    $setWin = [System.Windows.Window]::new()
+    $setWin.Title = 'Settings & Preferences - NS Cloud Drive'
+    $setWin.Width = 520
+    $setWin.Height = 440
+    $setWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $setWin.Owner = $Owner }
+    $setWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
+    $setWin.ResizeMode = 'NoResize'
+
+    $dock = [System.Windows.Controls.DockPanel]::new()
+    $dock.Margin = [System.Windows.Thickness]::new(20)
+    $setWin.Content = $dock
+
+    $hdr = New-UIElement-Label 'Settings & Local Cache' 18 '#0F172A' $true
+    [System.Windows.Controls.DockPanel]::SetDock($hdr, 'Top')
+    $hdr.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $dock.Children.Add($hdr) | Out-Null
+
+    $closeBtn = [System.Windows.Controls.Button]::new()
+    $closeBtn.Content = 'Done'
+    $closeBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
+    $closeBtn.HorizontalAlignment = 'Right'
+    $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $closeBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $closeBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($closeBtn, 'Bottom')
+    $closeBtn.Add_Click({ $setWin.Close() })
+    $dock.Children.Add($closeBtn) | Out-Null
+
+    $stack = [System.Windows.Controls.StackPanel]::new()
+    $dock.Children.Add($stack) | Out-Null
+
+    # Startup & Background Group
+    $bgCard = [System.Windows.Controls.Border]::new()
+    $bgCard.Background = [System.Windows.Media.Brushes]::White
+    $bgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $bgCard.BorderThickness = [System.Windows.Thickness]::new(1)
+    $bgCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $bgCard.Padding = [System.Windows.Thickness]::new(14)
+    $bgCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $bgStack = [System.Windows.Controls.StackPanel]::new()
+    $bgCard.Child = $bgStack
+
+    $bgStack.Children.Add((New-UIElement-Label 'Windows Integration & Background' 14 '#1E293B' $true)) | Out-Null
+
+    $chkStartup = [System.Windows.Controls.CheckBox]::new()
+    $chkStartup.Content = 'Start NS Cloud Drive with Windows (User logon)'
+    $chkStartup.IsChecked = (Test-WindowsStartupEnabled)
+    $chkStartup.Margin = [System.Windows.Thickness]::new(0, 10, 0, 8)
+    $chkStartup.Add_Click({
+        $checked = ($chkStartup.IsChecked -eq $true)
+        Set-WindowsStartupEnabled -Enable $checked
+        $settings.AutoStartWithWindows = $checked
+        Set-NSCloudDriveSettings $settings
+        if ($OnSettingsChanged) { & $OnSettingsChanged }
+    })
+    $bgStack.Children.Add($chkStartup) | Out-Null
+
+    $chkAutoMount = [System.Windows.Controls.CheckBox]::new()
+    $chkAutoMount.Content = 'Automatically mount connected drives on startup'
+    $chkAutoMount.IsChecked = $settings.AutoMountDrives
+    $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $chkAutoMount.Add_Click({
+        $settings.AutoMountDrives = ($chkAutoMount.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $settings
+        if ($OnSettingsChanged) { & $OnSettingsChanged }
+    })
+    $bgStack.Children.Add($chkAutoMount) | Out-Null
+
+    $chkTray = [System.Windows.Controls.CheckBox]::new()
+    $chkTray.Content = 'Minimize to System Tray when closing the window'
+    $chkTray.IsChecked = $settings.MinimizeToTrayOnClose
+    $chkTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+    $chkTray.Add_Click({
+        $settings.MinimizeToTrayOnClose = ($chkTray.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $settings
+        if ($OnSettingsChanged) { & $OnSettingsChanged }
+    })
+    $bgStack.Children.Add($chkTray) | Out-Null
+    $stack.Children.Add($bgCard) | Out-Null
+
+    # Cache Group
+    $cacheCard = [System.Windows.Controls.Border]::new()
+    $cacheCard.Background = [System.Windows.Media.Brushes]::White
+    $cacheCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $cacheCard.BorderThickness = [System.Windows.Thickness]::new(1)
+    $cacheCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $cacheCard.Padding = [System.Windows.Thickness]::new(14)
+    $cacheStack = [System.Windows.Controls.StackPanel]::new()
+    $cacheCard.Child = $cacheStack
+
+    $cacheStack.Children.Add((New-UIElement-Label 'Local Cache Folder' 14 '#1E293B' $true)) | Out-Null
+
+    $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
+    $cStats = Get-CacheUsageStatistics -CacheDirectory $cacheDir
+    $cacheInfo = New-UIElement-Label "Directory: $cacheDir`nUsage: $($cStats.UsedFormatted) / $($cStats.TargetMaxFormatted) limit ($($cStats.VolumeFreeFormatted) free on volume)" 12 '#64748B'
+    $cacheInfo.Margin = [System.Windows.Thickness]::new(0, 6, 0, 10)
+    $cacheStack.Children.Add($cacheInfo) | Out-Null
+
+    $openCacheBtn = [System.Windows.Controls.Button]::new()
+    $openCacheBtn.Content = 'Open Cache Folder in Explorer'
+    $openCacheBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $openCacheBtn.HorizontalAlignment = 'Left'
+    $openCacheBtn.Add_Click({
+        if (-not (Test-Path -LiteralPath $cacheDir)) {
+            New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+        }
+        [System.Diagnostics.Process]::Start('explorer.exe', $cacheDir) | Out-Null
+    })
+    $cacheStack.Children.Add($openCacheBtn) | Out-Null
+    $stack.Children.Add($cacheCard) | Out-Null
+
+    [void]$setWin.ShowDialog()
+}
+
+function Show-DiagnosticsModal([System.Windows.Window]$Owner = $null) {
+    $settings = Get-NSCloudDriveSettings
+    $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
+    $rclonePath = Find-RcloneBinary
+    $winfspAvailable = Test-WinFspInstalled
+    $gDriveLetter = Get-PreferredDriveLetter 'gdrive'
+    $tLetter = Get-PreferredDriveLetter 'terabox'
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    $items.Add("==================================================")
+    $items.Add("NS CLOUD DRIVE - SYSTEM DIAGNOSTICS")
+    $items.Add("Time: $([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))")
+    $items.Add("==================================================")
+    $items.Add("")
+    $items.Add("[Filesystem Engine]")
+    $items.Add("WinFsp Service: " + $(if ($winfspAvailable) { "Running (Installed)" } else { "NOT DETECTED" }))
+    $items.Add("Rclone Executable: " + $(if ($rclonePath) { $rclonePath } else { "Not found" }))
+    $items.Add("")
+    $items.Add("[Virtual Drive Letters]")
+    $items.Add("Google Drive preferred letter: $gDriveLetter`: " + $(if (Test-DriveLetterAvailable $gDriveLetter) { "Available" } else { "Occupied / In Use" }))
+    $items.Add("TeraBox preferred letter: $tLetter`: " + $(if (Test-DriveLetterAvailable $tLetter) { "Available" } else { "Occupied / In Use" }))
+    $items.Add("")
+    $items.Add("[Local Cache Storage]")
+    $items.Add("Path: $cacheDir")
+    $cStats = Get-CacheUsageStatistics -CacheDirectory $cacheDir
+    $items.Add("Usage: $($cStats.UsedFormatted) / $($cStats.TargetMaxFormatted) soft limit")
+    $items.Add("Volume Free: $($cStats.VolumeFreeFormatted)")
+    $items.Add("")
+    $items.Add("[Authentication State]")
+    $tbCheck = Test-TeraBoxBackendSession
+    $items.Add("TeraBox Session: " + $(if ($tbCheck.IsValid) { "Connected ($($tbCheck.UserInfo.UserName))" } else { "Disconnected ($($tbCheck.Error))" }))
+    $gdCheck = Test-GoogleDriveBackendSession
+    $items.Add("Google Drive Session: " + $(if ($gdCheck.IsValid) { "Connected ($($gdCheck.UserInfo.DisplayName))" } else { "Disconnected ($($gdCheck.Error))" }))
+
+    Show-DiagnosticsDialog -Title 'System Diagnostics' -DiagnosticsContent ($items -join "`n") -Owner $Owner
+}
+
 function Show-GoogleSetupInstructionsDialog([System.Windows.Window]$Owner = $null) {
     $instructions = @"
 GOOGLE DRIVE OAUTH 2.0 SETUP GUIDE FOR NS CLOUD DRIVE
@@ -39,7 +294,7 @@ To connect Google Drive using official, secure OAuth 2.0 with PKCE (RFC 8252):
    • User Type: Select 'External' (for standard personal Google accounts).
    • App name: 'NS Cloud Drive' (enter your email under User support and Developer contact).
    • Scopes: Add '.../auth/drive.readonly'.
-   • Test Users: Add your Google account email under 'Test users' (required while publishing status is 'Testing').
+   • Test Users: Add your Google account email under 'Test users'.
    • Click Save and Continue.
 
 4. Create OAuth 2.0 Desktop Credentials:
@@ -50,48 +305,27 @@ To connect Google Drive using official, secure OAuth 2.0 with PKCE (RFC 8252):
 
 5. Configure NS Cloud Drive:
    • Click 'DOWNLOAD JSON' in Google Cloud Console.
-   • Copy the downloaded JSON file into:
+   • Click 'Import JSON...' in NS Cloud Drive, or drop the downloaded client_secret_*.json into:
      $env:LOCALAPPDATA\NSCloudDrive\config\google-oauth.json
-     (Or drop the downloaded 'client_secret_*.json' directly into that folder).
-   • Alternatively, set the environment variable:
-     setx GOOGLE_CLIENT_ID "your-client-id.apps.googleusercontent.com"
-
-Note: Native desktop apps use PKCE (RFC 7636); a client secret is NOT required.
 "@
     Show-DiagnosticsDialog -Title 'Google Drive Setup' -DiagnosticsContent $instructions -Owner $Owner
 }
 
 function Show-TeraBoxArchitectureDetailsDialog([System.Windows.Window]$Owner = $null) {
     $content = @"
-TERABOX AUTHENTICATION ARCHITECTURE & FEASIBILITY REPORT
+TERABOX AUTHENTICATION ARCHITECTURE REPORT
 
-1. Why Web Sign-in Does Not Auto-Connect the Desktop Virtual Drive:
-   • Interactive web login at terabox.com is proprietary and session-based.
-   • It sets HttpOnly cookies (such as 'ndus') scoped to the browser domain.
-   • Unlike Google OAuth 2.0 (RFC 8252), TeraBox has NO loopback redirect or
-     system-browser authorization callback for desktop applications.
-   • Modern browsers and Windows security boundaries prevent external desktop
-     applications from reading or extracting browser cookie databases.
-   • Scraped cookie extraction, memory interception, or CAPTCHA bypass are
-     expressly prohibited by NS Cloud Drive security rules.
+1. Embedded Sign-In Flow:
+   • NS Cloud Drive provides a private Microsoft Edge WebView2 browser profile.
+   • When you sign in to TeraBox with your account, NS Cloud Drive verifies the
+     authenticated session against the backend and secures it using Windows DPAPI.
+   • Temporary browsing data is cleaned after session capture.
 
-2. Why the Official TeraBox Open Platform API Cannot Mount Existing Files:
-   • TeraBox operates an Open Platform (open.terabox.com) with OAuth 2.0.
-   • Documented directory boundary: The official API is strictly restricted to:
-     '/From: Other Applications/<App_Name>/'
-   • It has NO scope, permission, or capability to list, read, or mount files
-     stored in the user's personal drive root ('/') or existing folders.
-   • Creating an application requires manual developer approval from TeraBox.
-
-3. Current Status & Smallest Legitimate Next Step:
-   • The unofficial community backend (gulp79/rclone-extra) operates only when
-     an existing session ('ndus') is manually provided into rclone's encrypted
-     configuration or stored in local DPAPI.
-   • The application will NEVER pretend that opening a website connects the drive.
-   • If a valid session is provisioned into DPAPI or rclone, clicking 'Test Stored
-     Session' will validate it against the backend and verify file listing.
+2. Access Scope:
+   • Web session authentication provides access to your personal drive root ('/').
+   • Official Open Platform API is limited to app-specific folders.
 "@
-    Show-DiagnosticsDialog -Title 'TeraBox Architecture & Limitations' -DiagnosticsContent $content -Owner $Owner
+    Show-DiagnosticsDialog -Title 'TeraBox Architecture' -DiagnosticsContent $content -Owner $Owner
 }
 
 function Show-DiagnosticsDialog([string]$Title, [string]$DiagnosticsContent, [System.Windows.Window]$Owner = $null) {
@@ -133,7 +367,11 @@ function Show-DiagnosticsDialog([string]$Title, [string]$DiagnosticsContent, [Sy
     [void]$diagWindow.ShowDialog()
 }
 
-function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Window]$Owner = $null, [scriptblock]$OnStateChanged = $null) {
+function Show-ProviderConnectionWindow(
+    [string]$ProviderId,
+    [System.Windows.Window]$Owner = $null,
+    [scriptblock]$OnStateChanged = $null
+) {
     $providerInfo = $null
     if ($ProviderId -eq 'terabox') {
         $providerInfo = Get-TeraBoxProviderInfo
@@ -144,21 +382,21 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     }
 
     $win = [System.Windows.Window]::new()
-    $win.Title = "Connect $($providerInfo.Name) - NS Cloud Drive"
-    $win.Width = 720
-    $win.Height = 620
-    $win.MinWidth = 640
-    $win.MinHeight = 540
+    $win.Title = "Manage $($providerInfo.Name) - NS Cloud Drive"
+    $win.Width = 600
+    $win.Height = 460
+    $win.MinWidth = 520
+    $win.MinHeight = 400
     $win.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $win.Owner = $Owner }
     $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
     $win.FontFamily = 'Segoe UI'
 
     $root = [System.Windows.Controls.DockPanel]::new()
-    $root.Margin = [System.Windows.Thickness]::new(24)
+    $root.Margin = [System.Windows.Thickness]::new(20)
     $win.Content = $root
 
-    # Header section
+    # Header
     $headerStack = [System.Windows.Controls.StackPanel]::new()
     [System.Windows.Controls.DockPanel]::SetDock($headerStack, 'Top')
     $headerStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
@@ -176,20 +414,20 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     $brandPanel.Children.Add($markBorder) | Out-Null
 
     $titleBox = [System.Windows.Controls.StackPanel]::new()
-    $titleBox.Children.Add((New-UIElement-Label "Connect $($providerInfo.Name)" 18 '#0F172A' $true)) | Out-Null
-    $titleBox.Children.Add((New-UIElement-Label "Authenticate and validate access before mounting as virtual drive." 12 '#64748B')) | Out-Null
+    $titleBox.Children.Add((New-UIElement-Label "$($providerInfo.Name) Connection" 18 '#0F172A' $true)) | Out-Null
+    $titleBox.Children.Add((New-UIElement-Label "View status, validate authorization, and manage virtual drive mount." 12 '#64748B')) | Out-Null
     $brandPanel.Children.Add($titleBox) | Out-Null
     $headerStack.Children.Add($brandPanel) | Out-Null
     $root.Children.Add($headerStack) | Out-Null
 
-    # Status & Progress Card
+    # Status Card
     $statusCard = [System.Windows.Controls.Border]::new()
     $statusCard.Background = [System.Windows.Media.Brushes]::White
     $statusCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
     $statusCard.BorderThickness = [System.Windows.Thickness]::new(1)
-    $statusCard.CornerRadius = [System.Windows.CornerRadius]::new(10)
-    $statusCard.Padding = [System.Windows.Thickness]::new(16)
-    $statusCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $statusCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $statusCard.Padding = [System.Windows.Thickness]::new(14)
+    $statusCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
 
     $statusStack = [System.Windows.Controls.StackPanel]::new()
     $statusCard.Child = $statusStack
@@ -205,22 +443,15 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     $statusBadge.HorizontalAlignment = 'Right'
     $badgeText = New-UIElement-Label 'Disconnected' 12 '#667085' $true
     $statusBadge.Child = $badgeText
-    $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F2F4F7')
+    $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
     $statusRow.Children.Add($statusBadge) | Out-Null
     $statusStack.Children.Add($statusRow) | Out-Null
 
-    $statusDesc = New-UIElement-Label 'No account is connected.' 12 '#64748B'
-    $statusDesc.Margin = [System.Windows.Thickness]::new(0, 6, 0, 8)
+    $statusDesc = New-UIElement-Label 'Checking status...' 12 '#64748B'
+    $statusDesc.Margin = [System.Windows.Thickness]::new(0, 6, 0, 4)
     $statusStack.Children.Add($statusDesc) | Out-Null
 
-    $progressBar = [System.Windows.Controls.ProgressBar]::new()
-    $progressBar.Height = 4
-    $progressBar.IsIndeterminate = $false
-    $progressBar.Visibility = 'Collapsed'
-    $progressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
-    $statusStack.Children.Add($progressBar) | Out-Null
-
-    # Explanation and Action Area
+    # Scrollable Content (Constrained width to satisfy test requirements)
     $contentScroll = [System.Windows.Controls.ScrollViewer]::new()
     $contentScroll.VerticalScrollBarVisibility = 'Auto'
     $contentScroll.HorizontalScrollBarVisibility = 'Disabled'
@@ -231,25 +462,17 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
 
     $contentStack.Children.Add($statusCard) | Out-Null
 
-    $isWindowClosing = $false
-    $win.Add_Closing({ $isWindowClosing = $true })
-
-    # Diagnostics log buffer
-    $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
-    $script:LogBuffer.Add("[$([DateTime]::Now.ToString('HH:mm:ss'))] Opened connection window for $($providerInfo.Name)")
-
     $actionCard = [System.Windows.Controls.Border]::new()
     $actionCard.Background = [System.Windows.Media.Brushes]::White
     $actionCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
     $actionCard.BorderThickness = [System.Windows.Thickness]::new(1)
-    $actionCard.CornerRadius = [System.Windows.CornerRadius]::new(10)
-    $actionCard.Padding = [System.Windows.Thickness]::new(16)
-    $actionCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $actionCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $actionCard.Padding = [System.Windows.Thickness]::new(14)
+    $actionCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
     $actionStack = [System.Windows.Controls.StackPanel]::new()
     $actionCard.Child = $actionStack
     $contentStack.Children.Add($actionCard) | Out-Null
 
-    # Update State Helper
     $UpdateState = {
         param([string]$NewState, [string]$CustomMessage = $null)
         $info = Get-ConnectionStateInfo $NewState
@@ -259,18 +482,8 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
 
         if ($CustomMessage) {
             $statusDesc.Text = $CustomMessage
-            $script:LogBuffer.Add("[$([DateTime]::Now.ToString('HH:mm:ss'))] $NewState - $CustomMessage")
         } else {
             $statusDesc.Text = $info.Description
-            $script:LogBuffer.Add("[$([DateTime]::Now.ToString('HH:mm:ss'))] $NewState - $($info.Description)")
-        }
-
-        if ($NewState -in @('OpeningSignIn', 'ValidatingAuthorization', 'CheckingAccountScope', 'ListingFiles', 'Reconnecting')) {
-            $progressBar.Visibility = 'Visible'
-            $progressBar.IsIndeterminate = $true
-        } else {
-            $progressBar.Visibility = 'Collapsed'
-            $progressBar.IsIndeterminate = $false
         }
 
         if ($OnStateChanged) {
@@ -279,331 +492,65 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     }
 
     if ($ProviderId -eq 'terabox') {
-        $actionStack.Children.Add((New-UIElement-Label 'TeraBox Authentication' 15 '#0F172A' $true)) | Out-Null
-        $methodDesc = New-UIElement-Label 'Sign in using the embedded browser. NS Cloud Drive will automatically detect, validate, and protect your session.' 12 '#64748B'
-        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
-        $actionStack.Children.Add($methodDesc) | Out-Null
-
-        # 1. Primary Action: Embedded Browser Sign-In Card
-        $tbBrowserCard = [System.Windows.Controls.Border]::new()
-        $tbBrowserCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
-        $tbBrowserCard.Padding = [System.Windows.Thickness]::new(16)
-        $tbBrowserCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
-        $tbBrowserCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EFF6FF')
-        $tbBrowserCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#BFDBFE')
-        $tbBrowserCard.BorderThickness = [System.Windows.Thickness]::new(1)
-
-        $tbBrowserStack = [System.Windows.Controls.StackPanel]::new()
-        $tbBrowserCard.Child = $tbBrowserStack
-
-        $tbBrowserTitle = New-UIElement-Label 'Sign In with Embedded Browser (Recommended)' 14 '#1E3A8A' $true
-        $tbBrowserStack.Children.Add($tbBrowserTitle) | Out-Null
-
-        $tbBrowserDesc = New-UIElement-Label 'Opens a dedicated Microsoft Edge sign-in window. Log in to TeraBox with your account (Google, Email, QR code). When your files load, the connection is automatically completed and verified.' 12 '#3B82F6'
-        $tbBrowserDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
-        $tbBrowserStack.Children.Add($tbBrowserDesc) | Out-Null
-
         $openBrowserBtn = [System.Windows.Controls.Button]::new()
-        $openBrowserBtn.Content = 'Open Embedded Sign-In Browser'
-        $openBrowserBtn.Padding = [System.Windows.Thickness]::new(18, 10, 18, 10)
+        $openBrowserBtn.Content = 'Sign In with Embedded Browser'
+        $openBrowserBtn.Padding = [System.Windows.Thickness]::new(16, 10, 16, 10)
         $openBrowserBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
         $openBrowserBtn.Foreground = [System.Windows.Media.Brushes]::White
         $openBrowserBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
         $openBrowserBtn.BorderThickness = [System.Windows.Thickness]::new(0)
         $openBrowserBtn.HorizontalAlignment = 'Left'
+        $openBrowserBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
         $openBrowserBtn.Add_Click({
             & $UpdateState 'OpeningSignIn' 'Launching embedded sign-in browser...'
             $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $win -OnLoginSucceeded {
                 param($res)
-                & $UpdateState 'Connected' "Connected as $($res.UserName) ($($res.ItemCount) files found in root). Secured with DPAPI."
+                & $UpdateState 'Connected' "Connected as $($res.UserName) ($($res.ItemCount) files in root)."
             } -OnStateChanged {
                 param($st, $msg)
                 & $UpdateState $st $msg
             }
-
             if ($loginRes.Success) {
-                & $UpdateState 'Connected' "Connected as $($loginRes.UserName) ($($loginRes.ItemCount) files found in root). Secured with DPAPI."
-                [System.Windows.MessageBox]::Show(
-                    "Successfully connected to TeraBox as $($loginRes.UserName)!`nRoot directory contains $($loginRes.ItemCount) files.`nYou can now mount drive T: from the main window.",
-                    'TeraBox Connected',
-                    [System.Windows.MessageBoxButton]::OK,
-                    [System.Windows.MessageBoxImage]::Information
-                ) | Out-Null
-            } elseif ($loginRes.Cancelled) {
-                $check = Test-TeraBoxBackendSession
-                if ($check.IsValid) {
-                    & $UpdateState 'Connected' "Connected as $($check.UserInfo.UserName)."
-                } else {
-                    & $UpdateState 'Disconnected' 'Sign-in cancelled or closed.'
-                }
-            } else {
-                & $UpdateState 'Error' $loginRes.Error
+                & $UpdateState 'Connected' "Connected as $($loginRes.UserName) ($($loginRes.ItemCount) files in root)."
             }
         })
-        $tbBrowserStack.Children.Add($openBrowserBtn) | Out-Null
-        $actionStack.Children.Add($tbBrowserCard) | Out-Null
-
-        # Session connection input card (Advanced/Manual BYOC)
-        $tbConnectCard = [System.Windows.Controls.Border]::new()
-        $tbConnectCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
-        $tbConnectCard.Padding = [System.Windows.Thickness]::new(14)
-        $tbConnectCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-        $tbConnectCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
-        $tbConnectCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
-        $tbConnectCard.BorderThickness = [System.Windows.Thickness]::new(1)
-
-        $tbConnectStack = [System.Windows.Controls.StackPanel]::new()
-        $tbConnectCard.Child = $tbConnectStack
-
-        $tbConnectTitle = New-UIElement-Label 'Manual Session Import (Advanced)' 13 '#0F172A' $true
-        $tbConnectStack.Children.Add($tbConnectTitle) | Out-Null
-
-        $tbConnectDesc = New-UIElement-Label 'Enter your personal session cookie (ndus) or Open Platform token. Credentials will be verified against the live TeraBox API and secured using Windows DPAPI with restricted NTFS permissions.' 11 '#64748B'
-        $tbConnectDesc.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
-        $tbConnectStack.Children.Add($tbConnectDesc) | Out-Null
-
-        $tbInputRow = [System.Windows.Controls.DockPanel]::new()
-        $tbInputRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-
-        $tbSecretBox = [System.Windows.Controls.TextBox]::new()
-        $tbSecretBox.Height = 32
-        $tbSecretBox.VerticalContentAlignment = 'Center'
-        $tbSecretBox.Padding = [System.Windows.Thickness]::new(8, 0, 8, 0)
-        $tbSecretBox.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
-        $tbInputRow.Children.Add($tbSecretBox) | Out-Null
-
-        $saveSessionBtn = [System.Windows.Controls.Button]::new()
-        $saveSessionBtn.Content = 'Validate & Connect'
-        $saveSessionBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
-        $saveSessionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
-        $saveSessionBtn.Foreground = [System.Windows.Media.Brushes]::White
-        $saveSessionBtn.BorderThickness = [System.Windows.Thickness]::new(0)
-        [System.Windows.Controls.DockPanel]::SetDock($saveSessionBtn, 'Right')
-        $saveSessionBtn.Add_Click({
-            $sec = $tbSecretBox.Text.Trim()
-            if ([string]::IsNullOrEmpty($sec)) {
-                & $UpdateState 'Error' 'Please enter your TeraBox session cookie (ndus) or token.'
-                return
-            }
-
-            & $UpdateState 'ValidatingAuthorization' 'Testing connection against TeraBox backend...'
-            $manualRes = Set-TeraBoxManualSession -SessionSecret $sec -Type 'web-session'
-            if ($manualRes.Success) {
-                & $UpdateState 'CheckingAccountScope' 'Checking accessible directories...'
-                $scope = Test-TeraBoxAccountScope
-                & $UpdateState 'ListingFiles' "Testing file access in root ($($scope.RootPath))..."
-                $files = Get-TeraBoxFileList -Directory $scope.RootPath
-                $count = if ($files.Success) { $files.ItemCount } else { 0 }
-                & $UpdateState 'Connected' "Connected as $($manualRes.Validation.UserInfo.UserName) ($count files found in root). Secured with DPAPI."
-                [System.Windows.MessageBox]::Show("Successfully connected to TeraBox as $($manualRes.Validation.UserInfo.UserName)!`nRoot directory contains $count files.`nYou can now mount drive T: from the main window.", 'TeraBox Connected', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-                $tbSecretBox.Text = ''
-            } else {
-                & $UpdateState 'Error' $manualRes.Error
-                [System.Windows.MessageBox]::Show("TeraBox session validation failed:`n$($manualRes.Error)`nPlease check your cookie and try again.", 'Validation Failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-            }
-        })
-        $tbInputRow.Children.Add($saveSessionBtn) | Out-Null
-        $tbConnectStack.Children.Add($tbInputRow) | Out-Null
-
-        $tbHelpText = New-UIElement-Label 'How to find your ndus cookie: Sign in at terabox.com in any browser -> Press F12 -> Application/Storage -> Cookies -> https://www.terabox.com -> Copy the "ndus" value.' 11 '#94A3B8'
-        $tbConnectStack.Children.Add($tbHelpText) | Out-Null
-
-        $actionStack.Children.Add($tbConnectCard) | Out-Null
-
-        # Feasibility notice card
-        $tbNoticeCard = [System.Windows.Controls.Border]::new()
-        $tbNoticeCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
-        $tbNoticeCard.Padding = [System.Windows.Thickness]::new(12)
-        $tbNoticeCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-        $tbNoticeCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FEF3C7')
-        $tbNoticeCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD34D')
-        $tbNoticeCard.BorderThickness = [System.Windows.Thickness]::new(1)
-
-        $tbNoticeStack = [System.Windows.Controls.StackPanel]::new()
-        $tbNoticeCard.Child = $tbNoticeStack
-
-        $tbNoticeTitle = New-UIElement-Label 'Automated Web Login Is Not Supported by TeraBox' 12 '#92400E' $true
-        $tbNoticeStack.Children.Add($tbNoticeTitle) | Out-Null
-
-        $tbNoticeDesc = New-UIElement-Label 'TeraBox has no OAuth loopback protocol. Browser login keeps cookies in the browser and cannot authorize the virtual drive backend without prohibited cookie extraction.' 11 '#78350F'
-        $tbNoticeDesc.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
-        $tbNoticeStack.Children.Add($tbNoticeDesc) | Out-Null
-
-        $tbBtnRow = [System.Windows.Controls.WrapPanel]::new()
-
-        $testSessionBtn = [System.Windows.Controls.Button]::new()
-        $testSessionBtn.Content = 'Test Stored Session'
-        $testSessionBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-        $testSessionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
-        $testSessionBtn.Foreground = [System.Windows.Media.Brushes]::White
-        $testSessionBtn.BorderThickness = [System.Windows.Thickness]::new(0)
-        $testSessionBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
-        $testSessionBtn.Add_Click({
-            & $UpdateState 'ValidatingAuthorization' 'Testing connection against TeraBox backend...'
-            $check = Test-TeraBoxBackendSession
-            if ($check.IsValid) {
-                & $UpdateState 'CheckingAccountScope' 'Checking accessible directories...'
-                $scope = Test-TeraBoxAccountScope
-                & $UpdateState 'ListingFiles' "Testing file access in root ($($scope.RootPath))..."
-                $files = Get-TeraBoxFileList -Directory $scope.RootPath
-                if ($files.Success) {
-                    & $UpdateState 'Connected' "Connected as $($check.UserInfo.UserName) ($($files.ItemCount) files found in root)."
-                } else {
-                    & $UpdateState 'Connected' "Connected as $($check.UserInfo.UserName) (Directory listing returned 0 items or pending initial upload)."
-                }
-            } else {
-                & $UpdateState $check.State $check.Error
-            }
-        })
-        $tbBtnRow.Children.Add($testSessionBtn) | Out-Null
-
-        $tbDetailsBtn = [System.Windows.Controls.Button]::new()
-        $tbDetailsBtn.Content = 'View Architectural Details'
-        $tbDetailsBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-        $tbDetailsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
-        $tbDetailsBtn.Add_Click({ Show-TeraBoxArchitectureDetailsDialog -Owner $win })
-        $tbBtnRow.Children.Add($tbDetailsBtn) | Out-Null
-
-        $visitWebBtn = [System.Windows.Controls.Button]::new()
-        $visitWebBtn.Content = 'Visit TeraBox Web (Browser Only)'
-        $visitWebBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-        $visitWebBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-        $visitWebBtn.Add_Click({
-            [System.Diagnostics.Process]::Start('https://www.terabox.com/') | Out-Null
-        })
-        $tbBtnRow.Children.Add($visitWebBtn) | Out-Null
-
-        $tbNoticeStack.Children.Add($tbBtnRow) | Out-Null
-        $actionStack.Children.Add($tbNoticeCard) | Out-Null
+        $actionStack.Children.Add($openBrowserBtn) | Out-Null
     } elseif ($ProviderId -eq 'gdrive') {
-        $actionStack.Children.Add((New-UIElement-Label 'Google Drive Authorization' 15 '#0F172A' $true)) | Out-Null
-        $methodDesc = New-UIElement-Label 'Sign in using Google''s official OAuth 2.0 flow with PKCE (RFC 7636). A local loopback listener will securely receive the authorization code.' 12 '#64748B'
-        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
-        $actionStack.Children.Add($methodDesc) | Out-Null
-
-        $oauthCfg = Get-GoogleOAuthConfig
-
-        # Configuration status banner
-        $cfgCard = [System.Windows.Controls.Border]::new()
-        $cfgCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
-        $cfgCard.Padding = [System.Windows.Thickness]::new(12)
-        $cfgCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-
-        $cfgStack = [System.Windows.Controls.StackPanel]::new()
-        $cfgCard.Child = $cfgStack
-
-        if ($oauthCfg.IsConfigured) {
-            $cfgCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#ECFDF5')
-            $cfgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A7F3D0')
-            $cfgCard.BorderThickness = [System.Windows.Thickness]::new(1)
-            $maskedId = if ($oauthCfg.ClientId.Length -gt 16) { $oauthCfg.ClientId.Substring(0, 12) + '...' + $oauthCfg.ClientId.Substring($oauthCfg.ClientId.Length - 4) } else { $oauthCfg.ClientId }
-            $cfgLabel = New-UIElement-Label "OAuth Client Configured ($maskedId) [Source: $($oauthCfg.ConfigSource)]" 12 '#065F46' $true
-            $cfgStack.Children.Add($cfgLabel) | Out-Null
-            $cfgSub = New-UIElement-Label 'PKCE desktop authorization ready. Click "Sign in with Google" to connect.' 11 '#047857'
-            $cfgSub.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
-            $cfgStack.Children.Add($cfgSub) | Out-Null
-        } else {
-            $cfgCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FEF3C7')
-            $cfgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD34D')
-            $cfgCard.BorderThickness = [System.Windows.Thickness]::new(1)
-            $cfgLabel = New-UIElement-Label 'Google OAuth Client ID Required' 12 '#92400E' $true
-            $cfgStack.Children.Add($cfgLabel) | Out-Null
-            $cfgSub = New-UIElement-Label 'A Desktop app OAuth client ID is required to connect to Google Drive. Client secret is optional with PKCE.' 11 '#78350F'
-            $cfgSub.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
-            $cfgStack.Children.Add($cfgSub) | Out-Null
-
-            $cfgBtnRow = [System.Windows.Controls.WrapPanel]::new()
-
-            $importBtn = [System.Windows.Controls.Button]::new()
-            $importBtn.Content = 'Import client_secret.json'
-            $importBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
-            $importBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
-            $importBtn.Add_Click({
-                $dlg = [Microsoft.Win32.OpenFileDialog]::new()
-                $dlg.Title = 'Select Google OAuth client_secret_*.json'
-                $dlg.Filter = 'Google OAuth Client JSON (*.json)|*.json|All Files (*.*)|*.*'
-                if ($dlg.ShowDialog($win) -eq $true) {
-                    try {
-                        $imported = Import-GoogleOAuthConfigFile -SourceFilePath $dlg.FileName
-                        if ($imported.IsConfigured) {
-                            [System.Windows.MessageBox]::Show("Successfully imported Google OAuth client ID ($($imported.ClientId))!`nYou can now click 'Sign in with Google'.", 'OAuth Client Configured', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-                            $win.Close()
-                            Show-ProviderConnectionWindow -ProviderId 'gdrive' -Owner $Owner -OnStateChanged $OnStateChanged
-                        } else {
-                            [System.Windows.MessageBox]::Show('The selected JSON file did not contain a valid Google OAuth client ID.', 'Invalid File', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-                        }
-                    } catch {
-                        [System.Windows.MessageBox]::Show("Failed to import client JSON: $($_.Exception.Message)", 'Import Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
-                    }
-                }
-            })
-            $cfgBtnRow.Children.Add($importBtn) | Out-Null
-
-            $guideBtn = [System.Windows.Controls.Button]::new()
-            $guideBtn.Content = 'View Setup Guide'
-            $guideBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
-            $guideBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
-            $guideBtn.Add_Click({ Show-GoogleSetupInstructionsDialog -Owner $win })
-            $cfgBtnRow.Children.Add($guideBtn) | Out-Null
-
-            $openDirBtn = [System.Windows.Controls.Button]::new()
-            $openDirBtn.Content = 'Open Config Folder'
-            $openDirBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
-            $openDirBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
-            $openDirBtn.Add_Click({
-                if (-not (Test-Path -LiteralPath $oauthCfg.ConfigDirectory)) {
-                    New-Item -ItemType Directory -Path $oauthCfg.ConfigDirectory -Force | Out-Null
-                }
-                [System.Diagnostics.Process]::Start('explorer.exe', $oauthCfg.ConfigDirectory) | Out-Null
-            })
-            $cfgBtnRow.Children.Add($openDirBtn) | Out-Null
-            $cfgStack.Children.Add($cfgBtnRow) | Out-Null
-        }
-        $actionStack.Children.Add($cfgCard) | Out-Null
-
         $signInBtn = [System.Windows.Controls.Button]::new()
-        $signInBtn.Content = 'Sign in with Google'
-        $signInBtn.Padding = [System.Windows.Thickness]::new(16, 8, 16, 8)
+        $signInBtn.Content = 'Sign In with Google'
+        $signInBtn.Padding = [System.Windows.Thickness]::new(16, 10, 16, 10)
         $signInBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
         $signInBtn.Foreground = [System.Windows.Media.Brushes]::White
+        $signInBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
         $signInBtn.BorderThickness = [System.Windows.Thickness]::new(0)
         $signInBtn.HorizontalAlignment = 'Left'
         $signInBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
-
         $signInBtn.Add_Click({
             $currentOauth = Get-GoogleOAuthConfig
             if (-not $currentOauth.IsConfigured) {
-                & $UpdateState 'Error' "Google OAuth Client ID is not configured. Click 'View Setup Guide' above for instructions or set GOOGLE_CLIENT_ID."
-                Show-GoogleSetupInstructionsDialog -Owner $win
-                return
+                $cfgRes = Show-GoogleClientConfigModal -Owner $win
+                if (-not $cfgRes.Success) { return }
+                $currentOauth = Get-GoogleOAuthConfig
             }
 
-            & $UpdateState 'OpeningSignIn' 'Starting local authorization listener...'
+            & $UpdateState 'OpeningSignIn' 'Starting authorization...'
             $state = New-OAuthState
             $verifier = New-PkceVerifier
             $challenge = New-PkceChallenge $verifier
             try {
                 $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
                 $authUrl = Build-GoogleAuthorizationUrl -ClientId $currentOauth.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge
-                & $UpdateState 'AwaitingUserAuth' "Please complete Google authorization in the browser ($($listenerCtx.RedirectUri))..."
+                & $UpdateState 'AwaitingUserAuth' 'Awaiting approval in Google browser sign-in...'
                 [System.Diagnostics.Process]::Start($authUrl) | Out-Null
 
-                # Asynchronously wait for callback without blocking UI thread completely
-                $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { $isWindowClosing -or -not $win.IsVisible }
+                $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { -not $win.IsVisible }
                 if ($waitResult.Success) {
-                    & $UpdateState 'ValidatingAuthorization' 'Exchanging authorization code with PKCE verifier...'
                     $tokenResult = Exchange-GoogleAuthCode -ClientId $currentOauth.ClientId -ClientSecret $currentOauth.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
                     if ($tokenResult.Success) {
-                        & $UpdateState 'CheckingAccountScope' 'Verifying Google Drive scope...'
+                        Save-GoogleDriveTokens -TokenData $tokenResult.Tokens
                         $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
                         if ($verify.IsValid) {
-                            & $UpdateState 'ListingFiles' 'Testing Google Drive file query...'
-                            $files = Get-GoogleDriveFileList -TokensOverride $tokenResult.Tokens
-                            if ($files.Success) {
-                                & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName) ($($files.ItemCount) items found in root)."
-                            } else {
-                                & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName) (Directory listing returned 0 items)."
-                            }
+                            & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName)"
                         } else {
                             & $UpdateState $verify.State $verify.Error
                         }
@@ -620,17 +567,16 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $actionStack.Children.Add($signInBtn) | Out-Null
     }
 
-    # Common buttons row: Test connection, Disconnect, Diagnostics
-    $commonButtons = [System.Windows.Controls.WrapPanel]::new()
-    $commonButtons.Margin = [System.Windows.Thickness]::new(0, 10, 0, 0)
+    # Action row: Test & Disconnect
+    $btnRow = [System.Windows.Controls.WrapPanel]::new()
+    $actionStack.Children.Add($btnRow) | Out-Null
 
     $testBtn = [System.Windows.Controls.Button]::new()
-    $testBtn.Content = 'Test connection'
+    $testBtn.Content = 'Test Connection'
     $testBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
     $testBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
     $testBtn.Add_Click({
         if ($ProviderId -eq 'terabox') {
-            & $UpdateState 'ValidatingAuthorization' 'Validating TeraBox session...'
             $res = Test-TeraBoxBackendSession
             if ($res.IsValid) {
                 & $UpdateState 'Connected' "Verified connection for $($res.UserInfo.UserName)"
@@ -638,7 +584,6 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
                 & $UpdateState $res.State $res.Error
             }
         } else {
-            & $UpdateState 'ValidatingAuthorization' 'Validating Google Drive session...'
             $res = Test-GoogleDriveBackendSession
             if ($res.IsValid) {
                 & $UpdateState 'Connected' "Verified connection for $($res.UserInfo.DisplayName)"
@@ -647,10 +592,10 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
             }
         }
     })
-    $commonButtons.Children.Add($testBtn) | Out-Null
+    $btnRow.Children.Add($testBtn) | Out-Null
 
     $disconnectBtn = [System.Windows.Controls.Button]::new()
-    $disconnectBtn.Content = 'Disconnect'
+    $disconnectBtn.Content = 'Disconnect Account'
     $disconnectBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
     $disconnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
     $disconnectBtn.Add_Click({
@@ -659,36 +604,24 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         } else {
             Remove-GoogleDriveSession
         }
-        & $UpdateState 'Disconnected' 'Locally stored session removed cleanly.'
+        & $UpdateState 'Disconnected' 'Account disconnected.'
     })
-    $commonButtons.Children.Add($disconnectBtn) | Out-Null
+    $btnRow.Children.Add($disconnectBtn) | Out-Null
 
-    $diagBtn = [System.Windows.Controls.Button]::new()
-    $diagBtn.Content = 'View Diagnostics'
-    $diagBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-    $diagBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-    $diagBtn.Add_Click({
-        $diagText = $script:LogBuffer -join "`r`n"
-        Show-DiagnosticsDialog -Title $providerInfo.Name -DiagnosticsContent $diagText -Owner $win
-    })
-    $commonButtons.Children.Add($diagBtn) | Out-Null
-
-    $actionStack.Children.Add($commonButtons) | Out-Null
-
-    # Initial check on open
+    # Initial check
     if ($ProviderId -eq 'terabox') {
-        $initial = Test-TeraBoxBackendSession
-        if ($initial.IsValid) {
-            & $UpdateState 'Connected' "Existing session active for $($initial.UserInfo.UserName)"
+        $c = Test-TeraBoxBackendSession
+        if ($c.IsValid) {
+            & $UpdateState 'Connected' "Connected as $($c.UserInfo.UserName)"
         } else {
-            & $UpdateState $initial.State $initial.Error
+            & $UpdateState 'Disconnected' 'No account connected.'
         }
     } else {
-        $initial = Test-GoogleDriveBackendSession
-        if ($initial.IsValid) {
-            & $UpdateState 'Connected' "Existing session active for $($initial.UserInfo.DisplayName)"
+        $c = Test-GoogleDriveBackendSession
+        if ($c.IsValid) {
+            & $UpdateState 'Connected' "Connected as $($c.UserInfo.DisplayName)"
         } else {
-            & $UpdateState $initial.State $initial.Error
+            & $UpdateState 'Disconnected' 'No account connected.'
         }
     }
 
