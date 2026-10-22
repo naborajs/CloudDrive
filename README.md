@@ -72,16 +72,32 @@ Empirical benchmarks measured on Windows 11 (AMD Ryzen 9 8940HX, 16 cores / 32 t
 
 ## Launching the Application
 
-On Windows, open PowerShell and run:
+### Option 1 — Quick Launch (Double-Click or CMD)
+
+Double-click `NSCloudDrive.cmd` directly in Windows File Explorer, or run from Command Prompt:
+
+```cmd
+.\NSCloudDrive.cmd
+```
+
+### Option 2 — PowerShell Terminal
+
+From the project root directory:
 
 ```powershell
-powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
+```
+
+Or from any folder using the full path:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "C:\Users\Naboraj_sarkar\Documents\Codex\CloudDrive\src\NSCloudDrive.ps1"
 ```
 
 Or start minimized to the System Tray:
 
 ```powershell
-powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1 -Minimized
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1 -Minimized
 ```
 
 ## Pinned backend build helper
