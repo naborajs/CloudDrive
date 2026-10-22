@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | Inspect the supplied `terabox-drive-starter` README, five scripts, and six research files | Completed. | Starter read-only mount scaffold and plans were preserved as references; the original sign-in task was not run. |
 | Verify CloudDrive branch, origin, and working tree | `main`, origin is `https://github.com/naborajs/CloudDrive.git`, clean after each push. | Current Git state only. |
+| Verify repository ignore rules with `git check-ignore --no-index --verbose` | Passed for representative env files, cookie/session/token files, rclone config, credential folder, cache, logs, build/dist folders, executable, and generated build manifest. | Path-pattern check only; no secret files were created or read. |
 | `git ls-remote --symref` on requested backend repositories and REA | Current ref hashes and tags recorded in [FEASIBILITY.md](FEASIBILITY.md). | Read-only GitHub ref query; no repository binary downloaded or executed. |
 | Shallow-clone `gulp79/rclone-extra` tag `v1.75.2-extra` and verify `HEAD` | `56bf13885494819bc801302ddf881279bdac7262`. | Public source checkout only; no release binary was downloaded or executed. |
 | Apply the committed cookie-safety patch to a clean detached worktree at that tag | `git apply --check`, patch application, and `git diff --check` passed; the changed source file is `backend/terabox/terabox.go`. | Static patch-application test only; no Go compiler is installed and no runtime secret-redaction test ran. |
@@ -82,6 +83,7 @@ Each commit changed one file and was pushed to `origin/main`:
 - `947fa3c` — add verified build and cache diagnostics.
 - `2ecc9db` — document preview readiness diagnostics.
 - `c9b3ab0` — clarify official TeraBox OAuth limitations.
+- `0d10f2f` — ignore local credentials and runtime artifacts.
 
 ## Required next evidence
 
