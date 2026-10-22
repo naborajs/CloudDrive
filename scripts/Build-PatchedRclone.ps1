@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$BuildRoot = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra'),
-    [string]$WinFspFuseIncludePath = 'C:\Program Files (x86)\WinFsp\inc\fuse'
+    [string]$BuildRoot = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,11 +18,7 @@ if (-not (Test-Path -LiteralPath $patchPath -PathType Leaf)) {
 if (Test-Path -LiteralPath $BuildRoot) {
     throw "Build folder already exists; choose a new -BuildRoot to avoid changing existing files: $BuildRoot"
 }
-if (-not (Test-Path -LiteralPath (Join-Path $WinFspFuseIncludePath 'fuse.h') -PathType Leaf)) {
-    throw "WinFsp FUSE development header fuse.h was not found under: $WinFspFuseIncludePath"
-}
-
-foreach ($tool in @('git', 'go', 'x86_64-w64-mingw32-gcc', 'x86_64-w64-mingw32-g++')) {
+foreach ($tool in @('git', 'go')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "Required build tool is missing from PATH: $tool"
     }
@@ -55,22 +50,16 @@ $previousEnvironment = @{
     GOOS = $env:GOOS
     GOARCH = $env:GOARCH
     CGO_ENABLED = $env:CGO_ENABLED
-    CC = $env:CC
-    CXX = $env:CXX
-    CGO_CFLAGS = $env:CGO_CFLAGS
-    CGO_LDFLAGS = $env:CGO_LDFLAGS
 }
 
 try {
     $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
-    $env:CGO_ENABLED = '1'
-    $env:CC = 'x86_64-w64-mingw32-gcc'
-    $env:CXX = 'x86_64-w64-mingw32-g++'
-    $env:CGO_CFLAGS = "-I$WinFspFuseIncludePath"
-    $env:CGO_LDFLAGS = '-static'
+    # cgofuse supports !cgo on Windows; keep the source build independent of
+    # MinGW and WinFsp development headers. WinFsp is still required at runtime.
+    $env:CGO_ENABLED = '0'
 
-    $linkFlags = "-s -w -buildid= -X github.com/rclone/rclone/fs.Version=$tag -extldflags '-static -static-libgcc -static-libstdc++'"
+    $linkFlags = "-s -w -buildid= -X github.com/rclone/rclone/fs.Version=$tag"
     Push-Location $sourcePath
     try {
         & go build -v -trimpath -mod=readonly -tags cmount -ldflags $linkFlags -o $executablePath .
