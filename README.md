@@ -35,6 +35,20 @@ The preview needs Windows PowerShell 5.1 with WPF. **Check setup** reports wheth
 
 The preview has only been syntax-checked on the development PC. Its UI and prerequisite detection have not yet been acceptance-tested on a clean Windows install. Do not install an unofficial binary from an unknown source.
 
+## Pinned backend build helper
+
+[`scripts/Build-PatchedRclone.ps1`](scripts/Build-PatchedRclone.ps1) builds a Windows x64 executable from the pinned `gulp79/rclone-extra` source tag and applies the repository's cookie-safety patch. It refuses to reuse an existing build folder and verifies the executable reports both `cmount` and the `terabox` provider. It does not install prerequisites, configure an account, or test a live TeraBox connection.
+
+The pinned source requires Go 1.26 or newer. Its Windows `cmount` build workflow also uses MinGW and WinFsp FUSE development headers; the helper checks for these prerequisites before downloading source. rclone's Windows mounting guidance requires WinFsp, and the Developer feature is required when building with cgo. See [rclone Windows build instructions](https://rclone.org/install/) and the [pinned backend workflow](https://github.com/gulp79/rclone-extra/blob/v1.75.2-extra/.github/workflows/build.yml).
+
+After installing those prerequisites through sources you trust, run the helper from the repository root:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Build-PatchedRclone.ps1
+```
+
+The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. A successful build proves only that the pinned source builds and registers the provider; the build has not yet been run in this environment, and account login, Explorer mounting, file reads, and writes remain unverified.
+
 ## License
 
 License terms will be selected and documented before distributing application binaries or source derived from third-party projects.
