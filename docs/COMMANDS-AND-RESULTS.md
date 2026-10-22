@@ -16,6 +16,7 @@
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Review TeraBox official Open API integration documentation | Confirmed documented OAuth/device-code QR flow, separate client credential application, short-lived access/refresh tokens, and an assigned-application directory boundary. | Documentation review only; no application request, token call, or account access; does not prove compatibility with the existing full drive. |
+| Clone and inspect `mill-master/rclone-terabox` at `38482fe6bdabae350c627a43d3a4f57691bfb725` | Its QR helper calls website `/passport/qrcode/*` endpoints with Chrome-like headers, extracts `ndus`, passes it on the `rclone config create/update` argument list, and saves to regular config. | Source review only. The helper was not executed or adapted because it imitates a browser and exposes session data in process arguments/config. |
 | Parse the supplied five PowerShell starter scripts | All five parsed. | Syntax check only; no mount or account operation. |
 | Parse `src/NSCloudDrive.ps1` with `System.Management.Automation.Language.Parser` | Passed. | Does not prove rendered UI or button behavior. |
 | Load WPF runtime assemblies with Windows PowerShell in STA mode | Passed. | Assembly-load smoke check only; the preview window was not visually or interactively acceptance-tested. |
@@ -56,6 +57,10 @@ Each commit changed one file and was pushed to `origin/main`:
 - `ddcbf32` — clarify official Open API scope.
 - `d08d3f6` — compare official API option.
 - `9539dcb` — distinguish official OAuth from unofficial backend.
+- `38d81fd` — record official API research.
+- `a20c860` — reject browser-mimicking QR login helper.
+- `bfdad0e` — reject unsafe QR session handling.
+- `45714f1` — gate acceptance on compliant authentication.
 
 ## Required next evidence
 
