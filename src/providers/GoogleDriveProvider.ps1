@@ -3,13 +3,37 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 
-$script:GoogleCredentialDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials'
-$script:GoogleCredentialPath = Join-Path $script:GoogleCredentialDirectory 'google-drive-tokens.xml'
+function Get-GoogleCredentialDirectory {
+    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+}
+
+function Get-GoogleCredentialFilePath {
+    return (Join-Path (Get-GoogleCredentialDirectory) 'google-drive-tokens.xml')
+}
+
 $script:GoogleAuthEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth'
 $script:GoogleTokenEndpoint = 'https://oauth2.googleapis.com/token'
 $script:GoogleRevokeEndpoint = 'https://oauth2.googleapis.com/revoke'
 $script:GoogleDriveApiEndpoint = 'https://www.googleapis.com/drive/v3'
 $script:GoogleDefaultScope = 'https://www.googleapis.com/auth/drive.readonly'
+
+function Set-StrictCredentialAcl([string]$Path) {
+    try {
+        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($userSid, $systemSid)) {
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+            [void]$acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch { }
+}
 
 function Get-GoogleDriveProviderInfo {
     return [ordered]@{
@@ -54,12 +78,13 @@ function New-PkceChallenge([string]$Verifier) {
 }
 
 function Get-GoogleDriveStoredTokens {
-    if (-not (Test-Path -LiteralPath $script:GoogleCredentialPath -PathType Leaf)) {
+    $credPath = Get-GoogleCredentialFilePath
+    if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
         return $null
     }
 
     try {
-        $cred = Import-Clixml -LiteralPath $script:GoogleCredentialPath
+        $cred = Import-Clixml -LiteralPath $credPath
         if ($cred -is [System.Management.Automation.PSCredential]) {
             $bstr = [IntPtr]::Zero
             try {
@@ -84,29 +109,20 @@ function Save-GoogleDriveTokens([hashtable]$TokenData) {
         throw 'Cannot store invalid Google Drive tokens.'
     }
 
-    if (-not (Test-Path -LiteralPath $script:GoogleCredentialDirectory)) {
-        New-Item -ItemType Directory -Path $script:GoogleCredentialDirectory | Out-Null
+    $credDir = Get-GoogleCredentialDirectory
+    $credPath = Get-GoogleCredentialFilePath
+
+    if (-not (Test-Path -LiteralPath $credDir)) {
+        New-Item -ItemType Directory -Path $credDir | Out-Null
+        Set-StrictCredentialAcl -Path $credDir
     }
 
     $json = $TokenData | ConvertTo-Json -Compress
     $secString = ConvertTo-SecureString -String $json -AsPlainText -Force
     $credential = [System.Management.Automation.PSCredential]::new('google-drive', $secString)
     try {
-        Export-Clixml -InputObject $credential -LiteralPath $script:GoogleCredentialPath
-        # Restrict ACL to current user and SYSTEM
-        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $acl = [System.Security.AccessControl.FileSecurity]::new()
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($sid in @($userSid, $systemSid)) {
-            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [System.Security.AccessControl.FileSystemRights]::FullControl,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
-            [void]$acl.AddAccessRule($rule)
-        }
-        Set-Acl -LiteralPath $script:GoogleCredentialPath -AclObject $acl
+        Export-Clixml -InputObject $credential -LiteralPath $credPath
+        Set-StrictCredentialAcl -Path $credPath
     } finally {
         $secString.Dispose()
     }
@@ -114,15 +130,18 @@ function Save-GoogleDriveTokens([hashtable]$TokenData) {
 
 function Remove-GoogleDriveSession {
     $tokens = Get-GoogleDriveStoredTokens
-    if ($tokens -and $tokens.access_token) {
+    $tokenToRevoke = if ($tokens -and $tokens.refresh_token) { $tokens.refresh_token } elseif ($tokens -and $tokens.access_token) { $tokens.access_token } else { $null }
+    if ($tokenToRevoke) {
         try {
-            $revokeUrl = "$script:GoogleRevokeEndpoint?token=$($tokens.access_token)"
-            Invoke-RestMethod -Uri $revokeUrl -Method Post -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+            $body = @{ token = $tokenToRevoke }
+            $headers = @{ 'Content-Type' = 'application/x-www-form-urlencoded' }
+            Invoke-RestMethod -Uri $script:GoogleRevokeEndpoint -Method Post -Body $body -Headers $headers -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
         } catch { }
     }
 
-    if (Test-Path -LiteralPath $script:GoogleCredentialPath) {
-        Remove-Item -LiteralPath $script:GoogleCredentialPath -Force -ErrorAction SilentlyContinue
+    $credPath = Get-GoogleCredentialFilePath
+    if (Test-Path -LiteralPath $credPath) {
+        Remove-Item -LiteralPath $credPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -286,7 +305,7 @@ function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext, [scriptblock]$C
         # Render response page in user browser
         $html = ''
         if ($error) {
-            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Authentication Failed</h2><p>$([System.Web.HttpUtility]::HtmlEncode($error))</p><p>You can close this tab and return to NS Cloud Drive.</p></body></html>"
+            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Authentication Failed</h2><p>$([System.Net.WebUtility]::HtmlEncode($error))</p><p>You can close this tab and return to NS Cloud Drive.</p></body></html>"
         } elseif (-not $state -or $state -ne $expectedState) {
             $error = 'State parameter mismatch (possible CSRF or invalid request).'
             $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Security Validation Failed</h2><p>State parameter did not match. Please restart sign-in from NS Cloud Drive.</p></body></html>"
@@ -425,6 +444,33 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
     }
 }
 
+function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$TokensOverride = $null) {
+    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens }
+    if (-not $tokens -or -not $tokens.access_token) {
+        throw 'No Google Drive tokens available.'
+    }
+
+    try {
+        return (& $ApiAction $tokens.access_token)
+    } catch {
+        $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
+        $isAuthError = ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials')
+
+        if ($isAuthError -and (-not $TokensOverride) -and $tokens.refresh_token) {
+            # Attempt automatic token refresh
+            $oauthConfig = Get-GoogleOAuthConfig
+            if ($oauthConfig -and $oauthConfig.ClientId) {
+                $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token
+                if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
+                    # Retry once with newly refreshed access token
+                    return (& $ApiAction $refreshResult.Tokens.access_token)
+                }
+            }
+        }
+        throw
+    }
+}
+
 function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens }
     if (-not $tokens -or -not $tokens.access_token) {
@@ -437,13 +483,15 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
     }
 
     try {
-        $headers = @{
-            'Authorization' = "Bearer $($tokens.access_token)"
-            'Accept' = 'application/json'
+        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -ApiAction {
+            param([string]$accessToken)
+            $headers = @{
+                'Authorization' = "Bearer $accessToken"
+                'Accept' = 'application/json'
+            }
+            $aboutUrl = "$script:GoogleDriveApiEndpoint/about?fields=user,storageQuota"
+            return (Invoke-RestMethod -Uri $aboutUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop)
         }
-
-        $aboutUrl = "$script:GoogleDriveApiEndpoint/about?fields=user,storageQuota"
-        $response = Invoke-RestMethod -Uri $aboutUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
 
         return [ordered]@{
             IsValid = $true
@@ -462,7 +510,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
             return [ordered]@{
                 IsValid = $false
                 State = 'AuthenticationExpired'
-                Error = 'Google Drive access token has expired. Automatic refresh will be attempted.'
+                Error = 'Google Drive access token has expired or was revoked. Please reconnect your account.'
                 UserInfo = $null
             }
         }
@@ -486,13 +534,15 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     }
 
     try {
-        $headers = @{
-            'Authorization' = "Bearer $($tokens.access_token)"
-            'Accept' = 'application/json'
+        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -ApiAction {
+            param([string]$accessToken)
+            $headers = @{
+                'Authorization' = "Bearer $accessToken"
+                'Accept' = 'application/json'
+            }
+            $filesUrl = "$script:GoogleDriveApiEndpoint/files?pageSize=$PageSize&fields=files(id,name,mimeType,size,modifiedTime)&q=trashed=false"
+            return (Invoke-RestMethod -Uri $filesUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop)
         }
-
-        $filesUrl = "$script:GoogleDriveApiEndpoint/files?pageSize=$PageSize&fields=files(id,name,mimeType,size,modifiedTime)&q=trashed=false"
-        $response = Invoke-RestMethod -Uri $filesUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
 
         $items = @()
         if ($response.files) {
@@ -521,4 +571,43 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
             Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message)
         }
     }
+}
+
+function Get-GoogleDriveRcloneEnvironment {
+    $tokens = Get-GoogleDriveStoredTokens
+    $oauthConfig = Get-GoogleOAuthConfig
+    if (-not $tokens -or -not $tokens.access_token) {
+        throw 'No Google Drive tokens available to configure rclone environment.'
+    }
+
+    $tokenObj = [ordered]@{
+        access_token = $tokens.access_token
+        token_type = if ($tokens.token_type) { $tokens.token_type } else { 'Bearer' }
+        refresh_token = $tokens.refresh_token
+        expiry = if ($tokens.obtained_at -and $tokens.expires_in) {
+            try {
+                ([DateTime]::Parse($tokens.obtained_at).AddSeconds($tokens.expires_in)).ToString('o')
+            } catch {
+                [DateTime]::UtcNow.AddHours(1).ToString('o')
+            }
+        } else {
+            [DateTime]::UtcNow.AddHours(1).ToString('o')
+        }
+    }
+    $tokenJson = $tokenObj | ConvertTo-Json -Compress
+
+    $envMap = @{
+        'RCLONE_CONFIG_GDRIVE_TYPE' = 'drive'
+        'RCLONE_CONFIG_GDRIVE_SCOPE' = 'drive.readonly'
+        'RCLONE_CONFIG_GDRIVE_TOKEN' = $tokenJson
+    }
+
+    if ($oauthConfig.ClientId) {
+        $envMap['RCLONE_CONFIG_GDRIVE_CLIENT_ID'] = $oauthConfig.ClientId
+    }
+    if ($oauthConfig.ClientSecret) {
+        $envMap['RCLONE_CONFIG_GDRIVE_CLIENT_SECRET'] = $oauthConfig.ClientSecret
+    }
+
+    return $envMap
 }
