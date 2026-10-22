@@ -37,6 +37,22 @@ function New-OAuthState {
     return [Convert]::ToBase64String($bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=')
 }
 
+function New-PkceVerifier {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function New-PkceChallenge([string]$Verifier) {
+    if ([string]::IsNullOrEmpty($Verifier)) {
+        throw 'Cannot generate PKCE challenge from an empty verifier.'
+    }
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha256.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($Verifier))
+    return [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
 function Get-GoogleDriveStoredTokens {
     if (-not (Test-Path -LiteralPath $script:GoogleCredentialPath -PathType Leaf)) {
         return $null
@@ -116,13 +132,42 @@ function Get-GoogleOAuthConfig {
 
     $clientId = $env:GOOGLE_CLIENT_ID
     $clientSecret = $env:GOOGLE_CLIENT_SECRET
+    $foundPath = $configPath
 
-    if (-not $clientId -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-        try {
-            $json = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-            if ($json.client_id) { $clientId = [string]$json.client_id }
-            if ($json.client_secret) { $clientSecret = [string]$json.client_secret }
-        } catch { }
+    if (-not $clientId) {
+        $candidateFiles = @(
+            $configPath,
+            (Join-Path $configDirectory 'client_secret.json'),
+            (Join-Path $configDirectory 'credentials.json')
+        )
+        if (Test-Path -LiteralPath $configDirectory -PathType Container) {
+            $globMatches = Get-ChildItem -Path $configDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
+            if ($globMatches) {
+                $candidateFiles += ($globMatches | Select-Object -ExpandProperty FullName)
+            }
+        }
+
+        foreach ($file in $candidateFiles) {
+            if (Test-Path -LiteralPath $file -PathType Leaf) {
+                try {
+                    $json = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+                    if ($json.installed) {
+                        if ($json.installed.client_id) { $clientId = [string]$json.installed.client_id }
+                        if ($json.installed.client_secret) { $clientSecret = [string]$json.installed.client_secret }
+                    } elseif ($json.web) {
+                        if ($json.web.client_id) { $clientId = [string]$json.web.client_id }
+                        if ($json.web.client_secret) { $clientSecret = [string]$json.web.client_secret }
+                    } elseif ($json.client_id) {
+                        $clientId = [string]$json.client_id
+                        if ($json.client_secret) { $clientSecret = [string]$json.client_secret }
+                    }
+                    if ($clientId) {
+                        $foundPath = $file
+                        break
+                    }
+                } catch { }
+            }
+        }
     }
 
     $isConfigured = (-not [string]::IsNullOrEmpty($clientId))
@@ -130,11 +175,18 @@ function Get-GoogleOAuthConfig {
         ClientId = $clientId
         ClientSecret = $clientSecret
         IsConfigured = $isConfigured
-        ConfigPath = $configPath
+        ConfigPath = $foundPath
+        ConfigDirectory = $configDirectory
     }
 }
 
-function Build-GoogleAuthorizationUrl([string]$ClientId, [string]$RedirectUri, [string]$State, [string]$Scope = $script:GoogleDefaultScope) {
+function Build-GoogleAuthorizationUrl(
+    [string]$ClientId,
+    [string]$RedirectUri,
+    [string]$State,
+    [string]$CodeChallenge = $null,
+    [string]$Scope = $script:GoogleDefaultScope
+) {
     if ([string]::IsNullOrEmpty($ClientId)) {
         throw 'Cannot build authorization URL without a valid Client ID.'
     }
@@ -143,7 +195,12 @@ function Build-GoogleAuthorizationUrl([string]$ClientId, [string]$RedirectUri, [
     $escScope = [System.Uri]::EscapeDataString($Scope)
     $escState = [System.Uri]::EscapeDataString($State)
 
-    return "$($script:GoogleAuthEndpoint)?client_id=$escClient&redirect_uri=$escRedirect&response_type=code&scope=$escScope&state=$escState&access_type=offline&prompt=consent"
+    $url = "$($script:GoogleAuthEndpoint)?client_id=$escClient&redirect_uri=$escRedirect&response_type=code&scope=$escScope&state=$escState&access_type=offline&prompt=consent"
+    if (-not [string]::IsNullOrEmpty($CodeChallenge)) {
+        $escChallenge = [System.Uri]::EscapeDataString($CodeChallenge)
+        $url += "&code_challenge=$escChallenge&code_challenge_method=S256"
+    }
+    return $url
 }
 
 function Start-OAuthLoopbackListener([int]$Port = 53682, [int]$TimeoutSeconds = 120, [string]$ExpectedState) {
@@ -273,13 +330,24 @@ function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext, [scriptblock]$C
     }
 }
 
-function Exchange-GoogleAuthCode([string]$ClientId, [string]$ClientSecret, [string]$Code, [string]$RedirectUri) {
+function Exchange-GoogleAuthCode(
+    [string]$ClientId,
+    [string]$ClientSecret,
+    [string]$Code,
+    [string]$RedirectUri,
+    [string]$CodeVerifier = $null
+) {
     $body = @{
         client_id = $ClientId
-        client_secret = $ClientSecret
         code = $Code
         grant_type = 'authorization_code'
         redirect_uri = $RedirectUri
+    }
+    if (-not [string]::IsNullOrEmpty($ClientSecret)) {
+        $body['client_secret'] = $ClientSecret
+    }
+    if (-not [string]::IsNullOrEmpty($CodeVerifier)) {
+        $body['code_verifier'] = $CodeVerifier
     }
 
     try {
@@ -317,9 +385,11 @@ function Exchange-GoogleAuthCode([string]$ClientId, [string]$ClientSecret, [stri
 function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [string]$RefreshToken) {
     $body = @{
         client_id = $ClientId
-        client_secret = $ClientSecret
         refresh_token = $RefreshToken
         grant_type = 'refresh_token'
+    }
+    if (-not [string]::IsNullOrEmpty($ClientSecret)) {
+        $body['client_secret'] = $ClientSecret
     }
 
     try {
