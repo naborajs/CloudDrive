@@ -32,13 +32,20 @@ if ($dialogContent -notmatch '\$contentScroll\.HorizontalScrollBarVisibility\s*=
 Write-Output '  [PASS] ProviderConnectionWindow.ps1 disables horizontal scrollbar to prevent layout overflow'
 
 # 4. Test NSCloudDrive.ps1 loads cleanly in STA without throwing
-$dotSourceCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\NSCloudDrive.ps1'); if (`$window -and `$providersGrid) { 'LoadedOK' } else { 'Failed' } }"
+$dotSourceCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\NSCloudDrive.ps1'); if (`$window -and `$providersGrid -and `$addDiskBtn) { 'LoadedOK' } else { 'Failed' } }"
 if ($dotSourceCheck -notmatch 'LoadedOK') {
     throw "Failed to load NSCloudDrive.ps1 cleanly in STA session: $dotSourceCheck"
 }
-Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA and constructs window elements'
+Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA and constructs window elements including Add Cloud Disk'
 
-# 5. Test single-instance mutex detection and second-instance graceful foreground restoration
+# 5. Test Show-AddCloudDiskModal function exists and loads cleanly
+$modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if (Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) { 'ModalOK' } else { 'Failed' } }"
+if ($modalCheck -notmatch 'ModalOK') {
+    throw "Show-AddCloudDiskModal is not exported or defined in ProviderConnectionWindow.ps1: $modalCheck"
+}
+Write-Output '  [PASS] Show-AddCloudDiskModal definition verified'
+
+# 6. Test single-instance mutex detection and second-instance graceful foreground restoration
 $createdNew = $false
 $testMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$createdNew)
 try {
