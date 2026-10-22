@@ -47,7 +47,7 @@ After installing Go from a source you trust, run the helper from the repository 
 powershell.exe -NoProfile -File .\scripts\Build-PatchedRclone.ps1
 ```
 
-The helper needs Git (already present in this environment) and Go 1.26 or newer; it does not require MinGW or WinFsp Developer headers. The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. The revised helper passes PowerShell syntax and missing-Go preflight checks, but has not compiled the pinned source. A successful build must report `windows/amd64`, `cmount`, and the registered `terabox` provider. Account login, Explorer mounting, file reads, and writes remain unverified.
+The helper needs Git (already present in this environment) and Go 1.26 or newer; it does not require MinGW or WinFsp Developer headers. The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. Its `rclone.build.json` records the source commit, Go version, cgo mode, patch hash, executable hash, target, build tag, and backend. The revised helper passes PowerShell syntax and missing-Go preflight checks, but has not compiled the pinned source. A successful build must report `windows/amd64`, `cmount`, and the registered `terabox` provider. Account login, Explorer mounting, file reads, and writes remain unverified.
 
 ## Read-only mount test
 
