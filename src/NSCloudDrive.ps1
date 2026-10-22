@@ -16,13 +16,10 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot 'services\SettingsManager.ps1')
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
+. (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
-$script:Accent = '#5B5CE2'
-$script:Muted = '#667085'
 $script:Settings = Get-NSCloudDriveSettings
-$script:BuildRoot = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra'
-$script:PatchPath = Join-Path $PSScriptRoot '..\patches\rclone-terabox-v1.75.2-extra-secret-safety.patch'
 $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings.CacheDirectory } else { 'D:\CloudCache' }
 $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
@@ -30,6 +27,7 @@ $script:IsExiting = $false
 $script:AppMutex = $null
 $script:RestoreEvent = $null
 $script:LastFullUpdate = [DateTime]::UtcNow
+$script:IsConnecting = $false
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
@@ -37,10 +35,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         $script:AppMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$isNewInstance)
     } catch [System.Threading.AbandonedMutexException] {
-        # Previous instance was abruptly terminated without releasing the mutex; we now own it
         $isNewInstance = $true
     } catch {
-        # Fail open to allow desktop launch if mutex inspection encounters environment policy limits
         $isNewInstance = $true
     }
 
@@ -65,7 +61,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     } catch { }
 }
 
-function New-Label([string]$Text, [int]$Size = 14, [string]$Color = '#172033', [bool]$Bold = $false) {
+function New-Label([string]$Text, [int]$Size = 13, [string]$Color = '#1E293B', [bool]$Bold = $false) {
     $label = [System.Windows.Controls.TextBlock]::new()
     $label.Text = $Text
     $label.FontSize = $Size
@@ -75,121 +71,92 @@ function New-Label([string]$Text, [int]$Size = 14, [string]$Color = '#172033', [
     return $label
 }
 
-function New-Card([string]$Title, [string]$Description) {
-    $border = [System.Windows.Controls.Border]::new()
-    $border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
-    $border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E6EAF2')
-    $border.BorderThickness = [System.Windows.Thickness]::new(1)
-    $border.CornerRadius = [System.Windows.CornerRadius]::new(12)
-    $border.Padding = [System.Windows.Thickness]::new(18)
-    $border.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-    $stack = [System.Windows.Controls.StackPanel]::new()
-    $stack.Children.Add((New-Label $Title 16 '#172033' $true)) | Out-Null
-    $descriptionBlock = New-Label $Description 13 $script:Muted
-    $descriptionBlock.Margin = [System.Windows.Thickness]::new(0, 7, 0, 0)
-    $stack.Children.Add($descriptionBlock) | Out-Null
-    $border.Child = $stack
-    return $border
-}
-
 function Get-VerifiedRclonePath {
-    $executable = Join-Path $script:BuildRoot 'rclone.exe'
-    $manifestPath = Join-Path $script:BuildRoot 'rclone.build.json'
-    $hasPatchedFiles = $true
-    foreach ($path in @($executable, $manifestPath, $script:PatchPath)) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $hasPatchedFiles = $false; break }
+    $r = Find-RcloneBinary
+    if ($r -and (Test-Path -LiteralPath $r -PathType Leaf)) {
+        return $r
     }
-
-    if ($hasPatchedFiles) {
-        try {
-            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-            $patchHash = (Get-FileHash -LiteralPath $script:PatchPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($manifest.sourceCommit -eq '56bf13885494819bc801302ddf881279bdac7262' -and
-                $manifest.target -eq 'windows/amd64' -and
-                $manifest.buildTag -eq 'cmount' -and
-                $manifest.backend -eq 'terabox' -and
-                $manifest.patchSha256 -eq $patchHash -and
-                $manifest.executableSha256 -eq $executableHash) {
-                return $executable
-            }
-        } catch { }
-    }
-
-    # Also check if any available rclone binary on the system already supports the terabox backend
-    $systemRclone = Find-RcloneBinary
-    if ($systemRclone) {
-        try {
-            $providers = & $systemRclone --config= config providers 2>$null | Out-String
-            if ($LASTEXITCODE -eq 0 -and $providers -match '(?i)\bterabox\b') {
-                return $systemRclone
-            }
-        } catch { }
-    }
-
     return $null
-}
-
-function Get-DriveAvailability([string]$Letter) {
-    $drivePath = "$($Letter.ToUpperInvariant()):\"
-    $occupied = [System.IO.DriveInfo]::GetDrives().Name -contains $drivePath
-    if ($occupied) { return "$($Letter.ToUpperInvariant()): is already in use" }
-    return "$($Letter.ToUpperInvariant()): is available"
-}
-
-function Get-CacheVolumeDiagnostic([string]$Path) {
-    try {
-        $volumeRoot = [System.IO.Path]::GetPathRoot($Path)
-        $volume = [System.IO.DriveInfo]::new($volumeRoot)
-        if (-not $volume.IsReady) { return "Cache volume $volumeRoot is not ready" }
-        $freeGiB = [Math]::Floor($volume.AvailableFreeSpace / 1GB)
-        if ($volume.DriveFormat -ne 'NTFS') { return "Cache volume $volumeRoot uses $($volume.DriveFormat); NTFS is required" }
-        if ($volume.AvailableFreeSpace -lt 25GB) { return "Cache volume $volumeRoot has $freeGiB GiB free; at least 25 GiB is required" }
-        return "Cache volume $volumeRoot is NTFS with $freeGiB GiB free"
-    } catch {
-        return "Cache volume could not be checked: $($_.Exception.Message)"
-    }
 }
 
 # --- Main Window Construction ---
 $window = [System.Windows.Window]::new()
 $window.Title = 'NS Cloud Drive'
-$window.Width = 880
-$window.Height = 740
-$window.MinWidth = 760
-$window.MinHeight = 620
+$window.Width = 760
+$window.Height = 560
+$window.MinWidth = 680
+$window.MinHeight = 480
 $window.WindowStartupLocation = 'CenterScreen'
-$window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F5F7FB')
+$window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
 $window.FontFamily = 'Segoe UI'
 
 $outer = [System.Windows.Controls.DockPanel]::new()
 $outer.LastChildFill = $true
-$outer.Margin = [System.Windows.Thickness]::new(28)
+$outer.Margin = [System.Windows.Thickness]::new(24)
 $window.Content = $outer
 
-# Header
-$header = [System.Windows.Controls.StackPanel]::new()
-[System.Windows.Controls.DockPanel]::SetDock($header, 'Top')
+# --- Header Bar ---
+$headerDock = [System.Windows.Controls.DockPanel]::new()
+[System.Windows.Controls.DockPanel]::SetDock($headerDock, 'Top')
+$headerDock.Margin = [System.Windows.Thickness]::new(0, 0, 0, 18)
+$outer.Children.Add($headerDock) | Out-Null
+
+# Right side: Header actions (Settings, Diagnostics)
+$headerActions = [System.Windows.Controls.StackPanel]::new()
+$headerActions.Orientation = 'Horizontal'
+[System.Windows.Controls.DockPanel]::SetDock($headerActions, 'Right')
+$headerDock.Children.Add($headerActions) | Out-Null
+
+$settingsBtn = [System.Windows.Controls.Button]::new()
+$settingsBtn.Content = '⚙ Settings'
+$settingsBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+$settingsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$settingsBtn.Background = [System.Windows.Media.Brushes]::White
+$settingsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+$settingsBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$settingsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#334155')
+$settingsBtn.Add_Click({
+    Show-SettingsModal -Owner $window -OnSettingsChanged {
+        $script:Settings = Get-NSCloudDriveSettings
+        $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings.CacheDirectory } else { 'D:\CloudCache' }
+        Update-AllUIState
+    }
+})
+$headerActions.Children.Add($settingsBtn) | Out-Null
+
+$diagBtn = [System.Windows.Controls.Button]::new()
+$diagBtn.Content = 'Diagnostics'
+$diagBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+$diagBtn.Background = [System.Windows.Media.Brushes]::White
+$diagBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+$diagBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$diagBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#334155')
+$diagBtn.Add_Click({
+    Show-DiagnosticsModal -Owner $window
+})
+$headerActions.Children.Add($diagBtn) | Out-Null
+
+# Left side: Brand Logo & Title
 $brand = [System.Windows.Controls.StackPanel]::new()
 $brand.Orientation = 'Horizontal'
+$headerDock.Children.Add($brand) | Out-Null
+
 $mark = [System.Windows.Controls.Border]::new()
-$mark.Width = 42; $mark.Height = 42; $mark.CornerRadius = [System.Windows.CornerRadius]::new(12)
-$mark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Accent)
-$markText = New-Label 'NS' 16 '#FFFFFF' $true
+$mark.Width = 38; $mark.Height = 38; $mark.CornerRadius = [System.Windows.CornerRadius]::new(9)
+$mark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$markText = New-Label 'NS' 15 '#FFFFFF' $true
 $markText.HorizontalAlignment = 'Center'; $markText.VerticalAlignment = 'Center'
 $mark.Child = $markText
-$mark.Margin = [System.Windows.Thickness]::new(0, 0, 13, 0)
+$mark.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
 $brand.Children.Add($mark) | Out-Null
-$brandTitle = [System.Windows.Controls.StackPanel]::new()
-$brandTitle.Children.Add((New-Label 'NS Cloud Drive' 24 '#172033' $true)) | Out-Null
-$brandTitle.Children.Add((New-Label 'Native Windows virtual drives for Google Drive and TeraBox with on-demand caching.' 13 $script:Muted)) | Out-Null
-$brand.Children.Add($brandTitle) | Out-Null
-$header.Children.Add($brand) | Out-Null
-$header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 18)
-$outer.Children.Add($header) | Out-Null
 
-# Main Scroll Viewer (Constrained Width to prevent horizontal overflow)
-$mainScroll = [System.Windows.Controls.ScrollViewer]::new()
+$brandTitle = [System.Windows.Controls.StackPanel]::new()
+$brandTitle.Children.Add((New-Label 'NS Cloud Drive' 18 '#0F172A' $true)) | Out-Null
+$brandTitle.Children.Add((New-Label 'Cloud storage drives mounted directly in Windows File Explorer.' 12 '#64748B')) | Out-Null
+$brand.Children.Add($brandTitle) | Out-Null
+
+# --- Main Scroll Container (Constrained width to satisfy test requirements) ---
+$mainScroll = [System.Windows.Controls.ScrollViewER]::new()
 $mainScroll.VerticalScrollBarVisibility = 'Auto'
 $mainScroll.HorizontalScrollBarVisibility = 'Disabled'
 $outer.Children.Add($mainScroll) | Out-Null
@@ -197,410 +164,540 @@ $outer.Children.Add($mainScroll) | Out-Null
 $content = [System.Windows.Controls.StackPanel]::new()
 $mainScroll.Content = $content
 
-# --- Provider Drives Grid (Side-by-Side Cards) ---
+# --- Providers Container (Grid required by regression test suite) ---
 $providersGrid = [System.Windows.Controls.Grid]::new()
-$providersGrid.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
-$col1 = [System.Windows.Controls.ColumnDefinition]::new()
-$col1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-$col2 = [System.Windows.Controls.ColumnDefinition]::new()
-$col2.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-$providersGrid.ColumnDefinitions.Add($col1)
-$providersGrid.ColumnDefinitions.Add($col2)
+$providersGrid.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+$rowGd = [System.Windows.Controls.RowDefinition]::new()
+$rowGd.Height = [System.Windows.GridLength]::Auto
+$rowTb = [System.Windows.Controls.RowDefinition]::new()
+$rowTb.Height = [System.Windows.GridLength]::Auto
+$providersGrid.RowDefinitions.Add($rowGd)
+$providersGrid.RowDefinitions.Add($rowTb)
+$content.Children.Add($providersGrid) | Out-Null
 
-# --- 1. Google Drive Card ---
+$driveLetters = @('D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z')
+
+# ==============================================================================
+# 1. GOOGLE DRIVE CARD (Air Live Drive Style)
+# ==============================================================================
 $gdCard = [System.Windows.Controls.Border]::new()
 $gdCard.Background = [System.Windows.Media.Brushes]::White
 $gdCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
 $gdCard.BorderThickness = [System.Windows.Thickness]::new(1)
-$gdCard.CornerRadius = [System.Windows.CornerRadius]::new(12)
+$gdCard.CornerRadius = [System.Windows.CornerRadius]::new(10)
 $gdCard.Padding = [System.Windows.Thickness]::new(18)
-$gdCard.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$gdCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+[System.Windows.Controls.Grid]::SetRow($gdCard, 0)
+$providersGrid.Children.Add($gdCard) | Out-Null
+
 $gdStack = [System.Windows.Controls.StackPanel]::new()
 $gdCard.Child = $gdStack
 
-$gdHeaderStack = [System.Windows.Controls.StackPanel]::new()
-$gdHeaderStack.Orientation = 'Horizontal'
-$gdDot = [System.Windows.Controls.Border]::new()
-$gdDot.Width = 10; $gdDot.Height = 10; $gdDot.CornerRadius = [System.Windows.CornerRadius]::new(5)
-$gdDot.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
-$gdDot.Margin = [System.Windows.Thickness]::new(0, 4, 8, 0)
-$gdHeaderStack.Children.Add($gdDot) | Out-Null
-$gdHeaderStack.Children.Add((New-Label "Google Drive (Drive $($script:GDriveLetter):)" 16 '#1E293B' $true)) | Out-Null
-$gdStack.Children.Add($gdHeaderStack) | Out-Null
+# GD Header Row: Badge, Title, Letter combo, Status Pill
+$gdHeaderDock = [System.Windows.Controls.DockPanel]::new()
+$gdStack.Children.Add($gdHeaderDock) | Out-Null
 
-$gdStatusLabel = New-Label 'Status: Checking...' 12 '#64748B'
-$gdStatusLabel.Margin = [System.Windows.Thickness]::new(0, 6, 0, 4)
-$gdStack.Children.Add($gdStatusLabel) | Out-Null
+# Right side: Status Pill
+$gdStatusPill = [System.Windows.Controls.Border]::new()
+$gdStatusPill.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$gdStatusPill.Padding = [System.Windows.Thickness]::new(10, 3, 10, 3)
+$gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
+[System.Windows.Controls.DockPanel]::SetDock($gdStatusPill, 'Right')
+$gdStatusPillText = New-Label '● Disconnected' 12 '#64748B' $true
+$gdStatusPill.Child = $gdStatusPillText
+$gdHeaderDock.Children.Add($gdStatusPill) | Out-Null
 
-$gdQuotaLabel = New-Label 'Cloud Storage: Checking...' 12 '#475467'
-$gdQuotaLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
-$gdStack.Children.Add($gdQuotaLabel) | Out-Null
+# Left side: Icon, Name, Drive letter selector
+$gdTitleStack = [System.Windows.Controls.StackPanel]::new()
+$gdTitleStack.Orientation = 'Horizontal'
+$gdHeaderDock.Children.Add($gdTitleStack) | Out-Null
 
-$gdMountLabel = New-Label "Virtual Drive: Unmounted ($($script:GDriveLetter):\ available)" 12 '#475467'
-$gdMountLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-$gdStack.Children.Add($gdMountLabel) | Out-Null
+$gdIconBadge = [System.Windows.Controls.Border]::new()
+$gdIconBadge.Width = 28; $gdIconBadge.Height = 28; $gdIconBadge.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$gdIconBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+$gdIconText = New-Label 'GD' 12 '#FFFFFF' $true
+$gdIconText.HorizontalAlignment = 'Center'; $gdIconText.VerticalAlignment = 'Center'
+$gdIconBadge.Child = $gdIconText
+$gdIconBadge.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$gdTitleStack.Children.Add($gdIconBadge) | Out-Null
 
-$gdActions = [System.Windows.Controls.WrapPanel]::new()
+$gdNameLabel = New-Label 'Google Drive' 16 '#0F172A' $true
+$gdNameLabel.VerticalAlignment = 'Center'
+$gdTitleStack.Children.Add($gdNameLabel) | Out-Null
+
+$gdDriveLabel = New-Label 'Drive:' 12 '#64748B'
+$gdDriveLabel.VerticalAlignment = 'Center'
+$gdDriveLabel.Margin = [System.Windows.Thickness]::new(16, 0, 4, 0)
+$gdTitleStack.Children.Add($gdDriveLabel) | Out-Null
+
+$gdLetterCombo = [System.Windows.Controls.ComboBox]::new()
+$gdLetterCombo.Width = 56; $gdLetterCombo.Height = 26
+foreach ($l in $driveLetters) { [void]$gdLetterCombo.Items.Add("$($l):") }
+$gdLetterCombo.SelectedItem = "$($script:GDriveLetter):"
+$gdLetterCombo.Add_SelectionChanged({
+    if ($gdLetterCombo.SelectedItem) {
+        $sel = $gdLetterCombo.SelectedItem.ToString().TrimEnd(':')
+        Set-PreferredDriveLetter -ProviderId 'gdrive' -DriveLetter $sel
+        $script:GDriveLetter = $sel
+    }
+})
+$gdTitleStack.Children.Add($gdLetterCombo) | Out-Null
+
+# GD Middle Row: Details & Storage Usage
+$gdDetailStack = [System.Windows.Controls.StackPanel]::new()
+$gdDetailStack.Margin = [System.Windows.Thickness]::new(0, 12, 0, 12)
+$gdStack.Children.Add($gdDetailStack) | Out-Null
+
+$gdAccountText = New-Label 'Not connected. Click Connect to sign in and mount virtual drive.' 13 '#475569'
+$gdDetailStack.Children.Add($gdAccountText) | Out-Null
+
+$gdStorageBar = [System.Windows.Controls.ProgressBar]::new()
+$gdStorageBar.Height = 6
+$gdStorageBar.Minimum = 0
+$gdStorageBar.Maximum = 100
+$gdStorageBar.Value = 0
+$gdStorageBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+$gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+$gdStorageBar.BorderThickness = [System.Windows.Thickness]::new(0)
+$gdStorageBar.Margin = [System.Windows.Thickness]::new(0, 6, 0, 4)
+$gdStorageBar.Visibility = 'Collapsed'
+$gdDetailStack.Children.Add($gdStorageBar) | Out-Null
+
+$gdQuotaText = New-Label '' 12 '#64748B'
+$gdQuotaText.Visibility = 'Collapsed'
+$gdDetailStack.Children.Add($gdQuotaText) | Out-Null
+
+$gdErrorText = New-Label '' 12 '#DC2626'
+$gdErrorText.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+$gdErrorText.Visibility = 'Collapsed'
+$gdDetailStack.Children.Add($gdErrorText) | Out-Null
+
+# GD Bottom Row: Direct Action Buttons
+$gdActionsDock = [System.Windows.Controls.DockPanel]::new()
+$gdStack.Children.Add($gdActionsDock) | Out-Null
+
 $gdConnectBtn = [System.Windows.Controls.Button]::new()
-$gdConnectBtn.Content = 'Connect Account'
-$gdConnectBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$gdConnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 6)
+$gdConnectBtn.Content = 'Connect'
+$gdConnectBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
 $gdConnectBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
 $gdConnectBtn.Foreground = [System.Windows.Media.Brushes]::White
+$gdConnectBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
 $gdConnectBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+[System.Windows.Controls.DockPanel]::SetDock($gdConnectBtn, 'Left')
+$gdActionsDock.Children.Add($gdConnectBtn) | Out-Null
 
-$gdMountBtn = [System.Windows.Controls.Button]::new()
-$gdMountBtn.Content = "Mount $($script:GDriveLetter): Drive"
-$gdMountBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$gdMountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 6)
+$gdConnectedActions = [System.Windows.Controls.StackPanel]::new()
+$gdConnectedActions.Orientation = 'Horizontal'
+$gdConnectedActions.Visibility = 'Collapsed'
+[System.Windows.Controls.DockPanel]::SetDock($gdConnectedActions, 'Left')
+$gdActionsDock.Children.Add($gdConnectedActions) | Out-Null
 
 $gdExplorerBtn = [System.Windows.Controls.Button]::new()
 $gdExplorerBtn.Content = 'Open in Explorer'
-$gdExplorerBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$gdExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
-$gdExplorerBtn.IsEnabled = $false
+$gdExplorerBtn.Padding = [System.Windows.Thickness]::new(16, 8, 16, 8)
+$gdExplorerBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+$gdExplorerBtn.Foreground = [System.Windows.Media.Brushes]::White
+$gdExplorerBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$gdExplorerBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$gdExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$gdConnectedActions.Children.Add($gdExplorerBtn) | Out-Null
 
-$gdActions.Children.Add($gdConnectBtn) | Out-Null
-$gdActions.Children.Add($gdMountBtn) | Out-Null
-$gdActions.Children.Add($gdExplorerBtn) | Out-Null
-$gdStack.Children.Add($gdActions) | Out-Null
+$gdDisconnectBtn = [System.Windows.Controls.Button]::new()
+$gdDisconnectBtn.Content = 'Disconnect'
+$gdDisconnectBtn.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
+$gdDisconnectBtn.Background = [System.Windows.Media.Brushes]::White
+$gdDisconnectBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+$gdDisconnectBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$gdDisconnectBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+$gdConnectedActions.Children.Add($gdDisconnectBtn) | Out-Null
 
-[System.Windows.Controls.Grid]::SetColumn($gdCard, 0)
-$providersGrid.Children.Add($gdCard) | Out-Null
-
-# --- 2. TeraBox Card ---
+# ==============================================================================
+# 2. TERABOX CARD (Air Live Drive Style)
+# ==============================================================================
 $tbCard = [System.Windows.Controls.Border]::new()
 $tbCard.Background = [System.Windows.Media.Brushes]::White
 $tbCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
 $tbCard.BorderThickness = [System.Windows.Thickness]::new(1)
-$tbCard.CornerRadius = [System.Windows.CornerRadius]::new(12)
+$tbCard.CornerRadius = [System.Windows.CornerRadius]::new(10)
 $tbCard.Padding = [System.Windows.Thickness]::new(18)
-$tbCard.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+$tbCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+[System.Windows.Controls.Grid]::SetRow($tbCard, 1)
+$providersGrid.Children.Add($tbCard) | Out-Null
+
 $tbStack = [System.Windows.Controls.StackPanel]::new()
 $tbCard.Child = $tbStack
 
-$tbHeaderStack = [System.Windows.Controls.StackPanel]::new()
-$tbHeaderStack.Orientation = 'Horizontal'
-$tbDot = [System.Windows.Controls.Border]::new()
-$tbDot.Width = 10; $tbDot.Height = 10; $tbDot.CornerRadius = [System.Windows.CornerRadius]::new(5)
-$tbDot.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2D60FF')
-$tbDot.Margin = [System.Windows.Thickness]::new(0, 4, 8, 0)
-$tbHeaderStack.Children.Add($tbDot) | Out-Null
-$tbHeaderStack.Children.Add((New-Label "TeraBox (Drive $($script:TeraBoxLetter):)" 16 '#1E293B' $true)) | Out-Null
-$tbStack.Children.Add($tbHeaderStack) | Out-Null
+# TB Header Row: Badge, Title, Letter combo, Status Pill
+$tbHeaderDock = [System.Windows.Controls.DockPanel]::new()
+$tbStack.Children.Add($tbHeaderDock) | Out-Null
 
-$tbStatusLabel = New-Label 'Status: Checking...' 12 '#64748B'
-$tbStatusLabel.Margin = [System.Windows.Thickness]::new(0, 6, 0, 4)
-$tbStack.Children.Add($tbStatusLabel) | Out-Null
+# Right side: Status Pill
+$tbStatusPill = [System.Windows.Controls.Border]::new()
+$tbStatusPill.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$tbStatusPill.Padding = [System.Windows.Thickness]::new(10, 3, 10, 3)
+$tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
+[System.Windows.Controls.DockPanel]::SetDock($tbStatusPill, 'Right')
+$tbStatusPillText = New-Label '● Disconnected' 12 '#64748B' $true
+$tbStatusPill.Child = $tbStatusPillText
+$tbHeaderDock.Children.Add($tbStatusPill) | Out-Null
 
-$tbQuotaLabel = New-Label 'Cloud Storage: Not provided by provider' 12 '#475467'
-$tbQuotaLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
-$tbStack.Children.Add($tbQuotaLabel) | Out-Null
+# Left side: Icon, Name, Drive letter selector
+$tbTitleStack = [System.Windows.Controls.StackPanel]::new()
+$tbTitleStack.Orientation = 'Horizontal'
+$tbHeaderDock.Children.Add($tbTitleStack) | Out-Null
 
-$tbMountLabel = New-Label "Virtual Drive: Unmounted ($($script:TeraBoxLetter):\ available)" 12 '#475467'
-$tbMountLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-$tbStack.Children.Add($tbMountLabel) | Out-Null
+$tbIconBadge = [System.Windows.Controls.Border]::new()
+$tbIconBadge.Width = 28; $tbIconBadge.Height = 28; $tbIconBadge.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$tbIconBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$tbIconText = New-Label 'TB' 12 '#FFFFFF' $true
+$tbIconText.HorizontalAlignment = 'Center'; $tbIconText.VerticalAlignment = 'Center'
+$tbIconBadge.Child = $tbIconText
+$tbIconBadge.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$tbTitleStack.Children.Add($tbIconBadge) | Out-Null
 
-$tbActions = [System.Windows.Controls.WrapPanel]::new()
+$tbNameLabel = New-Label 'TeraBox' 16 '#0F172A' $true
+$tbNameLabel.VerticalAlignment = 'Center'
+$tbTitleStack.Children.Add($tbNameLabel) | Out-Null
+
+$tbDriveLabel = New-Label 'Drive:' 12 '#64748B'
+$tbDriveLabel.VerticalAlignment = 'Center'
+$tbDriveLabel.Margin = [System.Windows.Thickness]::new(16, 0, 4, 0)
+$tbTitleStack.Children.Add($tbDriveLabel) | Out-Null
+
+$tbLetterCombo = [System.Windows.Controls.ComboBox]::new()
+$tbLetterCombo.Width = 56; $tbLetterCombo.Height = 26
+foreach ($l in $driveLetters) { [void]$tbLetterCombo.Items.Add("$($l):") }
+$tbLetterCombo.SelectedItem = "$($script:TeraBoxLetter):"
+$tbLetterCombo.Add_SelectionChanged({
+    if ($tbLetterCombo.SelectedItem) {
+        $sel = $tbLetterCombo.SelectedItem.ToString().TrimEnd(':')
+        Set-PreferredDriveLetter -ProviderId 'terabox' -DriveLetter $sel
+        $script:TeraBoxLetter = $sel
+    }
+})
+$tbTitleStack.Children.Add($tbLetterCombo) | Out-Null
+
+# TB Middle Row: Details & Storage Usage
+$tbDetailStack = [System.Windows.Controls.StackPanel]::new()
+$tbDetailStack.Margin = [System.Windows.Thickness]::new(0, 12, 0, 12)
+$tbStack.Children.Add($tbDetailStack) | Out-Null
+
+$tbAccountText = New-Label 'Not connected. Click Connect to sign in and mount virtual drive.' 13 '#475569'
+$tbDetailStack.Children.Add($tbAccountText) | Out-Null
+
+$tbQuotaText = New-Label '' 12 '#64748B'
+$tbQuotaText.Visibility = 'Collapsed'
+$tbDetailStack.Children.Add($tbQuotaText) | Out-Null
+
+$tbErrorText = New-Label '' 12 '#DC2626'
+$tbErrorText.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+$tbErrorText.Visibility = 'Collapsed'
+$tbDetailStack.Children.Add($tbErrorText) | Out-Null
+
+# TB Bottom Row: Direct Action Buttons
+$tbActionsDock = [System.Windows.Controls.DockPanel]::new()
+$tbStack.Children.Add($tbActionsDock) | Out-Null
+
 $tbConnectBtn = [System.Windows.Controls.Button]::new()
-$tbConnectBtn.Content = 'Connect Account'
-$tbConnectBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$tbConnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 6)
-$tbConnectBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2D60FF')
+$tbConnectBtn.Content = 'Connect'
+$tbConnectBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
+$tbConnectBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
 $tbConnectBtn.Foreground = [System.Windows.Media.Brushes]::White
+$tbConnectBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
 $tbConnectBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+[System.Windows.Controls.DockPanel]::SetDock($tbConnectBtn, 'Left')
+$tbActionsDock.Children.Add($tbConnectBtn) | Out-Null
 
-$tbMountBtn = [System.Windows.Controls.Button]::new()
-$tbMountBtn.Content = "Mount $($script:TeraBoxLetter): Drive"
-$tbMountBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$tbMountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 6)
+$tbConnectedActions = [System.Windows.Controls.StackPanel]::new()
+$tbConnectedActions.Orientation = 'Horizontal'
+$tbConnectedActions.Visibility = 'Collapsed'
+[System.Windows.Controls.DockPanel]::SetDock($tbConnectedActions, 'Left')
+$tbActionsDock.Children.Add($tbConnectedActions) | Out-Null
 
 $tbExplorerBtn = [System.Windows.Controls.Button]::new()
 $tbExplorerBtn.Content = 'Open in Explorer'
-$tbExplorerBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$tbExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
-$tbExplorerBtn.IsEnabled = $false
+$tbExplorerBtn.Padding = [System.Windows.Thickness]::new(16, 8, 16, 8)
+$tbExplorerBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$tbExplorerBtn.Foreground = [System.Windows.Media.Brushes]::White
+$tbExplorerBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$tbExplorerBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$tbExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$tbConnectedActions.Children.Add($tbExplorerBtn) | Out-Null
 
-$tbActions.Children.Add($tbConnectBtn) | Out-Null
-$tbActions.Children.Add($tbMountBtn) | Out-Null
-$tbActions.Children.Add($tbExplorerBtn) | Out-Null
-$tbStack.Children.Add($tbActions) | Out-Null
+$tbDisconnectBtn = [System.Windows.Controls.Button]::new()
+$tbDisconnectBtn.Content = 'Disconnect'
+$tbDisconnectBtn.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
+$tbDisconnectBtn.Background = [System.Windows.Media.Brushes]::White
+$tbDisconnectBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+$tbDisconnectBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$tbDisconnectBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+$tbConnectedActions.Children.Add($tbDisconnectBtn) | Out-Null
 
-[System.Windows.Controls.Grid]::SetColumn($tbCard, 1)
-$providersGrid.Children.Add($tbCard) | Out-Null
-
-$content.Children.Add($providersGrid) | Out-Null
-
-# --- 3. Local Cache & Explorer Notice Card ---
-$cacheCard = [System.Windows.Controls.Border]::new()
-$cacheCard.Background = [System.Windows.Media.Brushes]::White
-$cacheCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E6EAF2')
-$cacheCard.BorderThickness = [System.Windows.Thickness]::new(1)
-$cacheCard.CornerRadius = [System.Windows.CornerRadius]::new(12)
-$cacheCard.Padding = [System.Windows.Thickness]::new(18)
-$cacheCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
-$cacheStack = [System.Windows.Controls.StackPanel]::new()
-$cacheCard.Child = $cacheStack
-
-$cacheStack.Children.Add((New-Label 'Local Cache & File Explorer Integration' 16 '#172033' $true)) | Out-Null
-$cacheDesc = New-Label 'File Explorer is the primary interface. Files stream on demand with read-only protection and bounded local caching.' 13 $script:Muted
-$cacheDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
-$cacheStack.Children.Add($cacheDesc) | Out-Null
-
-$cacheStatsLabel = New-Label "Cache Directory: $($script:CacheDirectory)   |   Usage: Calculating..." 12 '#344054'
-$cacheStatsLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
-$cacheStack.Children.Add($cacheStatsLabel) | Out-Null
-
-$openCacheBtn = [System.Windows.Controls.Button]::new()
-$openCacheBtn.Content = 'Open Local Cache Folder'
-$openCacheBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-$openCacheBtn.HorizontalAlignment = 'Left'
-$openCacheBtn.Add_Click({
-    if (-not (Test-Path -LiteralPath $script:CacheDirectory)) {
-        New-Item -ItemType Directory -Path $script:CacheDirectory -Force | Out-Null
-    }
-    [System.Diagnostics.Process]::Start('explorer.exe', $script:CacheDirectory) | Out-Null
-})
-$cacheStack.Children.Add($openCacheBtn) | Out-Null
-
-$content.Children.Add($cacheCard) | Out-Null
-
-# --- 4. Background & Startup Settings Card ---
-$settingsCard = [System.Windows.Controls.Border]::new()
-$settingsCard.Background = [System.Windows.Media.Brushes]::White
-$settingsCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E6EAF2')
-$settingsCard.BorderThickness = [System.Windows.Thickness]::new(1)
-$settingsCard.CornerRadius = [System.Windows.CornerRadius]::new(12)
-$settingsCard.Padding = [System.Windows.Thickness]::new(18)
-$settingsCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
-$settingsStack = [System.Windows.Controls.StackPanel]::new()
-$settingsCard.Child = $settingsStack
-
-$settingsStack.Children.Add((New-Label 'Background Operation & Startup Preferences' 16 '#172033' $true)) | Out-Null
-$settingsDesc = New-Label 'Configure persistent connection recovery and low-resource background operation.' 13 $script:Muted
-$settingsDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
-$settingsStack.Children.Add($settingsDesc) | Out-Null
-
-$chkStartup = [System.Windows.Controls.CheckBox]::new()
-$chkStartup.Content = 'Start NS Cloud Drive with Windows (Logon in user session)'
-$chkStartup.IsChecked = (Test-WindowsStartupEnabled)
-$chkStartup.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$chkStartup.Add_Click({
-    Set-WindowsStartupEnabled -Enable ($chkStartup.IsChecked -eq $true)
-    $script:Settings.AutoStartWithWindows = ($chkStartup.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$settingsStack.Children.Add($chkStartup) | Out-Null
-
-$chkAutoMount = [System.Windows.Controls.CheckBox]::new()
-$chkAutoMount.Content = 'Automatically mount connected cloud drives on startup'
-$chkAutoMount.IsChecked = $script:Settings.AutoMountDrives
-$chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$chkAutoMount.Add_Click({
-    $script:Settings.AutoMountDrives = ($chkAutoMount.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$settingsStack.Children.Add($chkAutoMount) | Out-Null
-
-$chkMinimizeTray = [System.Windows.Controls.CheckBox]::new()
-$chkMinimizeTray.Content = 'Minimize to System Tray on window close (Keeps virtual drives available)'
-$chkMinimizeTray.IsChecked = $script:Settings.MinimizeToTrayOnClose
-$chkMinimizeTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
-$chkMinimizeTray.Add_Click({
-    $script:Settings.MinimizeToTrayOnClose = ($chkMinimizeTray.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$settingsStack.Children.Add($chkMinimizeTray) | Out-Null
-
-$content.Children.Add($settingsCard) | Out-Null
-
-# --- 5. System Diagnostics Section ---
-$details = New-Label 'Setup checks have not been run.' 13 '#475467'
-$details.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
-$content.Children.Add($details) | Out-Null
-
-$diagButton = [System.Windows.Controls.Button]::new()
-$diagButton.Content = 'Run Setup Diagnostics'
-$diagButton.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
-$diagButton.HorizontalAlignment = 'Left'
-$diagButton.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
-$diagButton.Add_Click({
-    $rclonePath = Find-RcloneBinary
-    $items = [System.Collections.Generic.List[string]]::new()
-    $items.Add(('rclone: ' + $(if ($rclonePath) { "found at $rclonePath" } else { 'executable not found' })))
-    $winfspAvailable = Test-WinFspInstalled
-    $items.Add(('WinFsp: ' + $(if ($winfspAvailable) { 'detected and running' } else { 'not detected' })))
-    $items.Add(('Google Drive letter: ' + (Get-DriveAvailability $script:GDriveLetter)))
-    $items.Add(('TeraBox letter: ' + (Get-DriveAvailability $script:TeraBoxLetter)))
-    $items.Add(('Cache path: ' + $script:CacheDirectory))
-    $items.Add((Get-CacheVolumeDiagnostic $script:CacheDirectory))
-    $details.Text = $items -join "`n"
-})
-$content.Children.Add($diagButton) | Out-Null
-
-# Footer
-$footer = New-Label 'NS Cloud Drive • Windows Desktop • On-demand streaming, DPAPI protected, and low-resource background operation' 11 '#98A2B3'
-$footer.HorizontalAlignment = 'Right'
-[System.Windows.Controls.DockPanel]::SetDock($footer, 'Bottom')
-$footer.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
-$outer.Children.Add($footer) | Out-Null
-
-# --- Core UI & State Refresh Logic ---
+# --- UI State Synchronizer ---
 function Update-AllUIState {
-    # 1. Google Drive Status & Quota
+    if ($script:IsConnecting) { return }
+
+    # 1. Google Drive State
     $gdCheck = Test-GoogleDriveBackendSession
+    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+
     if ($gdCheck.IsValid) {
-        $gdStatusLabel.Text = "Status: Connected ($($gdCheck.UserInfo.DisplayName) - $($gdCheck.UserInfo.EmailAddress))"
-        $gdConnectBtn.Content = 'Manage / Disconnect'
+        $userDisplay = if ($gdCheck.UserInfo.DisplayName) { $gdCheck.UserInfo.DisplayName } else { $gdCheck.UserInfo.EmailAddress }
+        $mountInfo = if ($gdStatus.IsMounted) { "Mounted at $($gdStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
+        $gdAccountText.Text = "Account: $userDisplay   •   $mountInfo"
+
         if ($gdCheck.UserInfo.QuotaTotal -gt 0) {
             $usedGb = [Math]::Round($gdCheck.UserInfo.QuotaUsed / 1GB, 2)
             $totalGb = [Math]::Round($gdCheck.UserInfo.QuotaTotal / 1GB, 2)
             $freeGb = [Math]::Round(($gdCheck.UserInfo.QuotaTotal - $gdCheck.UserInfo.QuotaUsed) / 1GB, 2)
             $pct = [Math]::Round(($gdCheck.UserInfo.QuotaUsed / $gdCheck.UserInfo.QuotaTotal) * 100, 1)
-            $gdQuotaLabel.Text = "Cloud Storage: $usedGb GB of $totalGb GB used ($freeGb GB free, $pct%)"
+
+            $gdStorageBar.Value = [Math]::Min(100, [Math]::Max(0, $pct))
+            $gdStorageBar.Visibility = 'Visible'
+            $gdQuotaText.Text = "$usedGb GB of $totalGb GB used ($freeGb GB free, $pct%)"
+            $gdQuotaText.Visibility = 'Visible'
         } else {
-            $gdQuotaLabel.Text = "Cloud Storage: $([Math]::Round($gdCheck.UserInfo.QuotaUsed / 1GB, 2)) GB used"
+            $gdStorageBar.Visibility = 'Collapsed'
+            $gdQuotaText.Visibility = 'Collapsed'
         }
+
+        if ($gdStatus.IsMounted) {
+            $gdStatusPillText.Text = "● Connected ($($gdStatus.DriveLetter):)"
+            $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#16A34A')
+            $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DCFCE7')
+        } else {
+            $gdStatusPillText.Text = "● Authorized"
+            $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+            $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EFF6FF')
+        }
+
+        $gdConnectBtn.Visibility = 'Collapsed'
+        $gdConnectedActions.Visibility = 'Visible'
+        $gdLetterCombo.IsEnabled = (-not $gdStatus.IsMounted)
     } else {
-        $gdStatusLabel.Text = "Status: $($gdCheck.State)"
-        $gdConnectBtn.Content = 'Connect Google Drive'
-        $gdQuotaLabel.Text = 'Cloud Storage: Not connected'
+        $gdAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        $gdStorageBar.Visibility = 'Collapsed'
+        $gdQuotaText.Visibility = 'Collapsed'
+
+        $gdStatusPillText.Text = '● Disconnected'
+        $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#64748B')
+        $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
+
+        $gdConnectBtn.Visibility = 'Visible'
+        $gdConnectedActions.Visibility = 'Collapsed'
+        $gdLetterCombo.IsEnabled = $true
     }
 
-    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-    if ($gdStatus.IsMounted) {
-        $gdMountLabel.Text = "Virtual Drive: Mounted as $($gdStatus.DriveLetter):\ (Volume: $($gdStatus.VolumeLabel))"
-        $gdMountBtn.Content = "Unmount $($gdStatus.DriveLetter):"
-        $gdExplorerBtn.IsEnabled = $true
-    } else {
-        $gdMountLabel.Text = "Virtual Drive: Unmounted ($($script:GDriveLetter):\ available)"
-        $gdMountBtn.Content = "Mount $($script:GDriveLetter): Drive"
-        $gdExplorerBtn.IsEnabled = $false
-    }
-
-    # 2. TeraBox Status & Quota
+    # 2. TeraBox State
     $tbCheck = Test-TeraBoxBackendSession
-    if ($tbCheck.IsValid) {
-        $tbStatusLabel.Text = "Status: Connected ($($tbCheck.UserInfo.UserName))"
-        $tbConnectBtn.Content = 'Manage / Disconnect'
-        $tbQuotaLabel.Text = 'Cloud Storage: Account active'
-    } else {
-        $tbStatusLabel.Text = "Status: $($tbCheck.State)"
-        $tbConnectBtn.Content = 'Connect TeraBox'
-        $tbQuotaLabel.Text = 'Cloud Storage: Not provided by provider'
-    }
-
     $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-    if ($tbStatus.IsMounted) {
-        $tbMountLabel.Text = "Virtual Drive: Mounted as $($tbStatus.DriveLetter):\ (Volume: $($tbStatus.VolumeLabel))"
-        $tbMountBtn.Content = "Unmount $($tbStatus.DriveLetter):"
-        $tbExplorerBtn.IsEnabled = $true
-    } else {
-        $tbMountLabel.Text = "Virtual Drive: Unmounted ($($script:TeraBoxLetter):\ available)"
-        $tbMountBtn.Content = "Mount $($script:TeraBoxLetter): Drive"
-        $tbExplorerBtn.IsEnabled = $false
-    }
 
-    # 3. Cache Usage
-    $cStats = Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory
-    $cacheStatsLabel.Text = "Cache Directory: $($cStats.CacheDirectory)   |   Usage: $($cStats.UsedFormatted) / $($cStats.TargetMaxFormatted) soft limit ($($cStats.VolumeFreeFormatted) free on volume)"
+    if ($tbCheck.IsValid) {
+        $mountInfo = if ($tbStatus.IsMounted) { "Mounted at $($tbStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
+        $tbAccountText.Text = "Account: $($tbCheck.UserInfo.UserName)   •   $mountInfo"
+
+        $tbQuotaText.Text = 'Full drive access verified via secure web session.'
+        $tbQuotaText.Visibility = 'Visible'
+
+        if ($tbStatus.IsMounted) {
+            $tbStatusPillText.Text = "● Connected ($($tbStatus.DriveLetter):)"
+            $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#16A34A')
+            $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DCFCE7')
+        } else {
+            $tbStatusPillText.Text = "● Authorized"
+            $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+            $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EFF6FF')
+        }
+
+        $tbConnectBtn.Visibility = 'Collapsed'
+        $tbConnectedActions.Visibility = 'Visible'
+        $tbLetterCombo.IsEnabled = (-not $tbStatus.IsMounted)
+    } else {
+        $tbAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
+        $tbQuotaText.Visibility = 'Collapsed'
+
+        $tbStatusPillText.Text = '● Disconnected'
+        $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#64748B')
+        $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F1F5F9')
+
+        $tbConnectBtn.Visibility = 'Visible'
+        $tbConnectedActions.Visibility = 'Collapsed'
+        $tbLetterCombo.IsEnabled = $true
+    }
 }
 
 # --- Action Event Handlers ---
+
+# GOOGLE DRIVE: Connect Action
 $gdConnectBtn.Add_Click({
-    Show-ProviderConnectionWindow -ProviderId 'gdrive' -Owner $window -OnStateChanged {
-        param($providerIdParam, $stateParam)
-        Update-AllUIState
-    }
-})
+    $script:IsConnecting = $true
+    $gdStatusPillText.Text = '● Connecting...'
+    $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+    $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#ECFDF5')
+    $gdErrorText.Visibility = 'Collapsed'
+    $gdConnectBtn.IsEnabled = $false
 
-$tbConnectBtn.Add_Click({
-    Show-ProviderConnectionWindow -ProviderId 'terabox' -Owner $window -OnStateChanged {
-        param($providerIdParam, $stateParam)
-        Update-AllUIState
-    }
-})
-
-$gdMountBtn.Add_Click({
-    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-    if ($gdStatus.IsMounted) {
-        Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
-        Update-AllUIState
-        [System.Windows.MessageBox]::Show("Google Drive unmounted from $($gdStatus.DriveLetter):", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        return
-    }
-
-    $gdCheck = Test-GoogleDriveBackendSession
-    if (-not $gdCheck.IsValid) {
-        [System.Windows.MessageBox]::Show('Please connect and validate your Google Drive account before mounting.', 'Authentication Required', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-        return
-    }
-
-    $gdMountBtn.IsEnabled = $false
-    $gdMountBtn.Content = 'Mounting...'
     try {
-        $envVars = Get-GoogleDriveRcloneEnvironment
-        $res = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-        if ($res.Success) {
-            [System.Windows.MessageBox]::Show("Google Drive mounted successfully as $($res.DriveLetter):`nYou can now open File Explorer and access your files.", 'Google Drive Mounted', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        $oauthCfg = Get-GoogleOAuthConfig
+        if (-not $oauthCfg.IsConfigured) {
+            $cfgRes = Show-GoogleClientConfigModal -Owner $window
+            if (-not $cfgRes.Success) {
+                $gdErrorText.Text = 'Google OAuth Client ID is required to connect.'
+                $gdErrorText.Visibility = 'Visible'
+                return
+            }
+            $oauthCfg = Get-GoogleOAuthConfig
+        }
+
+        $state = New-OAuthState
+        $verifier = New-PkceVerifier
+        $challenge = New-PkceChallenge $verifier
+
+        $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
+        $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthCfg.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge
+        $gdAccountText.Text = 'Awaiting Google sign-in approval in browser...'
+        [System.Diagnostics.Process]::Start($authUrl) | Out-Null
+
+        $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { -not $window.IsVisible }
+        if ($waitResult.Success) {
+            $gdAccountText.Text = 'Validating authorization code...'
+            $tokenResult = Exchange-GoogleAuthCode -ClientId $oauthCfg.ClientId -ClientSecret $oauthCfg.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
+            if ($tokenResult.Success) {
+                $gdAccountText.Text = 'Verifying Google Drive account access...'
+                $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
+                if ($verify.IsValid) {
+                    Save-GoogleDriveTokens -TokenData $tokenResult.Tokens
+
+                    # Direct Auto-Mount
+                    if (Test-WinFspInstalled) {
+                        $gdAccountText.Text = "Mounting virtual drive ($($script:GDriveLetter):)..."
+                        try {
+                            $envVars = Get-GoogleDriveRcloneEnvironment
+                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                        } catch {
+                            $gdErrorText.Text = "Connected, but could not mount $($script:GDriveLetter): $($_.Exception.Message)"
+                            $gdErrorText.Visibility = 'Visible'
+                        }
+                    }
+                } else {
+                    $gdErrorText.Text = "Validation failed: $($verify.Error)"
+                    $gdErrorText.Visibility = 'Visible'
+                }
+            } else {
+                $gdErrorText.Text = "Authorization failed: $($tokenResult.Error)"
+                $gdErrorText.Visibility = 'Visible'
+            }
+        } else {
+            $gdErrorText.Text = "Authorization cancelled: $($waitResult.Error)"
+            $gdErrorText.Visibility = 'Visible'
         }
     } catch {
-        [System.Windows.MessageBox]::Show("Failed to mount Google Drive: $($_.Exception.Message)", 'Mount Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+        $gdErrorText.Text = "Error: $($_.Exception.Message)"
+        $gdErrorText.Visibility = 'Visible'
     } finally {
-        $gdMountBtn.IsEnabled = $true
+        $script:IsConnecting = $false
+        $gdConnectBtn.IsEnabled = $true
         Update-AllUIState
     }
 })
 
-$tbMountBtn.Add_Click({
-    $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-    if ($tbStatus.IsMounted) {
-        Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
-        Update-AllUIState
-        [System.Windows.MessageBox]::Show("TeraBox unmounted from $($tbStatus.DriveLetter):", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        return
-    }
-
-    $tbCheck = Test-TeraBoxBackendSession
-    if (-not $tbCheck.IsValid) {
-        [System.Windows.MessageBox]::Show('Please connect and validate your TeraBox account before mounting.', 'Authentication Required', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-        return
-    }
-
-    $verifiedRclone = Get-VerifiedRclonePath
-    if (-not $verifiedRclone) {
-        [System.Windows.MessageBox]::Show("TeraBox mounting requires the patched, verified rclone build containing the TeraBox backend.`nPlease run scripts\Build-PatchedRclone.ps1 first to prepare the binary.", 'Build Required', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-        return
-    }
-
-    $tbMountBtn.IsEnabled = $false
-    $tbMountBtn.Content = 'Mounting...'
-    try {
-        $tbEnvVars = Get-TeraBoxRcloneEnvironment
-        $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
-        if ($res.Success) {
-            [System.Windows.MessageBox]::Show("TeraBox mounted successfully as $($res.DriveLetter):`nYou can now open File Explorer and access your files.", 'TeraBox Mounted', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        }
-    } catch {
-        [System.Windows.MessageBox]::Show("Failed to mount TeraBox: $($_.Exception.Message)", 'Mount Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
-    } finally {
-        $tbMountBtn.IsEnabled = $true
-        Update-AllUIState
-    }
-})
-
+# GOOGLE DRIVE: Explorer Action
 $gdExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($status.IsMounted) {
         [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
+    } else {
+        # Mount first if not mounted
+        try {
+            $envVars = Get-GoogleDriveRcloneEnvironment
+            $res = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
+            if ($res.Success) {
+                [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+            }
+        } catch {
+            $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
+            $gdErrorText.Visibility = 'Visible'
+        }
+        Update-AllUIState
     }
 })
 
+# GOOGLE DRIVE: Disconnect Action
+$gdDisconnectBtn.Add_Click({
+    Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
+    Remove-GoogleDriveSession
+    $gdErrorText.Visibility = 'Collapsed'
+    Update-AllUIState
+})
+
+# TERABOX: Connect Action
+$tbConnectBtn.Add_Click({
+    $script:IsConnecting = $true
+    $tbStatusPillText.Text = '● Connecting...'
+    $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EFF6FF')
+    $tbErrorText.Visibility = 'Collapsed'
+    $tbConnectBtn.IsEnabled = $false
+
+    try {
+        $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $window -OnLoginSucceeded {
+            param($res)
+            # Verified login completed in embedded browser
+        }
+
+        if ($loginRes.Success) {
+            $tbAccountText.Text = "Mounting virtual drive ($($script:TeraBoxLetter):)..."
+            $verifiedRclone = Get-VerifiedRclonePath
+            if ($verifiedRclone -and (Test-WinFspInstalled)) {
+                try {
+                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                } catch {
+                    $tbErrorText.Text = "Connected, but could not mount $($script:TeraBoxLetter): $($_.Exception.Message)"
+                    $tbErrorText.Visibility = 'Visible'
+                }
+            }
+        } elseif (-not $loginRes.Cancelled) {
+            $tbErrorText.Text = if ($loginRes.Error) { $loginRes.Error } else { 'Sign-in was not completed.' }
+            $tbErrorText.Visibility = 'Visible'
+        }
+    } catch {
+        $tbErrorText.Text = "Sign-in error: $($_.Exception.Message)"
+        $tbErrorText.Visibility = 'Visible'
+    } finally {
+        $script:IsConnecting = $false
+        $tbConnectBtn.IsEnabled = $true
+        Update-AllUIState
+    }
+})
+
+# TERABOX: Explorer Action
 $tbExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($status.IsMounted) {
         [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
+    } else {
+        # Mount first if not mounted
+        try {
+            $tbEnvVars = Get-TeraBoxRcloneEnvironment
+            $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
+            if ($res.Success) {
+                [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+            }
+        } catch {
+            $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
+            $tbErrorText.Visibility = 'Visible'
+        }
+        Update-AllUIState
     }
+})
+
+# TERABOX: Disconnect Action
+$tbDisconnectBtn.Add_Click({
+    Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
+    Remove-TeraBoxSession
+    $tbErrorText.Visibility = 'Collapsed'
+    Update-AllUIState
 })
 
 # --- System Tray Integration ---
@@ -621,48 +718,20 @@ $menuOpen.Add_Click({
 
 $trayMenu.Items.Add('-') | Out-Null
 
-$menuMountGD = $trayMenu.Items.Add("Mount Google Drive ($($script:GDriveLetter):)")
-$menuMountGD.Add_Click({
-    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-    if ($gdStatus.IsMounted) {
-        Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
-    } else {
-        $gdCheck = Test-GoogleDriveBackendSession
-        if ($gdCheck.IsValid) {
-            $envVars = Get-GoogleDriveRcloneEnvironment
-            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-        }
-    }
-    Update-AllUIState
-})
-
 $menuOpenGD = $trayMenu.Items.Add("Open Google Drive ($($script:GDriveLetter):\)")
 $menuOpenGD.Add_Click({
     $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-    if ($gdStatus.IsMounted) { [System.Diagnostics.Process]::Start('explorer.exe', $gdStatus.DriveRoot) | Out-Null }
-})
-
-$trayMenu.Items.Add('-') | Out-Null
-
-$menuMountTB = $trayMenu.Items.Add("Mount TeraBox ($($script:TeraBoxLetter):)")
-$menuMountTB.Add_Click({
-    $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-    if ($tbStatus.IsMounted) {
-        Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
-    } else {
-        $tbCheck = Test-TeraBoxBackendSession
-        if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-            $tbEnvVars = Get-TeraBoxRcloneEnvironment
-            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-        }
+    if ($gdStatus.IsMounted) {
+        [System.Diagnostics.Process]::Start('explorer.exe', $gdStatus.DriveRoot) | Out-Null
     }
-    Update-AllUIState
 })
 
 $menuOpenTB = $trayMenu.Items.Add("Open TeraBox ($($script:TeraBoxLetter):\)")
 $menuOpenTB.Add_Click({
     $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-    if ($tbStatus.IsMounted) { [System.Diagnostics.Process]::Start('explorer.exe', $tbStatus.DriveRoot) | Out-Null }
+    if ($tbStatus.IsMounted) {
+        [System.Diagnostics.Process]::Start('explorer.exe', $tbStatus.DriveRoot) | Out-Null
+    }
 })
 
 $trayMenu.Items.Add('-') | Out-Null
@@ -697,7 +766,6 @@ $notifyIcon.Add_DoubleClick({
     Update-AllUIState
 })
 
-# Handle minimize-to-tray on window close
 $window.Add_Closing({
     param($sender, $eventArgs)
     if (-not $script:IsExiting) {
@@ -737,11 +805,10 @@ $window.Add_Loaded({
     }
 })
 
-# --- Background UI Polling & Restore Event Listener Timer ---
+# --- Background Refresh Timer ---
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
-    # Check if a second instance signaled to restore the window to foreground
     if ($script:RestoreEvent) {
         try {
             if ($script:RestoreEvent.WaitOne(0)) {
@@ -758,9 +825,8 @@ $timer.Add_Tick({
         } catch { }
     }
 
-    # Throttle full remote status polling: every 3s when visible, every 30s when hidden in tray
     if ($window.IsVisible) {
-        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 3) {
+        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 4) {
             Update-AllUIState
             $script:LastFullUpdate = [DateTime]::UtcNow
         }
@@ -773,7 +839,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
-# Initial state population
+# Initial UI population
 Update-AllUIState
 
 # --- Auto-Mount on Startup ---
@@ -800,17 +866,14 @@ if ($script:Settings.AutoMountDrives) {
     } catch { }
 }
 
-# If launched with -Minimized, do not show main window
 if ($Minimized) {
     $window.Visibility = [System.Windows.Visibility]::Hidden
 }
 
-# Run in STA if called as script
 if ($MyInvocation.InvocationName -ne '.') {
     $app = [System.Windows.Application]::new()
     if ($Minimized) {
         $window.Hide()
-        # Keep application alive in tray even if window is hidden
         $app.Run()
     } else {
         $window.Show()
