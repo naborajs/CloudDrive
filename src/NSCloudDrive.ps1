@@ -512,16 +512,21 @@ function Update-AllUIState {
     $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
 
     if ($gdCheck.IsValid) {
-        $userDisplay = if ($gdCheck.UserInfo.DisplayName) { $gdCheck.UserInfo.DisplayName } else { $gdCheck.UserInfo.EmailAddress }
+        $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
+        $emailAddr = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'EmailAddress' '' } else { '' }
+        $userDisplay = if ($dispName) { $dispName } else { $emailAddr }
         $mountInfo = if ($gdStatus.IsMounted) { "Mounted at $($gdStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
         $gdAccountText.Text = "Account: $userDisplay   •   $mountInfo"
         $gdErrorText.Visibility = 'Collapsed'
 
-        if ($gdCheck.UserInfo.QuotaTotal -gt 0) {
-            $usedGb = [Math]::Round($gdCheck.UserInfo.QuotaUsed / 1GB, 2)
-            $totalGb = [Math]::Round($gdCheck.UserInfo.QuotaTotal / 1GB, 2)
-            $freeGb = [Math]::Round(($gdCheck.UserInfo.QuotaTotal - $gdCheck.UserInfo.QuotaUsed) / 1GB, 2)
-            $pct = [Math]::Round(($gdCheck.UserInfo.QuotaUsed / $gdCheck.UserInfo.QuotaTotal) * 100, 1)
+        $gdTotal = if ($gdCheck.UserInfo) { [int64](Get-SafeProperty $gdCheck.UserInfo 'QuotaTotal' (Get-SafeProperty $gdCheck.UserInfo 'QuotaTotalBytes' 0)) } else { 0L }
+        $gdUsed = if ($gdCheck.UserInfo) { [int64](Get-SafeProperty $gdCheck.UserInfo 'QuotaUsed' (Get-SafeProperty $gdCheck.UserInfo 'QuotaUsedBytes' 0)) } else { 0L }
+
+        if ($gdTotal -gt 0) {
+            $usedGb = [Math]::Round($gdUsed / 1GB, 2)
+            $totalGb = [Math]::Round($gdTotal / 1GB, 2)
+            $freeGb = [Math]::Round(($gdTotal - $gdUsed) / 1GB, 2)
+            $pct = [Math]::Round(($gdUsed / $gdTotal) * 100, 1)
 
             $gdStorageBar.Value = [Math]::Min(100, [Math]::Max(0, $pct))
             $gdStorageBar.Visibility = 'Visible'
@@ -546,9 +551,11 @@ function Update-AllUIState {
         $gdConnectedActions.Visibility = 'Visible'
         $gdLetterCombo.IsEnabled = (-not $gdStatus.IsMounted)
     } else {
-        if ($gdCheck.State -eq 'AuthenticationExpired') {
+        $gdState = Get-SafeProperty $gdCheck 'State' ''
+        $gdErr = Get-SafeProperty $gdCheck 'Error' ''
+        if ($gdState -eq 'AuthenticationExpired') {
             $gdAccountText.Text = 'Session expired. Click Connect to re-authenticate with Google Drive.'
-            $gdErrorText.Text = if ($gdCheck.Error) { $gdCheck.Error } else { 'Google Drive session has expired.' }
+            $gdErrorText.Text = if ($gdErr) { $gdErr } else { 'Google Drive session has expired.' }
             $gdErrorText.Visibility = 'Visible'
         } else {
             $gdAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
@@ -571,14 +578,18 @@ function Update-AllUIState {
 
     if ($tbCheck.IsValid) {
         $mountInfo = if ($tbStatus.IsMounted) { "Mounted at $($tbStatus.DriveLetter):\" } else { "Authentication valid (Not mounted)" }
-        $tbAccountText.Text = "Account: $($tbCheck.UserInfo.UserName)   •   $mountInfo"
+        $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
+        $tbAccountText.Text = "Account: $tbUName   •   $mountInfo"
         $tbErrorText.Visibility = 'Collapsed'
 
-        if ($tbCheck.UserInfo.QuotaTotal -gt 0) {
-            $usedGb = [Math]::Round($tbCheck.UserInfo.QuotaUsed / 1GB, 2)
-            $totalGb = [Math]::Round($tbCheck.UserInfo.QuotaTotal / 1GB, 2)
-            $freeGb = [Math]::Round(($tbCheck.UserInfo.QuotaTotal - $tbCheck.UserInfo.QuotaUsed) / 1GB, 2)
-            $pct = [Math]::Round(($tbCheck.UserInfo.QuotaUsed / $tbCheck.UserInfo.QuotaTotal) * 100, 1)
+        $tbTotal = if ($tbCheck.UserInfo) { [int64](Get-SafeProperty $tbCheck.UserInfo 'QuotaTotal' (Get-SafeProperty $tbCheck.UserInfo 'QuotaTotalBytes' 0)) } else { 0L }
+        $tbUsed = if ($tbCheck.UserInfo) { [int64](Get-SafeProperty $tbCheck.UserInfo 'QuotaUsed' (Get-SafeProperty $tbCheck.UserInfo 'QuotaUsedBytes' 0)) } else { 0L }
+
+        if ($tbTotal -gt 0) {
+            $usedGb = [Math]::Round($tbUsed / 1GB, 2)
+            $totalGb = [Math]::Round($tbTotal / 1GB, 2)
+            $freeGb = [Math]::Round(($tbTotal - $tbUsed) / 1GB, 2)
+            $pct = [Math]::Round(($tbUsed / $tbTotal) * 100, 1)
 
             $tbStorageBar.Value = [Math]::Min(100, [Math]::Max(0, $pct))
             $tbStorageBar.Visibility = 'Visible'
@@ -604,9 +615,11 @@ function Update-AllUIState {
         $tbConnectedActions.Visibility = 'Visible'
         $tbLetterCombo.IsEnabled = (-not $tbStatus.IsMounted)
     } else {
-        if ($tbCheck.State -eq 'AuthenticationExpired') {
+        $tbState = Get-SafeProperty $tbCheck 'State' ''
+        $tbErr = Get-SafeProperty $tbCheck 'Error' ''
+        if ($tbState -eq 'AuthenticationExpired') {
             $tbAccountText.Text = 'Session expired. Click Connect to re-authenticate with TeraBox.'
-            $tbErrorText.Text = if ($tbCheck.Error) { $tbCheck.Error } else { 'TeraBox session has expired.' }
+            $tbErrorText.Text = if ($tbErr) { $tbErr } else { 'TeraBox session has expired.' }
             $tbErrorText.Visibility = 'Visible'
         } else {
             $tbAccountText.Text = 'Not connected. Click Connect to sign in and mount virtual drive.'
