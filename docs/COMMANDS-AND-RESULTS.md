@@ -18,6 +18,7 @@
 | Run `scripts/Test-RcloneConfigPassword.ps1` | Passed; repeatably checks synthetic DPAPI serialization/read-back, plaintext absence, user-and-SYSTEM ACLs on a temporary directory and file, and missing-credential failure; removes the fixture. | Does not exercise the interactive `-Store` prompt or the separate Windows PowerShell process. |
 | Run the helper as a separate Windows PowerShell process | Blocked by this environment with `AuthorizationManager check failed`. | Does not establish a product defect or a pass; the launcher/password-command subprocess integration remains unverified. No rclone process or mount was involved. |
 | Parse `scripts/Manage-UserMountStartup.ps1` and exercise its safety gate | Passed; it refuses registration without `-ReadOnlyAcceptancePassed`. No task with the reserved name existed. | Task registration, removal, scheduled retries, and logon mount were not run. Build/config prerequisites are absent. |
+| Parse `src/NSCloudDrive.ps1` and exercise extracted setup-diagnostic functions | Passed; no verified pinned build was found, T: reported available, and D: reported NTFS with about 124 GiB free. | Function-level checks only; the WPF window was not launched, and no mount/cache directory was created. |
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Review TeraBox official Open API integration documentation | Confirmed documented OAuth/device-code QR flow, separate client credential application, short-lived access/refresh tokens, and an assigned-application directory boundary. | Documentation review only; no application request, token call, or account access; does not prove compatibility with the existing full drive. |
@@ -78,6 +79,8 @@ Each commit changed one file and was pushed to `origin/main`:
 - `1e08624` — record private credential ACL test.
 - `7ae62dc` — record credential ACL self-test evidence.
 - `5b43e6e` — document DPAPI helper regression command.
+- `947fa3c` — add verified build and cache diagnostics.
+- `2ecc9db` — document preview readiness diagnostics.
 
 ## Required next evidence
 
