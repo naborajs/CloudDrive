@@ -119,6 +119,51 @@ function Remove-TeraBoxSession {
     }
 }
 
+function Get-TeraBoxRcloneEnvironment([hashtable]$SessionOverride = $null) {
+    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
+    if (-not $session -or -not $session.Secret) {
+        return @{}
+    }
+
+    $cookie = if ($session.Secret -match '^ndus=') { $session.Secret } else { "ndus=$($session.Secret)" }
+    return @{
+        'RCLONE_CONFIG_TERABOX_TYPE' = 'terabox'
+        'RCLONE_CONFIG_TERABOX_COOKIE' = $cookie
+    }
+}
+
+function Set-TeraBoxManualSession(
+    [Parameter(Mandatory = $true)]
+    [string]$SessionSecret,
+    [string]$Type = 'web-session'
+) {
+    $cleanSecret = $SessionSecret.Trim()
+    if ($cleanSecret -match '^ndus=(?<val>.+)$') {
+        $cleanSecret = $Matches.val
+    }
+
+    $testValidation = Test-TeraBoxBackendSession -SessionOverride @{
+        Type = $Type
+        Secret = $cleanSecret
+    }
+
+    if (-not $testValidation.IsValid) {
+        return [ordered]@{
+            Success = $false
+            Error = "Session validation failed: $($testValidation.Error)"
+            Validation = $testValidation
+        }
+    }
+
+    Save-TeraBoxSession -Type $Type -Secret $cleanSecret
+
+    return [ordered]@{
+        Success = $true
+        Error = $null
+        Validation = $testValidation
+    }
+}
+
 function Test-TeraBoxBackendSession([hashtable]$SessionOverride = $null) {
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
     if (-not $session) {
