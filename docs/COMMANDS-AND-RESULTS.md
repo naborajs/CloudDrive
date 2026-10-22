@@ -168,10 +168,26 @@ Run `powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1`:
 - `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, RFC 7636 PKCE S256 verifier and official Appendix B test vector challenge computation, fail-closed handling without tokens, DPAPI-protected token persistence in sandboxed LOCALAPPDATA, rclone environment variable construction, Google installed client format JSON discovery without requiring client secret, OAuth authorization URL construction with PKCE challenge, and WebUtility HTML encoding.
 - `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, read-only VFS cache mount argument formatting with security flags, next available drive letter allocation and conflict resolution, distinct provider volume labels (`Google Drive`, `TeraBox`), cache usage statistics calculation, and multi-provider virtual drive status querying.
 - `Test-SettingsManager.ps1`: Verified default configuration generation, settings persistence across reloads, provider preferred drive letter mapping, and Windows user logon startup registry configuration with clean removal.
-- `Test-DesktopUIRegression.ps1`: Verified that no read-only `$pid` parameter declarations exist in `src/`, that `NSCloudDrive.ps1` and `ProviderConnectionWindow.ps1` explicitly disable horizontal scrollbar measurement to prevent layout overflow, and that `NSCloudDrive.ps1` loads cleanly in an STA session.
+- `Test-DesktopUIRegression.ps1`: Verified that no read-only `$pid` parameter declarations exist in `src/`, that `NSCloudDrive.ps1` and `ProviderConnectionWindow.ps1` explicitly disable horizontal scrollbar measurement to prevent layout overflow, that `NSCloudDrive.ps1` loads cleanly in an STA session, and that single-instance detection gracefully catches abandoned mutexes and restores running windows to the foreground.
 - `Test-RcloneConfigPassword.ps1`: Verified synthetic DPAPI read-back, plaintext-at-rest absence, user/SYSTEM private ACLs, and missing-credential fail-closed behavior.
 
 **Result: 7 Passed, 0 Failed.**
+
+## Startup & Single-Instance Foreground Activation Fix
+
+### Reported Issue
+Running `powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1` reported "NOTHING IS STARTING".
+
+### Root Cause Analysis
+1. **Single-Instance Mutex Lockout:** Previous code used `[System.Threading.Mutex]::new($true, 'Global\NSCloudDrive_SingleInstance_AppMutex', [ref]$isNewInstance)`. When an instance was already running in the tray or minimized, `$isNewInstance` was false, and the code invoked `[System.Windows.Forms.MessageBox]::Show(...)` without an owner window. Under Windows Terminal / VS Code console hosts, unparented modal message boxes open behind the terminal or do not bring the existing window to the front, giving the user the impression that nothing started.
+2. **Abandoned Mutex Abort:** If an earlier process was interrupted (e.g. Ctrl+C or process termination), the named Mutex was left in an abandoned state. Under `$ErrorActionPreference = 'Stop'`, creating the mutex threw an unhandled `System.Threading.AbandonedMutexException`, causing PowerShell to abort before constructing the WPF window.
+3. **Foreground Focus Acquisition:** GUI applications launched from a terminal host are subject to Windows focus-stealing prevention. Without explicit `SetForegroundWindow` / `AppActivate`, the window could remain unfocused or behind active terminal windows.
+
+### Resolution Implemented
+1. Replaced global mutex with session-local `Local\NSCloudDrive_AppMutex` and wrapped acquisition in `try/catch [System.Threading.AbandonedMutexException]` to acquire and recover ownership automatically.
+2. Introduced cross-instance signaling using `Local\NSCloudDrive_RestoreWindow_Event`: when a secondary instance is launched while an instance is already running, it signals the running instance, triggers `WScript.Shell.AppActivate`, and exits cleanly in under 1 second with a clear console message (`NS Cloud Drive is already running. Restoring window to foreground...`).
+3. Enhanced the primary instance's background dispatcher timer to poll the restore event with a 0-millisecond non-blocking wait (`WaitOne(0)`), automatically restoring `$window.WindowState = Normal`, calling `$window.Show()`, `$window.Activate()`, and bringing the window immediately to the front of the user's screen.
+4. Added `Test-DesktopUIRegression.ps1` automated test verifying single-instance detection and clean foreground restoration.
 
 ## Empirical resource & performance benchmark
 
