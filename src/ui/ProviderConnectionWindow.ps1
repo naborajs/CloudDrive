@@ -574,6 +574,83 @@ function Show-CloudAccountSetupModal(
     return $script:SavedAccountResult
 }
 
+function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
+    if ($ProviderId -eq 'gdrive') {
+        $oauthConfig = Get-GoogleOAuthConfig
+        if (-not $oauthConfig.IsConfigured) {
+            $cfgRes = Show-GoogleClientConfigModal -Owner $Owner
+            $oauthConfig = Get-GoogleOAuthConfig
+            if (-not $oauthConfig.IsConfigured) {
+                return $null
+            }
+        }
+
+        # Run OAuth flow
+        $state = New-OAuthState
+        $verifier = New-PkceVerifier
+        $challenge = New-PkceChallenge -Verifier $verifier
+        $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
+        $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthConfig.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge -Prompt 'select_account consent'
+
+        [System.Diagnostics.Process]::Start($authUrl) | Out-Null
+        $loopbackRes = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx
+
+        if (-not $loopbackRes.Success) {
+            [System.Windows.MessageBox]::Show("Sign-in cancelled or timed out: $($loopbackRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return $null
+        }
+
+        $tokenRes = Exchange-GoogleAuthCode -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -Code $loopbackRes.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
+        if (-not $tokenRes.Success) {
+            [System.Windows.MessageBox]::Show("Authentication failed: $($tokenRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            return $null
+        }
+
+        $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenRes.Tokens
+        $userEmail = if ($verify.IsValid -and $verify.UserInfo.EmailAddress) { $verify.UserInfo.EmailAddress } else { '' }
+        $userName = if ($verify.IsValid -and $verify.UserInfo.DisplayName) { $verify.UserInfo.DisplayName } else { $userEmail }
+
+        $accId = "gdrive_" + [DateTime]::UtcNow.Ticks.ToString()
+        Save-GoogleDriveTokens -TokenData $tokenRes.Tokens -AccountId $accId
+
+        $nextLetter = Get-NextAvailableDriveLetter 'G'
+        $initData = @{
+            Id = $accId
+            ProviderId = 'gdrive'
+            DisplayName = if ($userName) { "Google Drive ($userName)" } else { "Google Drive" }
+            AccountEmail = $userEmail
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        return (Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'gdrive' -InitialAccount $initData)
+
+    } elseif ($ProviderId -eq 'terabox') {
+        $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $Owner
+        if (-not $loginRes.Success) {
+            if (-not $loginRes.Cancelled) {
+                [System.Windows.MessageBox]::Show("TeraBox sign-in failed: $($loginRes.Error)", 'TeraBox', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+            return $null
+        }
+
+        $accId = "terabox_" + [DateTime]::UtcNow.Ticks.ToString()
+        $nextLetter = Get-NextAvailableDriveLetter 'T'
+        $initData = @{
+            Id = $accId
+            ProviderId = 'terabox'
+            DisplayName = if ($loginRes.UserName) { "TeraBox ($($loginRes.UserName))" } else { "TeraBox" }
+            AccountEmail = if ($loginRes.UserName) { $loginRes.UserName } else { 'TeraBox User' }
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        return (Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'terabox' -InitialAccount $initData)
+    }
+
+    return $null
+}
+
 function Show-DiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $settings = Get-NSCloudDriveSettings
     $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
