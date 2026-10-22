@@ -283,6 +283,73 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
         $actionStack.Children.Add($methodDesc) | Out-Null
 
+        # Session connection input card
+        $tbConnectCard = [System.Windows.Controls.Border]::new()
+        $tbConnectCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+        $tbConnectCard.Padding = [System.Windows.Thickness]::new(14)
+        $tbConnectCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+        $tbConnectCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+        $tbConnectCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+        $tbConnectCard.BorderThickness = [System.Windows.Thickness]::new(1)
+
+        $tbConnectStack = [System.Windows.Controls.StackPanel]::new()
+        $tbConnectCard.Child = $tbConnectStack
+
+        $tbConnectTitle = New-UIElement-Label 'Connect Personal Account Session (BYOC)' 13 '#0F172A' $true
+        $tbConnectStack.Children.Add($tbConnectTitle) | Out-Null
+
+        $tbConnectDesc = New-UIElement-Label 'Enter your personal session cookie (ndus) or Open Platform token. Credentials will be verified against the live TeraBox API and secured using Windows DPAPI with restricted NTFS permissions.' 11 '#64748B'
+        $tbConnectDesc.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
+        $tbConnectStack.Children.Add($tbConnectDesc) | Out-Null
+
+        $tbInputRow = [System.Windows.Controls.DockPanel]::new()
+        $tbInputRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+
+        $tbSecretBox = [System.Windows.Controls.TextBox]::new()
+        $tbSecretBox.Height = 32
+        $tbSecretBox.VerticalContentAlignment = 'Center'
+        $tbSecretBox.Padding = [System.Windows.Thickness]::new(8, 0, 8, 0)
+        $tbSecretBox.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+        $tbInputRow.Children.Add($tbSecretBox) | Out-Null
+
+        $saveSessionBtn = [System.Windows.Controls.Button]::new()
+        $saveSessionBtn.Content = 'Validate & Connect'
+        $saveSessionBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+        $saveSessionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
+        $saveSessionBtn.Foreground = [System.Windows.Media.Brushes]::White
+        $saveSessionBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+        [System.Windows.Controls.DockPanel]::SetDock($saveSessionBtn, 'Right')
+        $saveSessionBtn.Add_Click({
+            $sec = $tbSecretBox.Text.Trim()
+            if ([string]::IsNullOrEmpty($sec)) {
+                & $UpdateState 'Error' 'Please enter your TeraBox session cookie (ndus) or token.'
+                return
+            }
+
+            & $UpdateState 'ValidatingAuthorization' 'Testing connection against TeraBox backend...'
+            $manualRes = Set-TeraBoxManualSession -SessionSecret $sec -Type 'web-session'
+            if ($manualRes.Success) {
+                & $UpdateState 'CheckingAccountScope' 'Checking accessible directories...'
+                $scope = Test-TeraBoxAccountScope
+                & $UpdateState 'ListingFiles' "Testing file access in root ($($scope.RootPath))..."
+                $files = Get-TeraBoxFileList -Directory $scope.RootPath
+                $count = if ($files.Success) { $files.ItemCount } else { 0 }
+                & $UpdateState 'Connected' "Connected as $($manualRes.Validation.UserInfo.UserName) ($count files found in root). Secured with DPAPI."
+                [System.Windows.MessageBox]::Show("Successfully connected to TeraBox as $($manualRes.Validation.UserInfo.UserName)!`nRoot directory contains $count files.`nYou can now mount drive T: from the main window.", 'TeraBox Connected', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                $tbSecretBox.Text = ''
+            } else {
+                & $UpdateState 'Error' $manualRes.Error
+                [System.Windows.MessageBox]::Show("TeraBox session validation failed:`n$($manualRes.Error)`nPlease check your cookie and try again.", 'Validation Failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+        })
+        $tbInputRow.Children.Add($saveSessionBtn) | Out-Null
+        $tbConnectStack.Children.Add($tbInputRow) | Out-Null
+
+        $tbHelpText = New-UIElement-Label 'How to find your ndus cookie: Sign in at terabox.com in any browser -> Press F12 -> Application/Storage -> Cookies -> https://www.terabox.com -> Copy the "ndus" value.' 11 '#94A3B8'
+        $tbConnectStack.Children.Add($tbHelpText) | Out-Null
+
+        $actionStack.Children.Add($tbConnectCard) | Out-Null
+
         # Feasibility notice card
         $tbNoticeCard = [System.Windows.Controls.Border]::new()
         $tbNoticeCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
@@ -370,7 +437,7 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
             $cfgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A7F3D0')
             $cfgCard.BorderThickness = [System.Windows.Thickness]::new(1)
             $maskedId = if ($oauthCfg.ClientId.Length -gt 16) { $oauthCfg.ClientId.Substring(0, 12) + '...' + $oauthCfg.ClientId.Substring($oauthCfg.ClientId.Length - 4) } else { $oauthCfg.ClientId }
-            $cfgLabel = New-UIElement-Label "OAuth Client Configured ($maskedId)" 12 '#065F46' $true
+            $cfgLabel = New-UIElement-Label "OAuth Client Configured ($maskedId) [Source: $($oauthCfg.ConfigSource)]" 12 '#065F46' $true
             $cfgStack.Children.Add($cfgLabel) | Out-Null
             $cfgSub = New-UIElement-Label 'PKCE desktop authorization ready. Click "Sign in with Google" to connect.' 11 '#047857'
             $cfgSub.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
@@ -387,16 +454,42 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
 
             $cfgBtnRow = [System.Windows.Controls.WrapPanel]::new()
 
+            $importBtn = [System.Windows.Controls.Button]::new()
+            $importBtn.Content = 'Import client_secret.json'
+            $importBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+            $importBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
+            $importBtn.Add_Click({
+                $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+                $dlg.Title = 'Select Google OAuth client_secret_*.json'
+                $dlg.Filter = 'Google OAuth Client JSON (*.json)|*.json|All Files (*.*)|*.*'
+                if ($dlg.ShowDialog($win) -eq $true) {
+                    try {
+                        $imported = Import-GoogleOAuthConfigFile -SourceFilePath $dlg.FileName
+                        if ($imported.IsConfigured) {
+                            [System.Windows.MessageBox]::Show("Successfully imported Google OAuth client ID ($($imported.ClientId))!`nYou can now click 'Sign in with Google'.", 'OAuth Client Configured', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                            $win.Close()
+                            Show-ProviderConnectionWindow -ProviderId 'gdrive' -Owner $Owner -OnStateChanged $OnStateChanged
+                        } else {
+                            [System.Windows.MessageBox]::Show('The selected JSON file did not contain a valid Google OAuth client ID.', 'Invalid File', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                        }
+                    } catch {
+                        [System.Windows.MessageBox]::Show("Failed to import client JSON: $($_.Exception.Message)", 'Import Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+                    }
+                }
+            })
+            $cfgBtnRow.Children.Add($importBtn) | Out-Null
+
             $guideBtn = [System.Windows.Controls.Button]::new()
             $guideBtn.Content = 'View Setup Guide'
             $guideBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
-            $guideBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+            $guideBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
             $guideBtn.Add_Click({ Show-GoogleSetupInstructionsDialog -Owner $win })
             $cfgBtnRow.Children.Add($guideBtn) | Out-Null
 
             $openDirBtn = [System.Windows.Controls.Button]::new()
             $openDirBtn.Content = 'Open Config Folder'
             $openDirBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+            $openDirBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
             $openDirBtn.Add_Click({
                 if (-not (Test-Path -LiteralPath $oauthCfg.ConfigDirectory)) {
                     New-Item -ItemType Directory -Path $oauthCfg.ConfigDirectory -Force | Out-Null
