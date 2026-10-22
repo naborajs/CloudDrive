@@ -214,3 +214,15 @@ function Format-SanitizedDiagnosticMessage([string]$Message) {
 
     return $sanitized
 }
+
+function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue = $null) {
+    if ($null -eq $Object) { return $DefaultValue }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($PropertyName)) { return $Object[$PropertyName] }
+        return $DefaultValue
+    }
+    if ($Object.PSObject -and $Object.PSObject.Properties[$PropertyName]) {
+        return $Object.PSObject.Properties[$PropertyName].Value
+    }
+    return $DefaultValue
+}
