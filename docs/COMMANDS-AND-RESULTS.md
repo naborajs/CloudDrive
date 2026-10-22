@@ -227,6 +227,18 @@ Benchmark executed via `powershell.exe -NoProfile -File .\tests\Benchmark-Resour
 - **Toolchain Status:** The local pinned `rclone-extra` build (`scripts/Build-PatchedRclone.ps1`) requires Go 1.26+ to compile the custom `terabox` Go backend. Because Go is not installed on this system, `Get-VerifiedRclonePath` gracefully reports the build requirement instead of crashing.
 - **WinFsp:** WinFsp 2.1 is running and verified.
 
+### 4. Error -6 Root-Cause Diagnosis & Embedded WebView2 Implementation (2026-10-23)
+- **Defect (Error -6):** Manual entry of `ndus` tokens extracted from `https://dm.terabox.com` failed validation with:
+  `TeraBox backend returned error code: -6 (Session may have expired or requires re-authentication)`
+  Live probing of the API endpoint (`https://www.terabox.com/api/quota?checkexpire=1&checkfree=1`) verified that TeraBox explicitly returns `{"errno": -6, "errmsg": "user not login"}`. Before sign-in is complete, TeraBox assigns unauthenticated visitor cookies. Attempting manual copy from pre-login or OAuth redirect pages yields unauthenticated tokens.
+- **Root-Cause Resolution (Embedded Browser):**
+  1. Built and integrated `src/ui/EmbeddedBrowserWindow.ps1` utilizing Microsoft Edge WebView2 (`lib/webview2`).
+  2. Runs in a dedicated application-owned browser profile at `%LOCALAPPDATA%\NSCloudDrive\webview2-profile`, completely isolated from personal browser profiles (Brave/Chrome).
+  3. Displays the legitimate TeraBox sign-in page (`https://www.terabox.com/main`).
+  4. Automatically monitors `CoreWebView2CookieManager` for authenticated session cookies (`ndus`, `browserid`), validates them live against the TeraBox backend, and encrypts them into Windows DPAPI storage.
+  5. Enhanced `TeraBoxProvider.ps1` and `Get-TeraBoxRcloneEnvironment` to format and handle both single tokens and full multi-cookie strings without corrupting headers.
+  6. Verified across 8 automated test suites with 0 failures (`tests/Run-AllTests.ps1`).
+
 ## Required next evidence
 
 1. Interactive local user sign-in through the TeraBox dedicated connection window (`Show-ProviderConnectionWindow 'terabox'`) and Google OAuth 2.0 flow (`Show-ProviderConnectionWindow 'gdrive'`).
