@@ -133,15 +133,24 @@ Each commit changed one file and was pushed to `origin/main`:
 - `e224f60` — add shared provider connection UI window.
 - `387ddc8` — integrate provider connection flows in desktop UI.
 - `ec77719` — add automated test suite runner.
+- `0d54aa9` — add Google OAuth client configuration check and non-blocking listener.
+- `300ba8d` — validate Google OAuth configuration and wrap connection dialog controls.
+- `3fd44d2` — resolve read-only pid variable conflict and prevent desktop layout overflow.
+- `8c0ad13` — add OAuth client configuration and empty client ID validation tests.
+- `4e93d57` — add desktop UI regression tests for pid conflict and scroll constraints.
+- `fb7f73b` — register desktop UI regression test suite in test runner.
 
 ## Automated test suite verification
 
 Run `powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1`:
 - `Test-ConnectionState.ps1`: Verified 10 connection states, valid state machine transitions, fail-closed invalid transition rejection, and sensitive credential sanitization.
 - `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence and clean deletion, and account scope validation.
-- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, fail-closed handling without tokens, DPAPI-protected token persistence and clean deletion, and OAuth authorization URL construction.
+- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, fail-closed handling without tokens, DPAPI-protected token persistence and clean deletion, OAuth client configuration discovery, and OAuth authorization URL construction with client ID validation.
 - `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, and read-only VFS cache mount argument formatting.
+- `Test-DesktopUIRegression.ps1`: Verified that no read-only `$pid` parameter declarations exist in `src/`, that `NSCloudDrive.ps1` and `ProviderConnectionWindow.ps1` explicitly disable horizontal scrollbar measurement to prevent layout overflow, and that `NSCloudDrive.ps1` loads cleanly in an STA session.
 - `Test-RcloneConfigPassword.ps1`: Verified synthetic DPAPI read-back, plaintext-at-rest absence, user/SYSTEM private ACLs, and missing-credential fail-closed behavior.
+
+**Result: 6 Passed, 0 Failed.**
 
 ## Required next evidence
 
