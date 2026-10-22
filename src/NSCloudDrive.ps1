@@ -95,23 +95,38 @@ function New-Card([string]$Title, [string]$Description) {
 function Get-VerifiedRclonePath {
     $executable = Join-Path $script:BuildRoot 'rclone.exe'
     $manifestPath = Join-Path $script:BuildRoot 'rclone.build.json'
+    $hasPatchedFiles = $true
     foreach ($path in @($executable, $manifestPath, $script:PatchPath)) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $hasPatchedFiles = $false; break }
     }
 
-    try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        $patchHash = (Get-FileHash -LiteralPath $script:PatchPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($manifest.sourceCommit -eq '56bf13885494819bc801302ddf881279bdac7262' -and
-            $manifest.target -eq 'windows/amd64' -and
-            $manifest.buildTag -eq 'cmount' -and
-            $manifest.backend -eq 'terabox' -and
-            $manifest.patchSha256 -eq $patchHash -and
-            $manifest.executableSha256 -eq $executableHash) {
-            return $executable
-        }
-    } catch { return $null }
+    if ($hasPatchedFiles) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $patchHash = (Get-FileHash -LiteralPath $script:PatchPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($manifest.sourceCommit -eq '56bf13885494819bc801302ddf881279bdac7262' -and
+                $manifest.target -eq 'windows/amd64' -and
+                $manifest.buildTag -eq 'cmount' -and
+                $manifest.backend -eq 'terabox' -and
+                $manifest.patchSha256 -eq $patchHash -and
+                $manifest.executableSha256 -eq $executableHash) {
+                return $executable
+            }
+        } catch { }
+    }
+
+    # Also check if any available rclone binary on the system already supports the terabox backend
+    $systemRclone = Find-RcloneBinary
+    if ($systemRclone) {
+        try {
+            $providers = & $systemRclone --config= config providers 2>$null | Out-String
+            if ($LASTEXITCODE -eq 0 -and $providers -match '(?i)\bterabox\b') {
+                return $systemRclone
+            }
+        } catch { }
+    }
+
     return $null
 }
 
@@ -561,7 +576,8 @@ $tbMountBtn.Add_Click({
     $tbMountBtn.IsEnabled = $false
     $tbMountBtn.Content = 'Mounting...'
     try {
-        $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory
+        $tbEnvVars = Get-TeraBoxRcloneEnvironment
+        $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
         if ($res.Success) {
             [System.Windows.MessageBox]::Show("TeraBox mounted successfully as $($res.DriveLetter):`nYou can now open File Explorer and access your files.", 'TeraBox Mounted', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         }
@@ -636,7 +652,8 @@ $menuMountTB.Add_Click({
     } else {
         $tbCheck = Test-TeraBoxBackendSession
         if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory | Out-Null
+            $tbEnvVars = Get-TeraBoxRcloneEnvironment
+            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
         }
     }
     Update-AllUIState
@@ -775,7 +792,8 @@ if ($script:Settings.AutoMountDrives) {
         if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
             $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
             if (-not $tbStatus.IsMounted) {
-                Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory | Out-Null
+                $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
             }
         }
         Update-AllUIState
