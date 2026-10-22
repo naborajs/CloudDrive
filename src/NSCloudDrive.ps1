@@ -7,6 +7,10 @@ Add-Type -AssemblyName WindowsBase
 
 $script:Accent = '#5B5CE2'
 $script:Muted = '#667085'
+$script:BuildRoot = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra'
+$script:PatchPath = Join-Path $PSScriptRoot '..\patches\rclone-terabox-v1.75.2-extra-secret-safety.patch'
+$script:CacheDirectory = 'D:\CloudCache\TeraBox'
+$script:DriveLetter = 'T'
 
 function New-Label([string]$Text, [int]$Size = 14, [string]$Color = '#172033', [bool]$Bold = $false) {
     $label = [System.Windows.Controls.TextBlock]::new()
@@ -35,10 +39,48 @@ function New-Card([string]$Title, [string]$Description) {
     return $border
 }
 
-function Get-RclonePath {
-    $candidate = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
-    if ($candidate) { return $candidate.Source }
+function Get-VerifiedRclonePath {
+    $executable = Join-Path $script:BuildRoot 'rclone.exe'
+    $manifestPath = Join-Path $script:BuildRoot 'rclone.build.json'
+    foreach ($path in @($executable, $manifestPath, $script:PatchPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $patchHash = (Get-FileHash -LiteralPath $script:PatchPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($manifest.sourceCommit -eq '56bf13885494819bc801302ddf881279bdac7262' -and
+            $manifest.target -eq 'windows/amd64' -and
+            $manifest.buildTag -eq 'cmount' -and
+            $manifest.backend -eq 'terabox' -and
+            $manifest.patchSha256 -eq $patchHash -and
+            $manifest.executableSha256 -eq $executableHash) {
+            return $executable
+        }
+    } catch { return $null }
     return $null
+}
+
+function Get-DriveAvailability([string]$Letter) {
+    $drivePath = "$($Letter.ToUpperInvariant()):\"
+    $occupied = [System.IO.DriveInfo]::GetDrives().Name -contains $drivePath
+    if ($occupied) { return "$($Letter.ToUpperInvariant()): is already in use" }
+    return "$($Letter.ToUpperInvariant()): is available"
+}
+
+function Get-CacheVolumeDiagnostic([string]$Path) {
+    try {
+        $volumeRoot = [System.IO.Path]::GetPathRoot($Path)
+        $volume = [System.IO.DriveInfo]::new($volumeRoot)
+        if (-not $volume.IsReady) { return "Cache volume $volumeRoot is not ready" }
+        $freeGiB = [Math]::Floor($volume.AvailableFreeSpace / 1GB)
+        if ($volume.DriveFormat -ne 'NTFS') { return "Cache volume $volumeRoot uses $($volume.DriveFormat); NTFS is required" }
+        if ($volume.AvailableFreeSpace -lt 25GB) { return "Cache volume $volumeRoot has $freeGiB GiB free; at least 25 GiB is required" }
+        return "Cache volume $volumeRoot is NTFS with $freeGiB GiB free"
+    } catch {
+        return "Cache volume could not be checked: $($_.Exception.Message)"
+    }
 }
 
 function Test-WinFsp {
@@ -104,7 +146,7 @@ $outer.Children.Add($content) | Out-Null
 $statusCard = New-Card 'Not connected' 'No cloud drive is mounted. Setup checks do not sign in or read account credentials.'
 $content.Children.Add($statusCard) | Out-Null
 $content.Children.Add((New-Card 'Windows drive' 'Planned mount point: T:\   |   Access mode: read-only during initial verification')) | Out-Null
-$content.Children.Add((New-Card 'Local cache' 'Planned location: %LOCALAPPDATA%\NSCloudDrive\Cache   |   Proposed cap: 20 GB')) | Out-Null
+$content.Children.Add((New-Card 'Local cache' 'Planned location: D:\CloudCache\TeraBox   |   Proposed cap: 20 GiB')) | Out-Null
 
 $notice = [System.Windows.Controls.Border]::new()
 $notice.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFF7E6')
@@ -128,9 +170,17 @@ $checkButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFr
 $checkButton.Foreground = [System.Windows.Media.Brushes]::White
 $checkButton.BorderThickness = [System.Windows.Thickness]::new(0)
 $checkButton.Add_Click({
-    $rclonePath = Get-RclonePath
+    $rclonePath = Get-VerifiedRclonePath
+    $pathCandidate = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
     $items = [System.Collections.Generic.List[string]]::new()
-    $items.Add(('rclone: ' + $(if ($rclonePath) { 'found' } else { 'not installed or not on PATH' })))
+    if ($rclonePath) {
+        $items.Add('rclone: pinned build and manifest verified')
+        $items.Add(('rclone path: ' + $rclonePath))
+    } elseif ($pathCandidate) {
+        $items.Add('rclone: found on PATH, but not the verified project build; not executed')
+    } else {
+        $items.Add('rclone: no verified project build found')
+    }
     $winfspAvailable = Test-WinFsp
     $items.Add(('WinFsp: ' + $(if ($winfspAvailable) { 'found' } else { 'not detected' })))
     $backendAvailable = $false
@@ -138,8 +188,11 @@ $checkButton.Add_Click({
         $backendAvailable = Test-TeraBoxBackend $rclonePath
         $items.Add(('TeraBox backend: ' + $(if ($backendAvailable) { 'provider entry found; account access is untested' } else { 'not present in this rclone build' })))
     } else {
-        $items.Add('TeraBox backend: cannot check without rclone')
+        $items.Add('TeraBox backend: not checked without a verified project build')
     }
+    $items.Add((Get-DriveAvailability $script:DriveLetter))
+    $items.Add(('Cache: ' + $script:CacheDirectory))
+    $items.Add((Get-CacheVolumeDiagnostic $script:CacheDirectory))
     $details.Text = $items -join "`n"
 })
 $buttons.Children.Add($checkButton) | Out-Null
