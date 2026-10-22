@@ -28,6 +28,10 @@
 
 No candidate currently satisfies the production gate. First pin source, correct/guard cookie sensitivity and debug output, add synthetic-secret regression tests, and build a Windows `cmount` binary. Then test read-only operations against a user-owned account in a disposable Windows profile. Keep writes and startup persistence disabled until their own tests pass.
 
+## Official TeraBox Open API (separate option)
+
+TeraBox's [official integration docs](https://www.terabox.com/integrations/docs/chinese) document OAuth authorization-code and QR/device-code flows, but app credentials (`client_id`, `client_secret`, and `private_secret`) require a separate application request. The same API confines file paths to an application-assigned folder under `From: Other Applications/...`; the docs do not show access to the user's existing full-drive root. It is a potentially supported option for an app-specific folder, not a verified substitute for the whole-account mount. No application was registered and no token request was made.
+
 ## Source links
 
 - [Requested fork](https://github.com/derrundetisch/rclone-extra)
