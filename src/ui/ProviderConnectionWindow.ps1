@@ -607,8 +607,8 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
         }
 
         $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenRes.Tokens
-        $userEmail = if ($verify.IsValid -and $verify.UserInfo.EmailAddress) { $verify.UserInfo.EmailAddress } else { '' }
-        $userName = if ($verify.IsValid -and $verify.UserInfo.DisplayName) { $verify.UserInfo.DisplayName } else { $userEmail }
+        $userEmail = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'EmailAddress' '') } else { '' }
+        $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' $userEmail) } else { $userEmail }
 
         $accId = "gdrive_" + [DateTime]::UtcNow.Ticks.ToString()
         Save-GoogleDriveTokens -TokenData $tokenRes.Tokens -AccountId $accId
@@ -681,9 +681,13 @@ function Show-DiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $items.Add("")
     $items.Add("[Authentication State]")
     $tbCheck = Test-TeraBoxBackendSession
-    $items.Add("TeraBox Session: " + $(if ($tbCheck.IsValid) { "Connected ($($tbCheck.UserInfo.UserName))" } else { "Disconnected ($($tbCheck.Error))" }))
+    $tbUName = if ($tbCheck.UserInfo) { [string](Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User') } else { 'TeraBox User' }
+    $tbErr = [string](Get-SafeProperty $tbCheck 'Error' 'Not connected')
+    $items.Add("TeraBox Session: " + $(if ($tbCheck.IsValid) { "Connected ($tbUName)" } else { "Disconnected ($tbErr)" }))
     $gdCheck = Test-GoogleDriveBackendSession
-    $items.Add("Google Drive Session: " + $(if ($gdCheck.IsValid) { "Connected ($($gdCheck.UserInfo.DisplayName))" } else { "Disconnected ($($gdCheck.Error))" }))
+    $gdDispName = if ($gdCheck.UserInfo) { [string](Get-SafeProperty $gdCheck.UserInfo 'DisplayName' (Get-SafeProperty $gdCheck.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
+    $gdErr = [string](Get-SafeProperty $gdCheck 'Error' 'Not connected')
+    $items.Add("Google Drive Session: " + $(if ($gdCheck.IsValid) { "Connected ($gdDispName)" } else { "Disconnected ($gdErr)" }))
 
     Show-DiagnosticsDialog -Title 'System Diagnostics' -DiagnosticsContent ($items -join "`n") -Owner $Owner
 }
@@ -963,7 +967,8 @@ function Show-ProviderConnectionWindow(
                         Save-GoogleDriveTokens -TokenData $tokenResult.Tokens
                         $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
                         if ($verify.IsValid) {
-                            & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName)"
+                            $uDisp = if ($verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' (Get-SafeProperty $verify.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
+                            & $UpdateState 'Connected' "Connected as $uDisp"
                         } else {
                             & $UpdateState $verify.State $verify.Error
                         }
@@ -992,14 +997,16 @@ function Show-ProviderConnectionWindow(
         if ($ProviderId -eq 'terabox') {
             $res = Test-TeraBoxBackendSession
             if ($res.IsValid) {
-                & $UpdateState 'Connected' "Verified connection for $($res.UserInfo.UserName)"
+                $uName = if ($res.UserInfo) { [string](Get-SafeProperty $res.UserInfo 'UserName' 'TeraBox User') } else { 'TeraBox User' }
+                & $UpdateState 'Connected' "Verified connection for $uName"
             } else {
                 & $UpdateState $res.State $res.Error
             }
         } else {
             $res = Test-GoogleDriveBackendSession
             if ($res.IsValid) {
-                & $UpdateState 'Connected' "Verified connection for $($res.UserInfo.DisplayName)"
+                $uDisp = if ($res.UserInfo) { [string](Get-SafeProperty $res.UserInfo 'DisplayName' (Get-SafeProperty $res.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
+                & $UpdateState 'Connected' "Verified connection for $uDisp"
             } else {
                 & $UpdateState $res.State $res.Error
             }
@@ -1025,14 +1032,16 @@ function Show-ProviderConnectionWindow(
     if ($ProviderId -eq 'terabox') {
         $c = Test-TeraBoxBackendSession
         if ($c.IsValid) {
-            & $UpdateState 'Connected' "Connected as $($c.UserInfo.UserName)"
+            $uName = if ($c.UserInfo) { [string](Get-SafeProperty $c.UserInfo 'UserName' 'TeraBox User') } else { 'TeraBox User' }
+            & $UpdateState 'Connected' "Connected as $uName"
         } else {
             & $UpdateState 'Disconnected' 'No account connected.'
         }
     } else {
         $c = Test-GoogleDriveBackendSession
         if ($c.IsValid) {
-            & $UpdateState 'Connected' "Connected as $($c.UserInfo.DisplayName)"
+            $uDisp = if ($c.UserInfo) { [string](Get-SafeProperty $c.UserInfo 'DisplayName' (Get-SafeProperty $c.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
+            & $UpdateState 'Connected' "Connected as $uDisp"
         } else {
             & $UpdateState 'Disconnected' 'No account connected.'
         }
