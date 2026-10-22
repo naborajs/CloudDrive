@@ -9,6 +9,14 @@
 - The TeraBox implementations inspected are unofficial. The `rclone-extra` backend documents cookie-based authentication and includes a configurable debug level that can emit request and response detail. That means logs must be treated as potentially sensitive until audited and redacted.
 - `morluto/rea` is a reverse-engineering toolkit for lawful research, not a TeraBox storage connector or a required dependency. Do not use it to bypass authentication, CAPTCHA, quotas, or access controls.
 
+### Current phase gate (2026-10-22)
+
+The pinned-source builder was run and reproduced a preflight failure before it created a build directory or cloned anything: `WinFsp FUSE development header fuse.h was not found under: C:\Program Files (x86)\WinFsp\inc\fuse`. The local machine also lacks Go, the two MinGW compiler commands expected by the builder, WinFsp's runtime DLL, and the FUSE development header. Git is present; .NET SDK is absent but irrelevant to this Go build. No software was installed.
+
+The pinned `gulp79/rclone-extra` tag and source patch are identified, and patch application had passed on the exact tag. The tag's Windows workflow uses Go 1.26.x, MinGW, WinFsp v2.1 headers, cgo, and `cmount`; the project's builder pins source and patch but has not yet succeeded. Official rclone documentation describes this cgo build path and a separate cgo-disabled option. The latter has not been validated against this fork. The Windows release ZIP has a published checksum but no verified artifact signature/build attestation in the evidence collected, so it is not accepted as a trusted prebuilt.
+
+The backend requires a website cookie/`ndus`, transmits it in the Cookie header, and has no supported interactive login or renewal path. Its level-1 setup debug call includes the complete options struct. A source patch addresses the debug disclosure path but is uncompiled and has not passed synthetic-secret or config-redaction tests. Authentication is therefore not ready for account testing, even if a source build succeeds. Do not request or handle session credentials to unblock development.
+
 ## Architecture
 
 Keep the Windows application split into these replaceable parts:
@@ -27,12 +35,16 @@ Keep the provider and filesystem layers independent of the desktop UI so another
 
 - Pin exact upstream and backend commits; review license, build provenance, update activity, authentication path, and all debug/logging paths.
 - Build the backend from reviewed source in a reproducible Windows environment. Do not accept an unverified third-party executable as trusted.
+- Before retrying the current helper, install Go 1.26 or newer, the compatible MinGW GCC/G++ toolchain expected on `PATH`, and the WinFsp runtime plus Developer/FUSE headers through their official distribution channels. Verify the exact compiler executable names and `fuse.h` path first; the builder's first current error is the missing header, not a complete dependency inventory. No dependency installation is authorized/performed by this project run.
+- Run the pinned builder and require all its checks: expected source commit, patch applicability, `windows/amd64`, `cmount`, `terabox` provider registration, and build manifest/hash. Record syntax checks, build success, and any later runtime tests as distinct evidence.
 - Verify `rclone config providers` reports the backend and determine whether its config flow can avoid copying session cookies manually.
+- Treat this as an explicit auth gate: the current cookie-only backend has no approved/reliable session acquisition and renewal design for this application. Do not continue to account tests merely because a backend-enabled executable was built. Reassess only if the maintainer/backend documents a permitted flow that can be implemented without credential copying, log exposure, or process-argument exposure, or if a documented official API scope is accepted for a separate provider.
 - Keep the app's mount action disabled until backend source review and local acceptance are complete.
 
 ### 2. Read-only mount proof
 
-- Install current rclone and WinFsp from their official distribution channels in a disposable Windows test profile.
+- Blocked until both a verified backend-enabled Windows build and a permitted local authentication configuration exist. WinFsp installation, drive-letter readiness, account browsing, and file-read tests have not been reached. Do not schedule startup or test write operations while this gate remains open.
+- Install WinFsp from its official distribution channel in a disposable Windows test profile, then use only the project-verified backend-enabled build for the mount proof.
 - Configure a test remote locally; never put credentials in this repository, screenshots, chat, or logs.
 - Start a read-only `T:` mount in the signed-in user's session, using a dedicated cache directory and a unique process identity.
 - Test Explorer listing, nested folders, metadata, small and large file reads, partial/random reads, offline behavior, disconnects, and clean unmount.
