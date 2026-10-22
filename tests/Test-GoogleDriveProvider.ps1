@@ -56,13 +56,32 @@ $afterRemove = Get-GoogleDriveStoredTokens
 if ($afterRemove) { throw 'Tokens were not cleanly removed' }
 Write-Output '  [PASS] Token removal verified'
 
-# 5. Test auth URL construction
+# 5. Test auth URL construction and validation
 $authUrl = Build-GoogleAuthorizationUrl -ClientId 'dummy-client-id' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state'
 if ($authUrl -notmatch 'client_id=dummy-client-id' -or
     $authUrl -notmatch 'state=test-state' -or
     $authUrl -notmatch 'redirect_uri=http%3A%2F%2F127\.0\.0\.1%3A53682%2F') {
     throw "Authorization URL formatting error: $authUrl"
 }
-Write-Output '  [PASS] Authorization URL construction verified'
+$threwEmptyClient = $false
+try {
+    Build-GoogleAuthorizationUrl -ClientId '' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state'
+} catch {
+    $threwEmptyClient = $true
+}
+if (-not $threwEmptyClient) {
+    throw 'Build-GoogleAuthorizationUrl must throw when ClientId is empty.'
+}
+Write-Output '  [PASS] Authorization URL construction and client ID validation verified'
+
+# 6. Test OAuth client configuration discovery
+$cfg = Get-GoogleOAuthConfig
+if ($null -eq $cfg.ConfigPath -or [string]::IsNullOrEmpty($cfg.ConfigPath)) {
+    throw 'Expected ConfigPath in Get-GoogleOAuthConfig result'
+}
+if ($null -eq $cfg.IsConfigured) {
+    throw 'Expected IsConfigured boolean in Get-GoogleOAuthConfig result'
+}
+Write-Output '  [PASS] Google OAuth configuration discovery verified'
 
 Write-Output 'All GoogleDriveProvider tests passed.'
