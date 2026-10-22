@@ -7,12 +7,13 @@
 - The only current app code is a WPF preview. It does not read rclone configuration, sign in, request secrets, or mount a drive.
 - All TeraBox implementations reviewed are unofficial. The inspected backend relies on a web-session token, not an official OAuth integration.
 - In the reviewed backend, the `cookie` field is required but not marked sensitive. The backend constructor's level-1 debug statement formats the full options struct, which contains that cookie. Higher debug levels are documented to include request/response parameters or bodies.
+- A patch is committed for the pinned `v1.75.2-extra` source: it marks the cookie option sensitive, removes the options-struct debug statement, and disables backend-specific debug output. It has only passed patch-application checks; it has not been compiled or tested with synthetic credentials.
 - The QR-login helper prevents manual cookie copying but writes the obtained session token to the ordinary rclone config. That does not establish safe at-rest storage or Windows compatibility.
 - No account was authenticated, no user files were listed, and no remote file operation was executed.
 
 ## Secret-handling requirements before adding sign-in
 
-1. Pin and review the exact backend source. Mark the session option sensitive in rclone's provider registration and replace all logging of the options struct with explicit safe fields. Add tests proving a synthetic secret never appears in logs, exceptions, config-redacted output, or diagnostics.
+1. Compile the pinned patch and add tests proving a synthetic secret never appears in logs, exceptions, config-redacted output, or diagnostics. The current patch is not yet a security guarantee.
 2. Prefer a user-confirmed QR/device authorization flow. If only cookie copy is available, keep sign-in unavailable; do not ask for or collect a cookie through chat, a script, an issue, or a screenshot.
 3. Store the session under the current Windows user's Credential Manager or DPAPI-protected storage. Do not store it in Git, ordinary settings JSON, command-line arguments, environment that persists beyond the child process, telemetry, or crash dumps.
 4. If a reviewed backend must receive a session through a process environment variable, decrypt it only in memory immediately before process start, set it only in the child environment, clear the parent copy, and verify child logs/process diagnostics do not export it. This is a design option, not implemented or verified here.
@@ -49,7 +50,7 @@
 ## Not implemented or not verified
 
 - No secure sign-in or session renewal implementation.
-- No backend patch or synthetic-secret logging test.
+- The backend patch exists, but has not been compiled; no synthetic-secret logging or config-redaction test has run.
 - No mount manager, health-state machine, or clean-unmount implementation.
 - No cache usage reporting or pending-write state tracking.
 - No startup task/service has been created.
