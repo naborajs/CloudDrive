@@ -66,19 +66,30 @@ Do not read WebView2 cookies, copy its profile database, inject cookies into rcl
 ## Provider authentication and security architecture
 
 - **Multi-provider model**: Connection interfaces are isolated per provider (`TeraBoxProvider.ps1`, `GoogleDriveProvider.ps1`) and coordinated through a strict 10-state lifecycle model (`ConnectionState.ps1`). State transitions fail closed and prevent premature mount operations until file query verification succeeds.
-- **Google Drive OAuth 2.0**: Uses RFC 8252 loopback authorization with cryptographically random `state` parameter validation to prevent CSRF attacks. Access scope defaults to the minimum required read-only permission (`drive.readonly`). Local loopback listener runs strictly on `127.0.0.1` and halts after single callback processing or timeout.
+- **Google Drive OAuth 2.0 & PKCE**: Uses RFC 8252 loopback authorization with RFC 7636 Proof Key for Code Exchange (PKCE) S256 challenge generation and cryptographically random `state` parameter validation to prevent CSRF and authorization code interception attacks. Supports standard Google `installed` / `desktop` client formats without requiring a client secret. Access scope defaults to the minimum required read-only permission (`drive.readonly`). Local loopback listener runs strictly on `127.0.0.1` with `System.Net.WebUtility` HTML encoding and halts after single callback processing or timeout.
+- **Automatic Token Lifecycle**: Seamless token refresh via `Invoke-GoogleDriveApiWithRetry` automatically handles HTTP 401 token expirations by refreshing tokens and updating DPAPI storage. Token revocation on disconnect uses HTTP POST directly to the Google OAuth revocation endpoint, prioritizing refresh token revocation to cleanly revoke consent.
 - **DPAPI credential protection**: Stored provider sessions and OAuth tokens are protected using Windows Data Protection API (DPAPI) tied to the current interactive user, with explicit NTFS file security rules granting access exclusively to the current user SID and SYSTEM.
-- **Diagnostics sanitization**: Diagnostic messages and log buffers pass through `Format-SanitizedDiagnosticMessage`, which strips all access tokens, refresh tokens, client secrets, auth codes, ndus values, cookies, Bearer tokens, and passwords.
-- **Sign-out and revocation**: Disconnecting removes local credential files with explicit wipe and triggers remote token revocation where supported (e.g. Google OAuth revocation endpoint).
+- **Child-process environment bridging**: OAuth credentials for virtual filesystem mounts are injected directly into child process memory via `RCLONE_CONFIG_GDRIVE_*` environment variables, avoiding plaintext tokens on disk or command-line parameter leakage in Task Manager.
+- **Diagnostics sanitization**: Diagnostic messages and log buffers pass through `Format-SanitizedDiagnosticMessage`, which strips all access tokens, refresh tokens, client secrets, auth codes, ndus values, cookies, Set-Cookie headers, Bearer tokens, raw `ya29.*` and `1//.*` tokens, and passwords across plaintext, query parameters, and JSON payloads.
+- **Multi-provider virtual drive separation**: Each provider mounts to its own distinct drive letter (Google Drive to `G:`, TeraBox to `T:`), with independent process lifecycles, provider-specific volume names (`--volname`), and automatic drive letter conflict resolution. Disconnecting or failure of one provider never disrupts another.
+- **Persistent user logon startup**: Configured through `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`, ensuring background execution strictly within the user's interactive session (avoiding session-0 isolation or elevated-process Explorer drive invisibility).
 
 ## Implemented and verified vs. remaining acceptance
 
 - **Verified via automated test suite (`tests/Run-AllTests.ps1`)**:
-  - Connection state machine transitions, metadata, and secret sanitization (`Test-ConnectionState.ps1`).
-  - TeraBox provider metadata, fail-closed handling, DPAPI storage, and scope validation (`Test-TeraBoxProvider.ps1`).
-  - Google Drive provider metadata, cryptographic state entropy, fail-closed handling, DPAPI tokens storage, and auth URL formatting (`Test-GoogleDriveProvider.ps1`).
-  - Virtual drive manager binary discovery, WinFsp detection, drive availability, and mount argument formatting (`Test-VirtualDriveManager.ps1`).
-  - DPAPI rclone config password helper (`Test-RcloneConfigPassword.ps1`).
+  - Connection state machine transitions, metadata, and secret sanitization across JSON, queries, and raw tokens (`Test-ConnectionState.ps1`).
+  - TeraBox provider metadata, fail-closed handling, DPAPI storage in sandboxed environment, and scope validation (`Test-TeraBoxProvider.ps1`).
+  - Google Drive provider metadata, cryptographic state entropy, RFC 7636 PKCE S256 verifier and Appendix B test vector, DPAPI token storage, rclone environment variable construction, installed client JSON discovery, and WebUtility HTML encoding (`Test-GoogleDriveProvider.ps1`).
+  - Virtual drive manager binary discovery, WinFsp runtime and service detection, drive availability checks, read-only VFS cache mount argument formatting with security flags, drive letter fallback, provider volume labels, cache statistics, and multi-provider status querying (`Test-VirtualDriveManager.ps1`).
+  - Settings manager defaults, custom persistence, drive preferences, and Windows user logon startup registry configuration (`Test-SettingsManager.ps1`).
+  - Desktop UI regression testing ensuring no read-only `$pid` collisions, layout scrollbar constraints, and clean STA window construction (`Test-DesktopUIRegression.ps1`).
+  - DPAPI rclone config password helper synthetic verification (`Test-RcloneConfigPassword.ps1`).
+- **Verified via empirical resource benchmark (`tests/Benchmark-ResourceUsage.ps1`)**:
+  - Cold startup time: 1551 ms (~1.55 s)
+  - Active UI host Working Set: 159.23 MB RAM
+  - Private Memory Commit: 143.80 MB
+  - Sampled Idle CPU: 0.10%
+  - VFS Cache disk status: Verified on `D:\CloudCache` (NTFS Fixed volume, 124 GiB free, 20.00 GiB soft target).
 - **Remaining acceptance gates**:
   - Interactive user login completion with live provider accounts.
-  - Verification of File Explorer `T:\` access to a real remote file.
+  - Verification of File Explorer `G:\` and `T:\` file access once live account validation completes.
