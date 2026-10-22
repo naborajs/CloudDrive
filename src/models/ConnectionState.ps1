@@ -196,14 +196,21 @@ function Assert-ValidConnectionTransition([string]$FromState, [string]$ToState) 
 function Format-SanitizedDiagnosticMessage([string]$Message) {
     if ([string]::IsNullOrEmpty($Message)) { return '' }
     $sanitized = $Message
-    # Redact sensitive parameters
-    $sanitized = $sanitized -replace '(?i)(access_token[s]?\s*[=:]\s*)[^\s&";]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(refresh_token\s*[=:]\s*)[^\s&";]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(client_secret\s*[=:]\s*)[^\s&";]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(code\s*=\s*)[^\s&";]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(ndus\s*=\s*)[^\s&";]+', '$1[REDACTED]'
+
+    # Redact JSON-formatted string values: "key": "value"
+    $sanitized = $sanitized -replace '(?i)("?(?:access_token[s]?|refresh_token|client_secret|token|code|ndus|BDUSS|password)"?\s*:\s*")([^"\\]|\\.)*(")', '$1[REDACTED]$3'
+
+    # Redact key=value or key: value parameters (both unquoted and quoted)
+    $sanitized = $sanitized -replace '(?i)(\b(?:access_token[s]?|refresh_token|client_secret|token|code|ndus|BDUSS|password)\s*[=:]\s*["'']?)[^\s&"'';]+(["'']?)', '$1[REDACTED]$2'
+
+    # Redact raw Google OAuth access and refresh token formats anywhere in text
+    $sanitized = $sanitized -replace '\bya29\.[a-zA-Z0-9_\.\-]+', 'ya29.[REDACTED]'
+    $sanitized = $sanitized -replace '\b1//[a-zA-Z0-9_\.\-]+', '1//[REDACTED]'
+
+    # Redact sensitive HTTP headers
     $sanitized = $sanitized -replace '(?i)(cookie\s*:\s*)[^\r\n]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(authorization\s*:\s*Bearer\s+)[^\r\n]+', '$1[REDACTED]'
-    $sanitized = $sanitized -replace '(?i)(password\s*[=:]\s*)[^\s&";]+', '$1[REDACTED]'
+    $sanitized = $sanitized -replace '(?i)(set-cookie\s*:\s*)[^\r\n]+', '$1[REDACTED]'
+    $sanitized = $sanitized -replace '(?i)(authorization\s*:\s*(?:Bearer|Basic)\s+)[^\r\n]+', '$1[REDACTED]'
+
     return $sanitized
 }
