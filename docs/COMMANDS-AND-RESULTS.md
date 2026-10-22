@@ -14,6 +14,7 @@
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
 | Run the build helper with this PC's current prerequisites | Safely stopped before creating its build folder because WinFsp FUSE development header `fuse.h` is absent. | No source was downloaded by the helper and no software was installed; Go and MinGW are also absent from the earlier environment audit. |
 | Parse `scripts/Start-ReadOnlyMount.ps1` with the PowerShell parser | Passed. | Syntax only; no mount was attempted. |
+| Exercise the extracted read-only cache-path validator in Windows PowerShell | Passed for an ordinary local NTFS path; it rejected a volume root, UNC path, existing junction ancestor, and file path component. | Isolated function checks only; no cache directory was created and no mount was started. |
 | Parse `scripts/RcloneConfigPassword.ps1` and exercise its missing-credential path | Passed; the helper exits with a clear error when its DPAPI credential file is absent. | Output was suppressed. No actual config password or provider session was used. |
 | Synthetic DPAPI export/import and helper read-back in the current PowerShell host | Passed; compared the generated value in memory and did not print it. The temporary fixture was removed. | Tests the read helper and Windows DPAPI in this host, not the interactive `-Store` ACL branch. |
 | Run `scripts/Test-RcloneConfigPassword.ps1` | Passed; repeatably checks synthetic DPAPI serialization/read-back, plaintext absence, user-and-SYSTEM ACLs on a temporary directory and file, and missing-credential failure; removes the fixture. | Does not exercise the interactive `-Store` prompt or the separate Windows PowerShell process. |
@@ -84,6 +85,7 @@ Each commit changed one file and was pushed to `origin/main`:
 - `2ecc9db` — document preview readiness diagnostics.
 - `c9b3ab0` — clarify official TeraBox OAuth limitations.
 - `0d10f2f` — ignore local credentials and runtime artifacts.
+- `a1191aa` — reject unsafe read-only mount cache paths.
 
 ## Required next evidence
 
