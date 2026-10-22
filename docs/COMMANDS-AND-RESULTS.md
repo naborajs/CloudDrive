@@ -93,6 +93,10 @@ Each commit changed one file and was pushed to `origin/main`:
 - `bb44e2f` — document read-only cache path guard.
 - `7dabb23` — share cache path validation logic.
 - `409d3c6` — record pinned backend build and auth blockers.
+- `d206c42` — record exact Windows build preflight blocker.
+- `a450a0e` — gate mount testing on build and auth evidence.
+- `46ef5be` — document pinned TeraBox auth and log limits.
+- `4c1ade9` — add exact local backend build prerequisites.
 
 ## Required next evidence
 
