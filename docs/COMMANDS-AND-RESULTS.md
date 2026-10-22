@@ -13,8 +13,9 @@
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
 | Run the build helper with this PC's current prerequisites | Safely stopped before creating its build folder because WinFsp FUSE development header `fuse.h` is absent. | No source was downloaded by the helper and no software was installed; Go and MinGW are also absent from the earlier environment audit. |
 | Parse `scripts/Start-ReadOnlyMount.ps1` with the PowerShell parser | Passed. | Syntax only; no mount was attempted. |
-| Parse `scripts/RcloneConfigPassword.ps1` and exercise its missing-credential path | Passed; the helper exits with an error when its DPAPI credential file is absent. | Output was suppressed. The credential was not stored, and no DPAPI save/decrypt round-trip was attempted. |
-| Parse the updated read-only launcher and invoke its Windows PowerShell credential helper without a stored credential | Passed; it fails closed without emitting output to the test console. | No rclone process, config, account session, or mount was involved. |
+| Parse `scripts/RcloneConfigPassword.ps1` and exercise its missing-credential path | Passed; the helper exits with a clear error when its DPAPI credential file is absent. | Output was suppressed. No actual config password or provider session was used. |
+| Synthetic DPAPI export/import and helper read-back in the current PowerShell host | Passed; compared the generated value in memory and did not print it. The temporary fixture was removed. | Tests the read helper and Windows DPAPI in this host, not the interactive `-Store` ACL branch. |
+| Run the helper as a separate Windows PowerShell process | Blocked by this environment with `AuthorizationManager check failed`. | Does not establish a product defect or a pass; the launcher/password-command subprocess integration remains unverified. No rclone process or mount was involved. |
 | Parse `scripts/Manage-UserMountStartup.ps1` and exercise its safety gate | Passed; it refuses registration without `-ReadOnlyAcceptancePassed`. No task with the reserved name existed. | Task registration, removal, scheduled retries, and logon mount were not run. Build/config prerequisites are absent. |
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
@@ -70,10 +71,11 @@ Each commit changed one file and was pushed to `origin/main`:
 - `d54ef8b` — add gated per-user mount startup manager.
 - `410ddda` — document opt-in read-only logon mounting.
 - `c3de7ab` — update security notes for startup support.
+- `42ff8fb` — clarify DPAPI helper test coverage.
 
 ## Required next evidence
 
 1. Provide Go 1.26+, MinGW, and WinFsp FUSE development headers; run the pinned builder and verify its output.
-2. Run a synthetic DPAPI save/decrypt round-trip and add/run synthetic-secret tests for config redaction and diagnostic logs.
+2. Test the DPAPI interactive save/ACL branch and native Windows PowerShell subprocess on an unrestricted Windows session; add/run synthetic-secret tests for config redaction and diagnostic logs.
 3. Audit the exact pinned build's license notices; then verify provider registration. A compliant TeraBox sign-in path remains a blocker before any account access.
 4. After compliant authentication is available, perform user-controlled read-only account tests locally; only then consider disposable writable/recovery/cache tests and record exact versions and observed results.
