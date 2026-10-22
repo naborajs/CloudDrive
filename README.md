@@ -31,7 +31,7 @@ On Windows, open PowerShell and run:
 powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1
 ```
 
-The preview needs Windows PowerShell 5.1 with WPF. **Check setup** reports whether rclone is on `PATH`, whether common WinFsp installation markers are present, and whether the installed rclone lists a TeraBox provider. These are local checks only; provider registration does not prove login or file access. The mount button is deliberately locked. No account credentials are requested or read.
+The preview needs Windows PowerShell 5.1 with WPF. **Check setup** looks for the project build, verifies its source/patch/build manifest and executable hashes before checking provider registration, reports WinFsp markers, T: availability, and whether the cache volume is NTFS with at least 25 GiB free. An rclone executable found only on `PATH` is reported but not run. These are local checks only; provider registration does not prove login or file access. The mount button is deliberately locked. No account credentials are requested or read.
 
 The preview has only been syntax-checked on the development PC. Its UI and prerequisite detection have not yet been acceptance-tested on a clean Windows install. Do not install an unofficial binary from an unknown source.
 
