@@ -14,6 +14,9 @@ function Get-DefaultSettings {
         AutoStartWithWindows = $true
         AutoMountDrives = $true
         MinimizeToTrayOnClose = $true
+        StartMinimized = $false
+        OpenExplorerOnMount = $true
+        Theme = 'Light'
         CacheDirectory = 'D:\CloudCache'
         ProviderDriveLetters = [ordered]@{
             gdrive = 'G'
@@ -34,13 +37,16 @@ function Get-NSCloudDriveSettings {
         $defaults = Get-DefaultSettings
 
         $settings = [ordered]@{
-            AutoStartWithWindows = if ($null -ne $json.AutoStartWithWindows) { [bool]$json.AutoStartWithWindows } else { $defaults.AutoStartWithWindows }
-            AutoMountDrives = if ($null -ne $json.AutoMountDrives) { [bool]$json.AutoMountDrives } else { $defaults.AutoMountDrives }
-            MinimizeToTrayOnClose = if ($null -ne $json.MinimizeToTrayOnClose) { [bool]$json.MinimizeToTrayOnClose } else { $defaults.MinimizeToTrayOnClose }
-            CacheDirectory = if (-not [string]::IsNullOrEmpty($json.CacheDirectory)) { [string]$json.CacheDirectory } else { $defaults.CacheDirectory }
+            AutoStartWithWindows = if ($json.PSObject.Properties['AutoStartWithWindows'] -and $null -ne $json.AutoStartWithWindows) { [bool]$json.AutoStartWithWindows } else { $defaults.AutoStartWithWindows }
+            AutoMountDrives = if ($json.PSObject.Properties['AutoMountDrives'] -and $null -ne $json.AutoMountDrives) { [bool]$json.AutoMountDrives } else { $defaults.AutoMountDrives }
+            MinimizeToTrayOnClose = if ($json.PSObject.Properties['MinimizeToTrayOnClose'] -and $null -ne $json.MinimizeToTrayOnClose) { [bool]$json.MinimizeToTrayOnClose } else { $defaults.MinimizeToTrayOnClose }
+            StartMinimized = if ($json.PSObject.Properties['StartMinimized'] -and $null -ne $json.StartMinimized) { [bool]$json.StartMinimized } else { $defaults.StartMinimized }
+            OpenExplorerOnMount = if ($json.PSObject.Properties['OpenExplorerOnMount'] -and $null -ne $json.OpenExplorerOnMount) { [bool]$json.OpenExplorerOnMount } else { $defaults.OpenExplorerOnMount }
+            Theme = if ($json.PSObject.Properties['Theme'] -and -not [string]::IsNullOrEmpty($json.Theme)) { [string]$json.Theme } else { $defaults.Theme }
+            CacheDirectory = if ($json.PSObject.Properties['CacheDirectory'] -and -not [string]::IsNullOrEmpty($json.CacheDirectory)) { [string]$json.CacheDirectory } else { $defaults.CacheDirectory }
             ProviderDriveLetters = [ordered]@{
-                gdrive = if ($json.ProviderDriveLetters -and $json.ProviderDriveLetters.gdrive) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
-                terabox = if ($json.ProviderDriveLetters -and $json.ProviderDriveLetters.terabox) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
+                gdrive = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['gdrive']) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
+                terabox = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['terabox']) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
             }
         }
         return $settings
