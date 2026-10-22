@@ -60,6 +60,18 @@ function Get-TeraBoxProviderInfo {
     }
 }
 
+function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue = $null) {
+    if ($null -eq $Object) { return $DefaultValue }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($PropertyName)) { return $Object[$PropertyName] }
+        return $DefaultValue
+    }
+    if ($Object.PSObject -and $Object.PSObject.Properties[$PropertyName]) {
+        return $Object.PSObject.Properties[$PropertyName].Value
+    }
+    return $DefaultValue
+}
+
 function Get-TeraBoxStoredSession {
     $credPath = Get-TeraBoxCredentialFilePath
     if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
@@ -81,10 +93,13 @@ function Get-TeraBoxStoredSession {
                 if ($secret -and $secret.StartsWith('{') -and $secret.EndsWith('}')) {
                     try {
                         $meta = ConvertFrom-Json $secret -ErrorAction SilentlyContinue
-                        if ($meta -and $meta.Cookie) {
-                            $cookieVal = [string]$meta.Cookie
-                            if ($meta.JsToken) { $jsTokenVal = [string]$meta.JsToken }
-                            if ($meta.BaseUrl) { $baseUrlVal = [string]$meta.BaseUrl }
+                        $cookieFromJson = Get-SafeProperty $meta 'Cookie' $null
+                        if ($cookieFromJson) {
+                            $cookieVal = [string]$cookieFromJson
+                            $jsTokenProp = Get-SafeProperty $meta 'JsToken' $null
+                            if ($jsTokenProp) { $jsTokenVal = [string]$jsTokenProp }
+                            $baseUrlProp = Get-SafeProperty $meta 'BaseUrl' $null
+                            if ($baseUrlProp) { $baseUrlVal = [string]$baseUrlProp }
                         }
                     } catch { }
                 }
@@ -161,8 +176,9 @@ function Format-TeraBoxCookieHeader([string]$Secret) {
     if ($trimmed.StartsWith('{') -and $trimmed.EndsWith('}')) {
         try {
             $meta = ConvertFrom-Json $trimmed -ErrorAction SilentlyContinue
-            if ($meta -and $meta.Cookie) {
-                $trimmed = ([string]$meta.Cookie).Trim()
+            $cookieProp = Get-SafeProperty $meta 'Cookie' $null
+            if ($cookieProp) {
+                $trimmed = ([string]$cookieProp).Trim()
             }
         } catch { }
     }
@@ -265,6 +281,13 @@ function Invoke-TeraBoxHttp(
             }
         }
 
+        if (-not $resp.IsSuccessStatusCode) {
+            return [ordered]@{
+                errno = -6
+                error = "HTTP status $([int]$resp.StatusCode) ($($resp.ReasonPhrase))"
+            }
+        }
+
         $readTask = $resp.Content.ReadAsStringAsync()
         if ($Window -and (Get-Command 'Wait-WpfTask' -ErrorAction SilentlyContinue)) {
             [void](Wait-WpfTask -Task $readTask -TimeoutMs 5000 -Window $Window)
@@ -273,10 +296,15 @@ function Invoke-TeraBoxHttp(
         }
 
         $body = $readTask.Result
-        if ($body) {
-            return (ConvertFrom-Json $body -ErrorAction SilentlyContinue)
+        if (-not [string]::IsNullOrWhiteSpace($body)) {
+            $parsed = ConvertFrom-Json $body -ErrorAction SilentlyContinue
+            if ($parsed) { return $parsed }
         }
-        return $null
+
+        return [ordered]@{
+            errno = -1
+            error = 'Received non-JSON response from TeraBox.'
+        }
     } finally {
         $client.Dispose()
         $handler.Dispose()
@@ -326,12 +354,19 @@ function Test-TeraBoxBackendSession(
             $response = Invoke-RestMethod -Uri $checkUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
         }
 
-        if ($response -and $null -ne $response.errno -and $response.errno -eq 0) {
-            $displayName = if ($response.username) {
-                $response.username
-            } elseif ($response.uk) {
-                $ukStr = [string]$response.uk
-                "TeraBox user …$($ukStr.Substring([Math]::Max(0, $ukStr.Length - 4)))"
+        $errno = Get-SafeProperty $response 'errno' $null
+        if ($null -ne $errno -and [int]$errno -eq 0) {
+            $uk = Get-SafeProperty $response 'uk' $null
+            $uname = Get-SafeProperty $response 'username' $null
+            if (-not $uname) { $uname = Get-SafeProperty $response 'user_name' $null }
+            if (-not $uname) { $uname = Get-SafeProperty $response 'uname' $null }
+
+            $displayName = if ($uname) {
+                [string]$uname
+            } elseif ($uk) {
+                $ukStr = [string]$uk
+                $suffix = if ($ukStr.Length -gt 4) { $ukStr.Substring($ukStr.Length - 4) } else { $ukStr }
+                "TeraBox user …$suffix"
             } else {
                 'TeraBox User'
             }
@@ -343,16 +378,24 @@ function Test-TeraBoxBackendSession(
                 UserInfo = [ordered]@{
                     Type = $session.Type
                     UserName = $displayName
-                    Uk = $response.uk
+                    Uk = $uk
                 }
             }
         } else {
-            $errno = if ($response -and $null -ne $response.errno) { $response.errno } else { -1 }
-            $errDetail = switch ($errno) {
+            $errCode = if ($null -ne $errno) { [int]$errno } else { -1 }
+            $errDetail = switch ($errCode) {
                 -6 { 'TeraBox backend returned error code: -6 (Session may have expired or requires re-authentication).' }
                 4000023 { 'TeraBox backend returned error code: 4000023 (Page token jsToken is missing or expired).' }
                 450016 { 'TeraBox backend returned error code: 450016 (Security verification required by TeraBox).' }
-                default { "TeraBox backend returned error code: $errno." }
+                default {
+                    $msg = Get-SafeProperty $response 'error' $null
+                    if (-not $msg) { $msg = Get-SafeProperty $response 'errmsg' $null }
+                    if ($msg) {
+                        "TeraBox backend returned error code: $errCode ($msg)."
+                    } else {
+                        "TeraBox backend returned error code: $errCode."
+                    }
+                }
             }
 
             return [ordered]@{
@@ -449,16 +492,18 @@ function Get-TeraBoxFileList(
             $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
         }
 
-        if ($response -and $null -ne $response.errno -and $response.errno -eq 0) {
+        $errno = Get-SafeProperty $response 'errno' $null
+        if ($null -ne $errno -and [int]$errno -eq 0) {
             $items = @()
-            if ($response.list) {
-                foreach ($item in $response.list) {
+            $list = Get-SafeProperty $response 'list' $null
+            if ($list) {
+                foreach ($item in $list) {
                     $items += [ordered]@{
-                        Name = $item.server_filename
-                        Path = $item.path
-                        Size = $item.size
-                        IsDirectory = ($item.isdir -eq 1)
-                        ModTime = $item.server_mtime
+                        Name = [string](Get-SafeProperty $item 'server_filename' '')
+                        Path = [string](Get-SafeProperty $item 'path' '')
+                        Size = [int64](Get-SafeProperty $item 'size' 0)
+                        IsDirectory = ((Get-SafeProperty $item 'isdir' 0) -eq 1)
+                        ModTime = [int64](Get-SafeProperty $item 'server_mtime' 0)
                     }
                 }
             }
@@ -470,11 +515,11 @@ function Get-TeraBoxFileList(
                 Error = $null
             }
         } else {
-            $errno = if ($response -and $null -ne $response.errno) { $response.errno } else { -1 }
+            $errCode = if ($null -ne $errno) { [int]$errno } else { -1 }
             return [ordered]@{
                 Success = $false
                 Files = @()
-                Error = "TeraBox directory listing failed with code $errno"
+                Error = "TeraBox directory listing failed with code $errCode"
             }
         }
     } catch {
