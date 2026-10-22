@@ -260,26 +260,41 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $script:LoginCompleted = $false
     $script:CheckingSession = $false
     $script:SessionResult = $null
+    $script:LastTestedCookie = ''
 
     $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
-    $pollTimer.Interval = [TimeSpan]::FromSeconds(1.5)
+    $pollTimer.Interval = [TimeSpan]::FromSeconds(2)
 
     $TryConnect = {
         param([bool]$Automatic = $true)
 
-        if ($script:LoginCompleted -or $script:CheckingSession -or -not $wv.CoreWebView2) {
+        if ($script:LoginCompleted -or $script:CheckingSession) {
+            return
+        }
+
+        if (-not $wv.CoreWebView2) {
+            if (-not $Automatic) {
+                $statusBlock.Text = 'Embedded browser is still initializing. Please wait a moment.'
+                $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+            }
             return
         }
 
         $source = $wv.CoreWebView2.Source
-        if ([string]::IsNullOrWhiteSpace($source)) { return }
+        if ([string]::IsNullOrWhiteSpace($source)) {
+            if (-not $Automatic) {
+                $statusBlock.Text = 'Waiting for page to load...'
+                $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#94A3B8')
+            }
+            return
+        }
 
         [Uri]$pageUri = $null
         if (-not [Uri]::TryCreate($source, [UriKind]::Absolute, [ref]$pageUri) -or
             $pageUri.Scheme -ne 'https' -or
             -not (Test-TeraBoxHost $pageUri.Host)) {
             if (-not $Automatic) {
-                $statusBlock.Text = 'Please complete sign-in on the TeraBox website first.'
+                $statusBlock.Text = 'Please navigate to TeraBox and sign in below before checking connection.'
                 $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
             }
             return
@@ -297,7 +312,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
             $cookieDone = Wait-WpfTask -Task $cookieTask -TimeoutMs 4000 -Window $browserWin
             if (-not $cookieDone -or -not $cookieTask.Result) {
                 if (-not $Automatic) {
-                    $statusBlock.Text = 'Unable to read browser cookies. Please try again.'
+                    $statusBlock.Text = 'Unable to read browser cookies. Please wait for the page to finish loading and try again.'
                     $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
                 }
                 return
@@ -314,14 +329,29 @@ function Show-TeraBoxEmbeddedLoginWindow(
 
             if (-not $hasNdus) {
                 if (-not $Automatic) {
-                    $statusBlock.Text = 'TeraBox does not show you as signed in yet. Finish sign-in on the page below.'
+                    $statusBlock.Text = 'No active TeraBox session found. Complete sign-in on the page below and try again.'
                     $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
                 }
                 return
             }
 
-            # ndus cookie present: transition UI
-            $statusBlock.Text = 'Signed in. Checking the connection with TeraBox…'
+            # Build clean cookie string for active origin only
+            $cookiePairs = @()
+            foreach ($c in $cookies) {
+                if (-not [string]::IsNullOrEmpty($c.Name) -and -not [string]::IsNullOrEmpty($c.Value)) {
+                    $cookiePairs += "$($c.Name)=$($c.Value)"
+                }
+            }
+            $cookieHeader = $cookiePairs -join '; '
+
+            # Avoid spamming the backend with the exact same rejected cookie during automatic polling
+            if ($Automatic -and $script:LastTestedCookie -eq $cookieHeader) {
+                return
+            }
+            $script:LastTestedCookie = $cookieHeader
+
+            # Session cookie detected: inform user that backend validation is taking place
+            $statusBlock.Text = 'Session detected. Validating authorization with TeraBox…'
             $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#38BDF8')
 
             # Extract window.jsToken from DOM asynchronously
@@ -402,7 +432,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 return
             } else {
                 $errDetail = if ($testCheck.Error) { $testCheck.Error } else { 'TeraBox rejected the session.' }
-                $statusBlock.Text = "TeraBox did not accept the session: $errDetail"
+                $statusBlock.Text = "Validation failed: $errDetail"
                 $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
             }
         } finally {
@@ -424,6 +454,10 @@ function Show-TeraBoxEmbeddedLoginWindow(
             $wv.CoreWebView2.Settings.AreDevToolsEnabled = $false
             $wv.CoreWebView2.Settings.IsPasswordAutosaveEnabled = $false
             $wv.CoreWebView2.Settings.IsGeneralAutofillEnabled = $false
+            $wv.CoreWebView2.Add_NavigationCompleted({
+                param($s, $args)
+                $script:LastTestedCookie = ''
+            })
             $wv.CoreWebView2.Navigate('https://www.terabox.com/main')
             $pollTimer.Start()
         } else {
