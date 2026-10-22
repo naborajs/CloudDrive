@@ -110,7 +110,34 @@ function Remove-GoogleDriveSession {
     }
 }
 
+function Get-GoogleOAuthConfig {
+    $configDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    $configPath = Join-Path $configDirectory 'google-oauth.json'
+
+    $clientId = $env:GOOGLE_CLIENT_ID
+    $clientSecret = $env:GOOGLE_CLIENT_SECRET
+
+    if (-not $clientId -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        try {
+            $json = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            if ($json.client_id) { $clientId = [string]$json.client_id }
+            if ($json.client_secret) { $clientSecret = [string]$json.client_secret }
+        } catch { }
+    }
+
+    $isConfigured = (-not [string]::IsNullOrEmpty($clientId))
+    return [ordered]@{
+        ClientId = $clientId
+        ClientSecret = $clientSecret
+        IsConfigured = $isConfigured
+        ConfigPath = $configPath
+    }
+}
+
 function Build-GoogleAuthorizationUrl([string]$ClientId, [string]$RedirectUri, [string]$State, [string]$Scope = $script:GoogleDefaultScope) {
+    if ([string]::IsNullOrEmpty($ClientId)) {
+        throw 'Cannot build authorization URL without a valid Client ID.'
+    }
     $escClient = [System.Uri]::EscapeDataString($ClientId)
     $escRedirect = [System.Uri]::EscapeDataString($RedirectUri)
     $escScope = [System.Uri]::EscapeDataString($Scope)
@@ -148,15 +175,41 @@ function Start-OAuthLoopbackListener([int]$Port = 53682, [int]$TimeoutSeconds = 
     }
 }
 
-function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext) {
+function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext, [scriptblock]$CancelCheck = $null) {
     $listener = $ListenerContext.Listener
     $expectedState = $ListenerContext.ExpectedState
     $timeoutSec = $ListenerContext.TimeoutSeconds
 
     try {
         $asyncResult = $listener.BeginGetContext($null, $null)
-        $waitSuccess = $asyncResult.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($timeoutSec))
-        if (-not $waitSuccess) {
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $timedOut = $false
+
+        while (-not $asyncResult.IsCompleted) {
+            if ($CancelCheck -and (& $CancelCheck)) {
+                return [ordered]@{
+                    Success = $false
+                    Error = 'Authentication cancelled by user.'
+                    Code = $null
+                }
+            }
+            if ($stopwatch.Elapsed.TotalSeconds -ge $timeoutSec) {
+                $timedOut = $true
+                break
+            }
+            # Allow WPF UI dispatcher events to process so the window remains responsive
+            if ([System.Windows.Threading.Dispatcher]::CurrentDispatcher) {
+                $frame = [System.Windows.Threading.DispatcherFrame]::new()
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+                    [System.Windows.Threading.DispatcherPriority]::Background,
+                    [Action]{ $frame.Continue = $false }
+                ) | Out-Null
+                [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+            }
+            [System.Threading.Thread]::Sleep(50)
+        }
+
+        if ($timedOut) {
             return [ordered]@{
                 Success = $false
                 Error = "Authentication timed out after $timeoutSec seconds. Please try again."
@@ -206,9 +259,17 @@ function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext) {
             Error = $null
             Code = $code
         }
+    } catch {
+        return [ordered]@{
+            Success = $false
+            Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message)
+            Code = $null
+        }
     } finally {
-        $listener.Stop()
-        $listener.Close()
+        try {
+            $listener.Stop()
+            $listener.Close()
+        } catch { }
     }
 }
 
