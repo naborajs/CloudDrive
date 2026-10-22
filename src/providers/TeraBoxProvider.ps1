@@ -119,13 +119,28 @@ function Remove-TeraBoxSession {
     }
 }
 
+function Format-TeraBoxCookieHeader([string]$Secret) {
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return '' }
+    $trimmed = $Secret.Trim()
+    if ($trimmed.StartsWith('Cookie:', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $trimmed = $trimmed.Substring(7).Trim()
+    }
+    if ($trimmed -match ';') {
+        return $trimmed
+    }
+    if ($trimmed -match '^ndus=') {
+        return $trimmed
+    }
+    return "ndus=$trimmed"
+}
+
 function Get-TeraBoxRcloneEnvironment([hashtable]$SessionOverride = $null) {
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
     if (-not $session -or -not $session.Secret) {
         return @{}
     }
 
-    $cookie = if ($session.Secret -match '^ndus=') { $session.Secret } else { "ndus=$($session.Secret)" }
+    $cookie = Format-TeraBoxCookieHeader $session.Secret
     return @{
         'RCLONE_CONFIG_TERABOX_TYPE' = 'terabox'
         'RCLONE_CONFIG_TERABOX_COOKIE' = $cookie
@@ -138,8 +153,8 @@ function Set-TeraBoxManualSession(
     [string]$Type = 'web-session'
 ) {
     $cleanSecret = $SessionSecret.Trim()
-    if ($cleanSecret -match '^ndus=(?<val>.+)$') {
-        $cleanSecret = $Matches.val
+    if ($cleanSecret.StartsWith('Cookie:', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $cleanSecret = $cleanSecret.Substring(7).Trim()
     }
 
     $testValidation = Test-TeraBoxBackendSession -SessionOverride @{
@@ -188,7 +203,7 @@ function Test-TeraBoxBackendSession([hashtable]$SessionOverride = $null) {
             # Web session
             $headers['Referer'] = 'https://www.terabox.com/'
             $headers['X-Requested-With'] = 'XMLHttpRequest'
-            $headers['Cookie'] = "ndus=$($session.Secret)"
+            $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
             $checkUrl = "https://www.terabox.com/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1"
         }
 
@@ -280,7 +295,7 @@ function Get-TeraBoxFileList([string]$Directory = '/', [hashtable]$SessionOverri
         } else {
             $headers['Referer'] = 'https://www.terabox.com/'
             $headers['X-Requested-With'] = 'XMLHttpRequest'
-            $headers['Cookie'] = "ndus=$($session.Secret)"
+            $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
             $dirParam = [System.Uri]::EscapeDataString($Directory)
             $listUrl = "https://www.terabox.com/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1&dir=$dirParam&page=1&num=100"
         }
