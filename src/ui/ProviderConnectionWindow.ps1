@@ -409,6 +409,171 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     return [ordered]@{ SelectedProvider = $script:SelectedProvider }
 }
 
+function Show-CloudAccountSetupModal(
+    [System.Windows.Window]$Owner = $null,
+    [string]$ProviderId = 'gdrive',
+    [hashtable]$InitialAccount = $null
+) {
+    $setupWin = [System.Windows.Window]::new()
+    $isEdit = ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and $InitialAccount.Id)
+    $provName = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
+    $setupWin.Title = if ($isEdit) { "Configure $provName Account" } else { "Add $provName Disk" }
+    $setupWin.Width = 460
+    $setupWin.Height = 360
+    $setupWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $setupWin.Owner = $Owner }
+    $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+    $setupWin.ResizeMode = 'NoResize'
+    $setupWin.FontFamily = 'Segoe UI'
+
+    $stack = [System.Windows.Controls.StackPanel]::new()
+    $stack.Margin = [System.Windows.Thickness]::new(24)
+    $setupWin.Content = $stack
+
+    # Header
+    $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 '#0F172A' $true
+    $stack.Children.Add($title) | Out-Null
+
+    $sub = New-UIElement-Label 'Configure the display name and Windows virtual drive letter.' 12 '#64748B'
+    $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 16)
+    $stack.Children.Add($sub) | Out-Null
+
+    # Account Name field
+    $lbl1 = New-UIElement-Label 'Disk / Account Name' 12 '#334155' $true
+    $stack.Children.Add($lbl1) | Out-Null
+
+    $txtName = [System.Windows.Controls.TextBox]::new()
+    $txtName.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtName.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
+    $defaultName = if ($InitialAccount -and $InitialAccount.ContainsKey('DisplayName')) {
+        [string]$InitialAccount.DisplayName
+    } elseif ($ProviderId -eq 'terabox') {
+        'TeraBox Storage'
+    } else {
+        'Google Drive'
+    }
+    $txtName.Text = $defaultName
+    $stack.Children.Add($txtName) | Out-Null
+
+    # Drive Letter field
+    $lbl2 = New-UIElement-Label 'Windows Drive Letter' 12 '#334155' $true
+    $stack.Children.Add($lbl2) | Out-Null
+
+    $cmbLetter = [System.Windows.Controls.ComboBox]::new()
+    $cmbLetter.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $cmbLetter.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
+
+    # Populate drive letter choices
+    $prefDefault = if ($ProviderId -eq 'terabox') { 'T' } else { 'G' }
+    $currentLetter = if ($InitialAccount -and $InitialAccount.ContainsKey('DriveLetter') -and $InitialAccount.DriveLetter) {
+        [string]$InitialAccount.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    } else {
+        (Get-NextAvailableDriveLetter $prefDefault)
+    }
+
+    $allLetters = @('D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z')
+    $allocated = Get-AllocatedDriveLetters
+    $sysDrives = @()
+    try {
+        foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+            $sysDrives += $d.Name.Substring(0, 1).ToUpperInvariant()
+        }
+    } catch { }
+
+    $selectedIdx = 0
+    $idx = 0
+    foreach ($let in $allLetters) {
+        $isCurrent = ($let -eq $currentLetter)
+        $isOccupied = ($sysDrives -contains $let) -or ($allocated -contains $let)
+        if ($isCurrent -or -not $isOccupied) {
+            $item = [System.Windows.Controls.ComboBoxItem]::new()
+            $item.Content = "$let`: Drive"
+            $item.Tag = $let
+            [void]$cmbLetter.Items.Add($item)
+            if ($isCurrent) { $selectedIdx = $idx }
+            $idx++
+        }
+    }
+    if ($cmbLetter.Items.Count -gt 0) {
+        $cmbLetter.SelectedIndex = $selectedIdx
+    }
+    $stack.Children.Add($cmbLetter) | Out-Null
+
+    # Auto-mount CheckBox
+    $chkAutoMount = [System.Windows.Controls.CheckBox]::new()
+    $chkAutoMount.Content = 'Automatically mount this drive on startup'
+    $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
+    $chkAutoMount.IsChecked = if ($InitialAccount -and $InitialAccount.ContainsKey('AutoMount') -and $null -ne $InitialAccount.AutoMount) {
+        [bool]$InitialAccount.AutoMount
+    } else {
+        $true
+    }
+    $stack.Children.Add($chkAutoMount) | Out-Null
+
+    # Buttons
+    $btnDock = [System.Windows.Controls.DockPanel]::new()
+    $stack.Children.Add($btnDock) | Out-Null
+
+    $btnStack = [System.Windows.Controls.StackPanel]::new()
+    $btnStack.Orientation = 'Horizontal'
+    [System.Windows.Controls.DockPanel]::SetDock($btnStack, 'Right')
+    $btnDock.Children.Add($btnStack) | Out-Null
+
+    $saveBtn = [System.Windows.Controls.Button]::new()
+    $saveBtn.Content = if ($isEdit) { 'Save Changes' } else { 'Add Disk' }
+    $saveBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+    $accent = if ($ProviderId -eq 'terabox') { '#2563EB' } else { '#0F9D58' }
+    $saveBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($accent)
+    $saveBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $saveBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $saveBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $saveBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $btnStack.Children.Add($saveBtn) | Out-Null
+
+    $cancelBtn = [System.Windows.Controls.Button]::new()
+    $cancelBtn.Content = 'Cancel'
+    $cancelBtn.Padding = [System.Windows.Thickness]::new(12, 7, 12, 7)
+    $cancelBtn.Add_Click({ $setupWin.Close() })
+    $btnStack.Children.Add($cancelBtn) | Out-Null
+
+    $script:SavedAccountResult = $null
+
+    $saveBtn.Add_Click({
+        $name = $txtName.Text.Trim()
+        if ([string]::IsNullOrEmpty($name)) {
+            $name = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
+        }
+
+        $letter = $prefDefault
+        if ($cmbLetter.SelectedItem -and $cmbLetter.SelectedItem.Tag) {
+            $letter = [string]$cmbLetter.SelectedItem.Tag
+        }
+
+        $accId = if ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and $InitialAccount.Id) {
+            [string]$InitialAccount.Id
+        } else {
+            "${ProviderId}_" + [DateTime]::UtcNow.Ticks.ToString()
+        }
+
+        $accObj = [ordered]@{
+            Id = $accId
+            ProviderId = $ProviderId
+            DisplayName = $name
+            AccountEmail = if ($InitialAccount -and $InitialAccount.ContainsKey('AccountEmail')) { [string]$InitialAccount.AccountEmail } else { '' }
+            DriveLetter = $letter
+            AutoMount = [bool]$chkAutoMount.IsChecked
+            Created = [DateTime]::UtcNow.ToString('o')
+        }
+
+        Add-CloudAccount $accObj | Out-Null
+        $script:SavedAccountResult = $accObj
+        $setupWin.Close()
+    })
+
+    [void]$setupWin.ShowDialog()
+    return $script:SavedAccountResult
+}
+
 function Show-DiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $settings = Get-NSCloudDriveSettings
     $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }

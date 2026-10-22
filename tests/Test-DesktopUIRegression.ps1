@@ -38,12 +38,12 @@ if ($dotSourceCheck -notmatch 'LoadedOK') {
 }
 Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA and constructs window elements including Add Cloud Disk'
 
-# 5. Test Show-AddCloudDiskModal function exists and loads cleanly
-$modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if (Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) { 'ModalOK' } else { 'Failed' } }"
+# 5. Test Show-AddCloudDiskModal and Show-CloudAccountSetupModal functions exist and load cleanly
+$modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if ((Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) -and (Get-Command Show-CloudAccountSetupModal -ErrorAction SilentlyContinue)) { 'ModalOK' } else { 'Failed' } }"
 if ($modalCheck -notmatch 'ModalOK') {
-    throw "Show-AddCloudDiskModal is not exported or defined in ProviderConnectionWindow.ps1: $modalCheck"
+    throw "Show-AddCloudDiskModal or Show-CloudAccountSetupModal is not exported or defined in ProviderConnectionWindow.ps1: $modalCheck"
 }
-Write-Output '  [PASS] Show-AddCloudDiskModal definition verified'
+Write-Output '  [PASS] Show-AddCloudDiskModal and Show-CloudAccountSetupModal definitions verified'
 
 # 6. Test single-instance mutex detection and second-instance graceful foreground restoration
 $createdNew = $false
