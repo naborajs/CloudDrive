@@ -7,6 +7,14 @@
 
 A Windows virtual drive is technically plausible with rclone and WinFsp. The selected full-drive backend is unofficial and depends on a web-session credential. TeraBox also documents an official Open API with QR/device authorization, but it requires a separately registered app and confines file paths to an application-assigned directory; the docs do not establish access to the user's existing full drive. No backend is verified against this Windows PC or the user's account. Keep the mount action disabled until the chosen scope, secret handling, Windows build, and read-only live test pass.
 
+### Root-Cause Resolution Update (2026-10-23)
+
+Following the verified Codex audit and architectural review:
+1. **Google Drive Publisher-Level Configuration**: `Get-GoogleOAuthConfig` was updated to search publisher bundled locations (`config/google-oauth.json`, `google-client.json`), user config directories (`%LOCALAPPDATA%\NSCloudDrive\config`), and user Downloads/Desktop directories for Google Cloud Console JSON files. `Import-GoogleOAuthConfigFile` was added to allow one-click JSON credential import from the connection dialog.
+2. **TeraBox Stored Session to Rclone Bridge**: `Get-TeraBoxRcloneEnvironment` was implemented to convert DPAPI-secured session tokens into process environment variables (`RCLONE_CONFIG_TERABOX_TYPE=terabox` and `RCLONE_CONFIG_TERABOX_COOKIE=ndus=<secret>`), safely resolving the audit finding where stored sessions were disconnected from rclone child processes.
+3. **TeraBox BYOC Manual Session Verification**: `Set-TeraBoxManualSession` was introduced to allow users to securely supply their personal `ndus` session cookie. The provider verifies the session live against `https://www.terabox.com/api/check/login`, verifies directory scope, and stores the secret using Windows DPAPI with restricted NTFS ACLs (CurrentUser and SYSTEM only).
+4. **Transparent Scope & Boundary Documentation**: The application truthfully presents the technical and legal reality: automated browser login cannot extract cookies without info-stealer techniques, and the official Open Platform API is restricted to `/From: Other Applications/<App_Name>/` and cannot access the user's root (`/`).
+
 For a future Windows build, `gulp79/rclone-extra` is currently the strongest source candidate of those reviewed because it publishes signed rclone-based releases and contains the TeraBox backend. This is a **candidate, not an approved binary or verified Windows release**. The requested `derrundetisch/rclone-extra` repository is a separate fork with an older source tag and its README points users to `gulp79`'s releases. The `mill-master/rclone-terabox` project offers a QR login helper but its own documented build and mount instructions target Linux/macOS and FUSE. None is independently validated against a live account.
 
 No cookies, passwords, account files, or remote data were read or requested for this audit.
