@@ -61,6 +61,14 @@ try {
     # Preserves already formatted ndus= prefix
     $prefixedEnv = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Type = 'web-session'; Secret = 'ndus=prefixed_token' }
     if ($prefixedEnv['RCLONE_CONFIG_TERABOX_COOKIE'] -ne 'ndus=prefixed_token') { throw 'Expected already prefixed cookie to be preserved' }
+
+    # Formats multi-cookie headers and strips Cookie: prefix properly
+    $multiEnv = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Type = 'web-session'; Secret = 'Cookie: browserid=123; ndus=abc; csrfToken=xyz' }
+    if ($multiEnv['RCLONE_CONFIG_TERABOX_COOKIE'] -ne 'browserid=123; ndus=abc; csrfToken=xyz') { throw 'Expected multi-cookie header to be preserved without ndus= wrapper' }
+
+    if ((Format-TeraBoxCookieHeader 'raw_value') -ne 'ndus=raw_value') { throw 'Expected raw_value to be prefixed with ndus=' }
+    if ((Format-TeraBoxCookieHeader 'ndus=already') -ne 'ndus=already') { throw 'Expected ndus=already to be preserved' }
+    if ((Format-TeraBoxCookieHeader 'a=1; b=2') -ne 'a=1; b=2') { throw 'Expected multi-cookie string to be preserved' }
     Write-Output '  [PASS] TeraBox rclone environment variable construction verified'
 
     # 6. Test manual session setter fails closed on invalid credentials
