@@ -12,6 +12,8 @@
 | Inspect pinned backend debug calls and option registry | `fs.Option.Sensitive` exists in the pinned rclone source; backend `debug()` returns when `DebugLevel < level`; `NewFs` contains the complete-options debug call removed by the patch. | Source review only. The patch pins backend debug level to zero, disabling all backend-specific debug traces. |
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
 | Run the build helper with this PC's current prerequisites | Safely stopped before creating its build folder because WinFsp FUSE development header `fuse.h` is absent. | No source was downloaded by the helper and no software was installed; Go and MinGW are also absent from the earlier environment audit. |
+| Parse `scripts/Start-ReadOnlyMount.ps1` with the PowerShell parser | Passed. | Syntax only; no mount was attempted. |
+| Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Parse the supplied five PowerShell starter scripts | All five parsed. | Syntax check only; no mount or account operation. |
 | Parse `src/NSCloudDrive.ps1` with `System.Management.Automation.Language.Parser` | Passed. | Does not prove rendered UI or button behavior. |
@@ -42,6 +44,10 @@ Each commit changed one file and was pushed to `origin/main`:
 - `b0cbd90` — refine pinned cookie-safety patch.
 - `7a43a0c` — add pinned Windows source builder.
 - `4e376c8` — document build prerequisites and limits.
+- `e806866` — record builder preflight result.
+- `e71fa70` — qualify patched backend security status.
+- `0beef0f` — add read-only mount launcher.
+- `372738f` — document manual mount test.
 
 ## Required next evidence
 
