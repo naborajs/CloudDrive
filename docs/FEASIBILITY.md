@@ -56,6 +56,12 @@ At current `derrundetisch/master`, the `cookie` option is required but is not ma
 
 This code review is not a substitute for runtime log-capture testing against synthetic secrets. The source should be patched or wrapped only after selecting a pinned commit and adding a regression test that verifies the secret cannot appear in normal or diagnostic output.
 
+### Pinned-source patch progress
+
+The source candidate is now pinned for patch development to `gulp79/rclone-extra` tag `v1.75.2-extra`, commit `56bf13885494819bc801302ddf881279bdac7262`. This is the tag commit, not the repository's newer `master` head. Static inspection of that exact checkout confirmed the cookie option lacks `Sensitive: true`, `NewFs` logs the complete options struct at backend debug level 1, and backend debug calls are gated by `Options.DebugLevel`.
+
+[`patches/rclone-terabox-v1.75.2-extra-secret-safety.patch`](../patches/rclone-terabox-v1.75.2-extra-secret-safety.patch) marks the cookie option sensitive, removes the options-struct log, and forces the backend-specific debug level to zero after reading configuration. The patch was applied to a clean detached worktree at the pinned tag and passed `git apply --check` and `git diff --check` there. This confirms patch applicability and source-diff cleanliness only. Go is unavailable here, so compilation, rclone config-redaction behavior, synthetic-secret log capture, and provider operations remain untested. Do not use this patch as a security guarantee until those tests pass.
+
 ## REA relevance
 
 The current [`morluto/rea`](https://github.com/morluto/rea) project is an MIT-licensed agent/MCP reverse-engineering toolkit for applications, JavaScript/Electron apps, .NET assemblies, and native binaries. Its current installer restricts supported hosts to macOS and selected Linux distributions; its package metadata requires Node.js 22.19+, 24.11+, or 26+. It is not a TeraBox connector, filesystem driver, or authentication method. No owned TeraBox application binary or unanswered implementation question justifies installing/running it for this phase, so it was not used. Do not use reverse engineering to defeat authentication, CAPTCHA, quotas, rate limits, or access controls.
