@@ -260,6 +260,155 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     [void]$setWin.ShowDialog()
 }
 
+function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptblock]$OnProviderSelected = $null) {
+    $addWin = [System.Windows.Window]::new()
+    $addWin.Title = 'Add Cloud Disk'
+    $addWin.Width = 520
+    $addWin.Height = 380
+    $addWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $addWin.Owner = $Owner }
+    $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
+    $addWin.ResizeMode = 'NoResize'
+    $addWin.FontFamily = 'Segoe UI'
+
+    $dock = [System.Windows.Controls.DockPanel]::new()
+    $dock.Margin = [System.Windows.Thickness]::new(20)
+    $addWin.Content = $dock
+
+    # Header
+    $headerStack = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($headerStack, 'Top')
+    $headerStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $title = New-UIElement-Label 'Add Cloud Disk' 18 '#0F172A' $true
+    $headerStack.Children.Add($title) | Out-Null
+    $subtitle = New-UIElement-Label 'Select a cloud storage service to connect and mount as a Windows drive.' 12 '#64748B'
+    $subtitle.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $headerStack.Children.Add($subtitle) | Out-Null
+    $dock.Children.Add($headerStack) | Out-Null
+
+    # Bottom button (Cancel)
+    $cancelBtn = [System.Windows.Controls.Button]::new()
+    $cancelBtn.Content = 'Cancel'
+    $cancelBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
+    $cancelBtn.HorizontalAlignment = 'Right'
+    $cancelBtn.Background = [System.Windows.Media.Brushes]::White
+    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+    $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+    [System.Windows.Controls.DockPanel]::SetDock($cancelBtn, 'Bottom')
+    $cancelBtn.Add_Click({ $addWin.Close() })
+    $dock.Children.Add($cancelBtn) | Out-Null
+
+    # Provider Options List
+    $listStack = [System.Windows.Controls.StackPanel]::new()
+    $dock.Children.Add($listStack) | Out-Null
+
+    $script:SelectedProvider = $null
+
+    # Provider 1: Google Drive
+    $gdBorder = [System.Windows.Controls.Border]::new()
+    $gdBorder.Background = [System.Windows.Media.Brushes]::White
+    $gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $gdBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $gdBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $gdBorder.Padding = [System.Windows.Thickness]::new(14)
+    $gdBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $gdBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $gdDock = [System.Windows.Controls.DockPanel]::new()
+    $gdBorder.Child = $gdDock
+
+    $gdBtn = [System.Windows.Controls.Button]::new()
+    $gdBtn.Content = 'Select'
+    $gdBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $gdBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+    $gdBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $gdBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $gdBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($gdBtn, 'Right')
+    $gdDock.Children.Add($gdBtn) | Out-Null
+
+    $gdLeft = [System.Windows.Controls.StackPanel]::new()
+    $gdLeft.Orientation = 'Horizontal'
+    $gdDock.Children.Add($gdLeft) | Out-Null
+
+    $gdMark = [System.Windows.Controls.Border]::new()
+    $gdMark.Width = 36; $gdMark.Height = 36; $gdMark.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $gdMark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+    $gdMarkText = New-UIElement-Label 'GD' 13 '#FFFFFF' $true
+    $gdMarkText.HorizontalAlignment = 'Center'; $gdMarkText.VerticalAlignment = 'Center'
+    $gdMark.Child = $gdMarkText
+    $gdMark.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $gdLeft.Children.Add($gdMark) | Out-Null
+
+    $gdText = [System.Windows.Controls.StackPanel]::new()
+    $gdText.Children.Add((New-UIElement-Label 'Google Drive' 15 '#0F172A' $true)) | Out-Null
+    $gdText.Children.Add((New-UIElement-Label 'Personal & Workspace cloud storage via OAuth 2.0' 12 '#64748B')) | Out-Null
+    $gdLeft.Children.Add($gdText) | Out-Null
+
+    $SelectGD = {
+        $script:SelectedProvider = 'gdrive'
+        $addWin.Close()
+        if ($OnProviderSelected) { & $OnProviderSelected 'gdrive' }
+    }
+    $gdBtn.Add_Click($SelectGD)
+    $gdBorder.Add_MouseLeftButtonDown($SelectGD)
+    $listStack.Children.Add($gdBorder) | Out-Null
+
+    # Provider 2: TeraBox
+    $tbBorder = [System.Windows.Controls.Border]::new()
+    $tbBorder.Background = [System.Windows.Media.Brushes]::White
+    $tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $tbBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $tbBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $tbBorder.Padding = [System.Windows.Thickness]::new(14)
+    $tbBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $tbBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $tbDock = [System.Windows.Controls.DockPanel]::new()
+    $tbBorder.Child = $tbDock
+
+    $tbBtn = [System.Windows.Controls.Button]::new()
+    $tbBtn.Content = 'Select'
+    $tbBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $tbBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $tbBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $tbBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $tbBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($tbBtn, 'Right')
+    $tbDock.Children.Add($tbBtn) | Out-Null
+
+    $tbLeft = [System.Windows.Controls.StackPanel]::new()
+    $tbLeft.Orientation = 'Horizontal'
+    $tbDock.Children.Add($tbLeft) | Out-Null
+
+    $tbMark = [System.Windows.Controls.Border]::new()
+    $tbMark.Width = 36; $tbMark.Height = 36; $tbMark.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $tbMark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $tbMarkText = New-UIElement-Label 'TB' 13 '#FFFFFF' $true
+    $tbMarkText.HorizontalAlignment = 'Center'; $tbMarkText.VerticalAlignment = 'Center'
+    $tbMark.Child = $tbMarkText
+    $tbMark.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $tbLeft.Children.Add($tbMark) | Out-Null
+
+    $tbText = [System.Windows.Controls.StackPanel]::new()
+    $tbText.Children.Add((New-UIElement-Label 'TeraBox' 15 '#0F172A' $true)) | Out-Null
+    $tbText.Children.Add((New-UIElement-Label 'Cloud storage via isolated embedded browser sign-in' 12 '#64748B')) | Out-Null
+    $tbLeft.Children.Add($tbText) | Out-Null
+
+    $SelectTB = {
+        $script:SelectedProvider = 'terabox'
+        $addWin.Close()
+        if ($OnProviderSelected) { & $OnProviderSelected 'terabox' }
+    }
+    $tbBtn.Add_Click($SelectTB)
+    $tbBorder.Add_MouseLeftButtonDown($SelectTB)
+    $listStack.Children.Add($tbBorder) | Out-Null
+
+    [void]$addWin.ShowDialog()
+    return [ordered]@{ SelectedProvider = $script:SelectedProvider }
+}
+
 function Show-DiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $settings = Get-NSCloudDriveSettings
     $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
