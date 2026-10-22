@@ -23,6 +23,43 @@ See the research and acceptance plan in the project documentation as it is added
 
 Use a cloud drive for photos, videos, documents, archives, installers, backups, and closed project copies. A cloud mount is not equivalent to a local SSD. Games, active codebases, Git operations, builds, and package managers may be unreliable due to network latency, throttling, session expiry, file locking, and provider filesystem behavior. Keep active work local and copy it to cloud storage when closed.
 
+## Cloud Account Connection and Virtual Drive
+
+NS Cloud Drive supports connecting both **TeraBox** and **Google Drive** accounts through a dedicated desktop interface with explicit connection validation:
+
+- **TeraBox connection flow**:
+  1. Click **Connect TeraBox** from the main dashboard.
+  2. The dedicated connection window opens explaining the authentication method.
+  3. The user opens the legitimate TeraBox website and completes authentication personally.
+  4. Click **I've signed in — Connect** to trigger genuine backend validation (`/api/check/login`), account scope verification, and root directory file listing.
+  5. The account appears as connected only after backend verification succeeds.
+
+- **Google Drive connection flow**:
+  1. Click **Connect Google Drive** from the main dashboard.
+  2. Click **Sign in with Google** to launch the official Google OAuth 2.0 flow in the system browser using an RFC 8252 loopback callback on `127.0.0.1`.
+  3. The local listener cryptographically verifies the `state` parameter to prevent CSRF attacks.
+  4. The authorization code is exchanged for tokens with minimum necessary read-only scope (`drive.readonly`).
+  5. File querying is validated via Google Drive API v3 (`/files`), and tokens are stored in current-user DPAPI storage.
+
+- **Virtual Drive Mount**:
+  - Once a provider connection is validated, the virtual drive can be mounted as `T:` in read-only mode with full on-demand VFS caching (20 GiB best-effort cap on fixed NTFS).
+  - Unmount controls cleanly stop the mount process without deleting cached files.
+
+## Running the Automated Test Suite
+
+To run all automated regression tests across the state machine, provider adapters, virtual drive manager, and DPAPI credential helpers:
+
+```powershell
+powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1
+```
+
+All 5 test suites verify:
+- Connection state lifecycle, transitions, and secret sanitization (`Test-ConnectionState.ps1`).
+- TeraBox provider metadata, fail-closed handling, DPAPI persistence, and scope checking (`Test-TeraBoxProvider.ps1`).
+- Google Drive provider metadata, cryptographic state entropy, fail-closed handling, DPAPI persistence, and auth URL formatting (`Test-GoogleDriveProvider.ps1`).
+- Virtual drive manager rclone binary discovery, WinFsp detection, drive availability, and mount argument formatting (`Test-VirtualDriveManager.ps1`).
+- DPAPI config-encryption password storage, private ACLs, and plaintext absence (`Test-RcloneConfigPassword.ps1`).
+
 ## Development preview
 
 On Windows, open PowerShell and run:
