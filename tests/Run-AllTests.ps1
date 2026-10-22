@@ -12,6 +12,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-VirtualDriveManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-SettingsManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-DesktopUIRegression.ps1'),
+    (Join-Path $PSScriptRoot 'Test-EmbeddedBrowserWindow.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
 )
 
