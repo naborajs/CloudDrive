@@ -40,6 +40,17 @@ try {
     if ($afterRemove) { throw 'Session was not cleanly removed' }
     Write-Output '  [PASS] Session removal verified'
 
+    # 3b. Test DPAPI session with jsToken and BaseUrl
+    $tokenSecret = 'ndus=token_abc; browserid=xyz'
+    Save-TeraBoxSession -Type 'web-session' -Secret $tokenSecret -JsToken 'test_token_123' -BaseUrl 'https://dm.terabox.com'
+    $loadedToken = Get-TeraBoxStoredSession
+    if (-not $loadedToken) { throw 'Failed to load session with jsToken' }
+    if ($loadedToken.Secret -ne $tokenSecret) { throw 'Cookie secret mismatch with jsToken' }
+    if ($loadedToken.JsToken -ne 'test_token_123') { throw "JsToken mismatch: $($loadedToken.JsToken)" }
+    if ($loadedToken.BaseUrl -ne 'https://dm.terabox.com') { throw "BaseUrl mismatch: $($loadedToken.BaseUrl)" }
+    Remove-TeraBoxSession
+    Write-Output '  [PASS] DPAPI session with jsToken and custom origin save and load verified'
+
     # 4. Test account scope evaluation
     $webScope = Test-TeraBoxAccountScope -SessionOverride @{ Type = 'web-session'; Secret = 'dummy' }
     # Note: because 'dummy' fails validation against real network, scope is unknown
@@ -69,7 +80,13 @@ try {
     if ((Format-TeraBoxCookieHeader 'raw_value') -ne 'ndus=raw_value') { throw 'Expected raw_value to be prefixed with ndus=' }
     if ((Format-TeraBoxCookieHeader 'ndus=already') -ne 'ndus=already') { throw 'Expected ndus=already to be preserved' }
     if ((Format-TeraBoxCookieHeader 'a=1; b=2') -ne 'a=1; b=2') { throw 'Expected multi-cookie string to be preserved' }
-    Write-Output '  [PASS] TeraBox rclone environment variable construction verified'
+
+    # Formats JSON-wrapped session cookies
+    $jsonSession = ConvertTo-Json @{ Cookie = 'browserid=foo; ndus=bar'; JsToken = 'abc'; BaseUrl = 'https://terabox.com' } -Compress
+    if ((Format-TeraBoxCookieHeader $jsonSession) -ne 'browserid=foo; ndus=bar') { throw 'Expected Format-TeraBoxCookieHeader to extract Cookie from JSON' }
+    $jsonEnv = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Type = 'web-session'; Secret = $jsonSession }
+    if ($jsonEnv['RCLONE_CONFIG_TERABOX_COOKIE'] -ne 'browserid=foo; ndus=bar') { throw 'Expected rclone cookie from JSON session' }
+    Write-Output '  [PASS] TeraBox rclone environment variable construction and JSON parsing verified'
 
     # 6. Test manual session setter fails closed on invalid credentials
     $manualRes = Set-TeraBoxManualSession -SessionSecret 'invalid_test_secret_123'
