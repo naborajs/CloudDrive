@@ -35,11 +35,12 @@ NS Cloud Drive supports connecting both **TeraBox** and **Google Drive** account
   5. The account appears as connected only after backend verification succeeds.
 
 - **Google Drive connection flow**:
-  1. Click **Connect Google Drive** from the main dashboard.
-  2. Click **Sign in with Google** to launch the official Google OAuth 2.0 flow in the system browser using an RFC 8252 loopback callback on `127.0.0.1`.
-  3. The local listener cryptographically verifies the `state` parameter to prevent CSRF attacks.
-  4. The authorization code is exchanged for tokens with minimum necessary read-only scope (`drive.readonly`).
-  5. File querying is validated via Google Drive API v3 (`/files`), and tokens are stored in current-user DPAPI storage.
+  1. Configure your Google OAuth client ID and secret via environment variables (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) or JSON configuration at `%LOCALAPPDATA%\NSCloudDrive\config\google-oauth.json`.
+  2. Click **Connect Google Drive** from the main dashboard.
+  3. Click **Sign in with Google** to launch the official Google OAuth 2.0 flow in the system browser using an RFC 8252 loopback callback on `127.0.0.1`.
+  4. The local listener cryptographically verifies the `state` parameter to prevent CSRF attacks.
+  5. The authorization code is exchanged for tokens with minimum necessary read-only scope (`drive.readonly`).
+  6. File querying is validated via Google Drive API v3 (`/files`), and tokens are stored in current-user DPAPI storage.
 
 - **Virtual Drive Mount**:
   - Once a provider connection is validated, the virtual drive can be mounted as `T:` in read-only mode with full on-demand VFS caching (20 GiB best-effort cap on fixed NTFS).
@@ -47,17 +48,18 @@ NS Cloud Drive supports connecting both **TeraBox** and **Google Drive** account
 
 ## Running the Automated Test Suite
 
-To run all automated regression tests across the state machine, provider adapters, virtual drive manager, and DPAPI credential helpers:
+To run all automated regression tests across the state machine, provider adapters, virtual drive manager, UI layout constraints, and DPAPI credential helpers:
 
 ```powershell
 powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1
 ```
 
-All 5 test suites verify:
+All 6 test suites verify:
 - Connection state lifecycle, transitions, and secret sanitization (`Test-ConnectionState.ps1`).
 - TeraBox provider metadata, fail-closed handling, DPAPI persistence, and scope checking (`Test-TeraBoxProvider.ps1`).
-- Google Drive provider metadata, cryptographic state entropy, fail-closed handling, DPAPI persistence, and auth URL formatting (`Test-GoogleDriveProvider.ps1`).
+- Google Drive provider metadata, cryptographic state entropy, fail-closed handling, DPAPI persistence, OAuth client configuration discovery, and auth URL formatting with validation (`Test-GoogleDriveProvider.ps1`).
 - Virtual drive manager rclone binary discovery, WinFsp detection, drive availability, and mount argument formatting (`Test-VirtualDriveManager.ps1`).
+- Desktop UI regression: non-conflicting parameter names (avoiding read-only `$PID`), explicit horizontal scrollbar constraints to prevent WPF layout overflow, and clean STA window initialization (`Test-DesktopUIRegression.ps1`).
 - DPAPI config-encryption password storage, private ACLs, and plaintext absence (`Test-RcloneConfigPassword.ps1`).
 
 ## Development preview
