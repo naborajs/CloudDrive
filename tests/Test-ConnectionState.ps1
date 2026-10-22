@@ -90,6 +90,35 @@ if ($sanitized -notmatch 'access_token=\[REDACTED\]' -or
     $sanitized -notmatch 'refresh_token=\[REDACTED\]') {
     throw "Sanitization missing expected REDACTED replacement: $sanitized"
 }
+
+# 4b. Test JSON payload sanitization
+$jsonMessage = '{"access_token": "ya29.secretJsonToken", "refresh_token": "1//secretJsonRefresh", "client_secret": "mySecretKey"}'
+$sanitizedJson = Format-SanitizedDiagnosticMessage $jsonMessage
+
+if ($sanitizedJson -match 'ya29\.secretJsonToken' -or
+    $sanitizedJson -match '1//secretJsonRefresh' -or
+    $sanitizedJson -match 'mySecretKey') {
+    throw "Sanitization failed to redact JSON secrets: $sanitizedJson"
+}
+if ($sanitizedJson -notmatch '"access_token": "\[REDACTED\]"' -or
+    $sanitizedJson -notmatch '"refresh_token": "\[REDACTED\]"' -or
+    $sanitizedJson -notmatch '"client_secret": "\[REDACTED\]"') {
+    throw "Sanitization output JSON format incorrect: $sanitizedJson"
+}
+
+# 4c. Test URL query and raw token sanitization
+$urlMessage = 'Revocation request: https://oauth2.googleapis.com/revoke?token=ya29.queryTokenValue, Set-Cookie: BDUSS=secretBDUSS; path=/'
+$sanitizedUrl = Format-SanitizedDiagnosticMessage $urlMessage
+
+if ($sanitizedUrl -match 'ya29\.queryTokenValue' -or
+    $sanitizedUrl -match 'secretBDUSS') {
+    throw "Sanitization failed to redact URL query or Set-Cookie: $sanitizedUrl"
+}
+if ($sanitizedUrl -notmatch 'token=\[REDACTED\]' -or
+    $sanitizedUrl -notmatch 'Set-Cookie: \[REDACTED\]') {
+    throw "Sanitization missing expected REDACTED replacement for URL/Set-Cookie: $sanitizedUrl"
+}
+
 Write-Output '  [PASS] Secret sanitization verified'
 
 Write-Output 'All ConnectionState tests passed.'
