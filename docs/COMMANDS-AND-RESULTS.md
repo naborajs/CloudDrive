@@ -143,21 +143,53 @@ Each commit changed one file and was pushed to `origin/main`:
 - `050b74a` — add PKCE S256 test vector and installed client json discovery tests.
 - `a84bd4f` — add Google OAuth setup guide dialog and PKCE authorization workflow.
 - `1157710` — replace misleading TeraBox web login with truthful feasibility interface.
+- `1cf2713` — document PKCE authentication and truthful TeraBox feasibility interface.
+- `ae76cd3` — fix(security): strengthen diagnostic sanitization for JSON payloads and raw OAuth tokens.
+- `a90cfa8` — test: add JSON payload, query parameter, and raw OAuth token sanitization tests.
+- `ad97d15` — fix(providers): add automatic OAuth token refresh retry, dynamic credential path resolution, and rclone environment bridge.
+- `77b813b` — test: sandbox LOCALAPPDATA during tests and verify rclone environment variable construction.
+- `91b202b` — fix(providers): add dynamic credential path resolution and strict ACLs for TeraBox credentials.
+- `3f9bd54` — test: sandbox LOCALAPPDATA during TeraBox provider tests.
+- `dedd2a6` — feat(services): implement Start-VirtualDriveMount with process tracking and CIM orphan cleanup.
+- `03b4925` — test: add drive letter validation, extra mount flags, and unmount clean return tests.
+- `f362e3c` — feat(services): implement SettingsManager for persistent user preferences and logon startup.
+- `fdea094` — test: add unit tests for settings persistence, drive preferences, and Windows startup.
+- `9de1fe7` — test: register Test-SettingsManager in Run-AllTests suite.
+- `30f9140` — feat(services): add multi-provider independent drive mounts and cache statistics.
+- `3ef220f` — test: add tests for drive letter fallback, provider volume labels, and cache statistics.
+- `07d8998` — feat(ui): add multi-provider drive cards, real quota display, Explorer shortcuts, and System Tray.
+- `47db80b` — test: add empirical RAM, CPU, startup time, and cache benchmark suite.
 
 ## Automated test suite verification
 
 Run `powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1`:
-- `Test-ConnectionState.ps1`: Verified 10 connection states, valid state machine transitions, fail-closed invalid transition rejection, and sensitive credential sanitization.
-- `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence and clean deletion, and account scope validation.
-- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, RFC 7636 PKCE S256 verifier and official Appendix B test vector challenge computation, fail-closed handling without tokens, DPAPI-protected token persistence and clean deletion, Google installed client format JSON discovery without requiring client secret, and OAuth authorization URL construction with PKCE challenge.
-- `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, and read-only VFS cache mount argument formatting.
+- `Test-ConnectionState.ps1`: Verified 10 connection states, valid state machine transitions, fail-closed invalid transition rejection, and sensitive credential sanitization across JSON payloads, URL queries, and raw tokens.
+- `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence in sandboxed LOCALAPPDATA, and account scope validation.
+- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, RFC 7636 PKCE S256 verifier and official Appendix B test vector challenge computation, fail-closed handling without tokens, DPAPI-protected token persistence in sandboxed LOCALAPPDATA, rclone environment variable construction, Google installed client format JSON discovery without requiring client secret, OAuth authorization URL construction with PKCE challenge, and WebUtility HTML encoding.
+- `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, read-only VFS cache mount argument formatting with security flags, next available drive letter allocation and conflict resolution, distinct provider volume labels (`Google Drive`, `TeraBox`), cache usage statistics calculation, and multi-provider virtual drive status querying.
+- `Test-SettingsManager.ps1`: Verified default configuration generation, settings persistence across reloads, provider preferred drive letter mapping, and Windows user logon startup registry configuration with clean removal.
 - `Test-DesktopUIRegression.ps1`: Verified that no read-only `$pid` parameter declarations exist in `src/`, that `NSCloudDrive.ps1` and `ProviderConnectionWindow.ps1` explicitly disable horizontal scrollbar measurement to prevent layout overflow, and that `NSCloudDrive.ps1` loads cleanly in an STA session.
 - `Test-RcloneConfigPassword.ps1`: Verified synthetic DPAPI read-back, plaintext-at-rest absence, user/SYSTEM private ACLs, and missing-credential fail-closed behavior.
 
-**Result: 6 Passed, 0 Failed.**
+**Result: 7 Passed, 0 Failed.**
+
+## Empirical resource & performance benchmark
+
+Benchmark executed via `powershell.exe -NoProfile -File .\tests\Benchmark-ResourceUsage.ps1`:
+
+| Metric | Measured Value | Measurement Method / Scope |
+| --- | --- | --- |
+| Operating System | Microsoft Windows 11 Home (Build 10.0.26200) | `Win32_OperatingSystem` query |
+| Processor | AMD Ryzen 9 8940HX with Radeon Graphics (16 cores, 32 threads) | `Win32_Processor` query |
+| Physical RAM | 15.21 GB Visible Physical RAM | `TotalVisibleMemorySize` query |
+| Cold Startup Time | **1551 ms (~1.55 s)** | `System.Diagnostics.Stopwatch` from process spawn to UI initialization |
+| Idle Working Set RAM | **159.23 MB** | `WorkingSet64` during active UI host session |
+| Idle Private Memory | **143.80 MB** | `PrivateMemorySize64` dedicated memory commit |
+| Idle CPU Utilization | **0.10%** | Total processor time over 1.5s sample normalized across all logical cores |
+| Local Cache Storage | `D:\CloudCache` | Fixed NTFS volume with 124 GiB free; 20.00 GiB soft target limit |
 
 ## Required next evidence
 
 1. Interactive local user sign-in through the TeraBox dedicated connection window (`Show-ProviderConnectionWindow 'terabox'`) and Google OAuth 2.0 flow (`Show-ProviderConnectionWindow 'gdrive'`).
-2. Test File Explorer visibility of `T:\` and read an existing file once live account validation completes.
+2. Test File Explorer visibility of `G:\` (Google Drive) and `T:\` (TeraBox) and read an existing file once live account validation completes.
 3. Keep writable mode disabled until read-only acceptance gates are satisfied.
