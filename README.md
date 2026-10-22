@@ -28,7 +28,7 @@ Use a cloud drive for photos, videos, documents, archives, installers, backups, 
 On Windows, open PowerShell and run:
 
 ```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\src\NSCloudDrive.ps1
+powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1
 ```
 
 The preview needs Windows PowerShell 5.1 with WPF. **Check setup** reports whether rclone is on `PATH`, whether common WinFsp installation markers are present, and whether the installed rclone lists a TeraBox provider. These are local checks only; provider registration does not prove login or file access. The mount button is deliberately locked. No account credentials are requested or read.
