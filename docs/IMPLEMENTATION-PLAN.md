@@ -85,9 +85,15 @@ Keep the provider and filesystem layers independent of the desktop UI so another
 | Cache age | 24 hours | Age eviction does not mean data was safely uploaded |
 | Startup | Off by default | Opt-in per-user sign-in after manual acceptance |
 
-## Current preview
+## Current desktop application and provider architecture
 
-`src/NSCloudDrive.ps1` is a WPF setup preview. It can check whether rclone is on `PATH`, whether common WinFsp installation markers exist, and whether an rclone build lists a TeraBox provider. It does not mount a drive, configure an account, access a session, or establish that the backend works.
+`src/NSCloudDrive.ps1` integrates a multi-provider cloud virtual drive system:
+- **Cloud Accounts UI**: Shows connection cards and real-time status badges for both TeraBox and Google Drive.
+- **Dedicated Provider Connection Window** (`src/ui/ProviderConnectionWindow.ps1`): Implements a 10-state lifecycle (`ConnectionState.ps1`) from disconnected through authorization, scope checking, file query validation, to connected.
+- **TeraBox Provider** (`src/providers/TeraBoxProvider.ps1`): Supports interactive website sign-in with backend validation (`/api/check/login`), account scope verification (`/`), and file query validation before unlocking mount.
+- **Google Drive Provider** (`src/providers/GoogleDriveProvider.ps1`): Implements RFC 8252 loopback authorization with random state validation, token exchange, file listing validation, DPAPI-protected token storage, and revocation.
+- **Virtual Drive Manager** (`src/services/VirtualDriveManager.ps1`): Handles preflight checks, rclone binary discovery, WinFsp runtime detection, drive letter verification, and read-only VFS cache mounting (`T:`).
+- **Automated Test Suite** (`tests/Run-AllTests.ps1`): 5 test suites covering state machine transitions, TeraBox provider, Google Drive provider, virtual drive manager, and DPAPI password security.
 
 ## References
 
