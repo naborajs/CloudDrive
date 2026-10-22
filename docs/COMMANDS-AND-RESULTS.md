@@ -10,6 +10,8 @@
 | Shallow-clone `gulp79/rclone-extra` tag `v1.75.2-extra` and verify `HEAD` | `56bf13885494819bc801302ddf881279bdac7262`. | Public source checkout only; no release binary was downloaded or executed. |
 | Apply the committed cookie-safety patch to a clean detached worktree at that tag | `git apply --check`, patch application, and `git diff --check` passed; the changed source file is `backend/terabox/terabox.go`. | Static patch-application test only; no Go compiler is installed and no runtime secret-redaction test ran. |
 | Inspect pinned backend debug calls and option registry | `fs.Option.Sensitive` exists in the pinned rclone source; backend `debug()` returns when `DebugLevel < level`; `NewFs` contains the complete-options debug call removed by the patch. | Source review only. The patch pins backend debug level to zero, disabling all backend-specific debug traces. |
+| Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
+| Run the build helper with this PC's current prerequisites | Safely stopped before creating its build folder because WinFsp FUSE development header `fuse.h` is absent. | No source was downloaded by the helper and no software was installed; Go and MinGW are also absent from the earlier environment audit. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Parse the supplied five PowerShell starter scripts | All five parsed. | Syntax check only; no mount or account operation. |
 | Parse `src/NSCloudDrive.ps1` with `System.Management.Automation.Language.Parser` | Passed. | Does not prove rendered UI or button behavior. |
@@ -37,10 +39,13 @@ Each commit changed one file and was pushed to `origin/main`:
 - `7023470` — Windows desktop architecture decision.
 - `0bdeb8e` — pinned TeraBox cookie-safety patch.
 - `68712f2` — pinned source audit results.
+- `b0cbd90` — refine pinned cookie-safety patch.
+- `7a43a0c` — add pinned Windows source builder.
+- `4e376c8` — document build prerequisites and limits.
 
 ## Required next evidence
 
-1. Add and run synthetic-secret tests for config redaction and diagnostic logs; compilation remains blocked by the absent Go 1.26 toolchain.
-2. Audit the exact pinned build's license notices and prepare a reproducible Windows build with WinFsp `cmount` support.
-3. Verify provider registration without exposing config, then perform user-controlled read-only account tests locally.
+1. Provide Go 1.26+, MinGW, and WinFsp FUSE development headers; run the pinned builder and verify its output.
+2. Add and run synthetic-secret tests for config redaction and diagnostic logs.
+3. Audit the exact pinned build's license notices; then verify provider registration and perform user-controlled read-only account tests locally.
 4. Only after read tests pass, run disposable writable/recovery/cache tests and update this record with exact versions and observed results.
