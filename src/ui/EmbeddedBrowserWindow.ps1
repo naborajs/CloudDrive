@@ -8,6 +8,9 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 
+$script:CurrentBrowserWindow = $null
+$script:BrowserWindowClosed = $false
+
 function Test-TeraBoxHost([string]$HostName) {
     if ([string]::IsNullOrWhiteSpace($HostName)) { return $false }
     $validDomains = @(
@@ -51,7 +54,11 @@ function Wait-WpfTask(
     })
     $timer.Start()
 
-    [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    try {
+        [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+    } finally {
+        $timer.Stop()
+    }
     return $Task.IsCompleted
 }
 
@@ -177,6 +184,8 @@ function Show-TeraBoxEmbeddedLoginWindow(
     }
 
     $browserWin = [System.Windows.Window]::new()
+    $script:CurrentBrowserWindow = $browserWin
+    $script:BrowserWindowClosed = $false
     $browserWin.Title = 'TeraBox Sign-In - NS Cloud Drive'
     $browserWin.Width = 960
     $browserWin.Height = 720
@@ -227,7 +236,10 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#334155')
     $cancelBtn.Foreground = [System.Windows.Media.Brushes]::White
     $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(0)
-    $cancelBtn.Add_Click({ $browserWin.Close() })
+    $cancelBtn.Add_Click({
+        $script:BrowserWindowClosed = $true
+        if ($script:CurrentBrowserWindow) { $script:CurrentBrowserWindow.Close() }
+    })
     $btnStack.Children.Add($cancelBtn) | Out-Null
 
     # Left side header texts
@@ -268,7 +280,12 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $TryConnect = {
         param([bool]$Automatic = $true)
 
-        if ($script:LoginCompleted -or $script:CheckingSession) {
+        if ($script:BrowserWindowClosed -or $script:LoginCompleted -or $script:CheckingSession) {
+            return
+        }
+
+        $activeWin = $script:CurrentBrowserWindow
+        if (-not $activeWin -or -not $activeWin.IsVisible) {
             return
         }
 
@@ -307,9 +324,17 @@ function Show-TeraBoxEmbeddedLoginWindow(
         try {
             $origin = "https://$($pageUri.Host)"
 
-            # Non-blocking cookie retrieval for origin
+            # Capture active WebView2 UserAgent to avoid security rejection
+            $ua = $null
+            try {
+                if ($wv.CoreWebView2.Settings -and $wv.CoreWebView2.Settings.UserAgent) {
+                    $ua = [string]$wv.CoreWebView2.Settings.UserAgent
+                }
+            } catch { }
+
+            # Non-blocking cookie retrieval for origin and root domain
             $cookieTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync($origin)
-            $cookieDone = Wait-WpfTask -Task $cookieTask -TimeoutMs 4000 -Window $browserWin
+            $cookieDone = Wait-WpfTask -Task $cookieTask -TimeoutMs 4000 -Window $activeWin
             if (-not $cookieDone -or -not $cookieTask.Result) {
                 if (-not $Automatic) {
                     $statusBlock.Text = 'Unable to read browser cookies. Please wait for the page to finish loading and try again.'
@@ -318,12 +343,27 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 return
             }
 
-            $cookies = $cookieTask.Result
+            $cookieList = [System.Collections.Generic.List[Microsoft.Web.WebView2.Core.CoreWebView2Cookie]]::new($cookieTask.Result)
+            if ($origin -ne 'https://www.terabox.com') {
+                try {
+                    $baseTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync('https://www.terabox.com')
+                    $baseDone = Wait-WpfTask -Task $baseTask -TimeoutMs 2000 -Window $activeWin
+                    if ($baseDone -and $baseTask.Result) {
+                        foreach ($bc in $baseTask.Result) {
+                            $cookieList.Add($bc)
+                        }
+                    }
+                } catch { }
+            }
+
+            $cookieDict = [ordered]@{}
             $hasNdus = $false
-            foreach ($c in $cookies) {
+            foreach ($c in $cookieList) {
                 if ($c.Name -eq 'ndus' -and -not [string]::IsNullOrEmpty($c.Value)) {
                     $hasNdus = $true
-                    break
+                }
+                if (-not [string]::IsNullOrEmpty($c.Name) -and -not [string]::IsNullOrEmpty($c.Value)) {
+                    $cookieDict[$c.Name] = $c.Value
                 }
             }
 
@@ -337,10 +377,8 @@ function Show-TeraBoxEmbeddedLoginWindow(
 
             # Build clean cookie string for active origin only
             $cookiePairs = @()
-            foreach ($c in $cookies) {
-                if (-not [string]::IsNullOrEmpty($c.Name) -and -not [string]::IsNullOrEmpty($c.Value)) {
-                    $cookiePairs += "$($c.Name)=$($c.Value)"
-                }
+            foreach ($k in $cookieDict.Keys) {
+                $cookiePairs += "$k=$($cookieDict[$k])"
             }
             $cookieHeader = $cookiePairs -join '; '
 
@@ -358,7 +396,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
             $jsToken = $null
             try {
                 $scriptTask = $wv.CoreWebView2.ExecuteScriptAsync("typeof window.jsToken === 'string' ? window.jsToken : ''")
-                $scriptDone = Wait-WpfTask -Task $scriptTask -TimeoutMs 3000 -Window $browserWin
+                $scriptDone = Wait-WpfTask -Task $scriptTask -TimeoutMs 3000 -Window $activeWin
                 if ($scriptDone -and $scriptTask.Result) {
                     $rawToken = $scriptTask.Result
                     if ($rawToken.StartsWith('"') -and $rawToken.EndsWith('"') -and $rawToken.Length -gt 2) {
@@ -369,33 +407,26 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 }
             } catch { }
 
-            # Build clean cookie string for active origin only
-            $cookiePairs = @()
-            foreach ($c in $cookies) {
-                if (-not [string]::IsNullOrEmpty($c.Name) -and -not [string]::IsNullOrEmpty($c.Value)) {
-                    $cookiePairs += "$($c.Name)=$($c.Value)"
-                }
-            }
-            $cookieHeader = $cookiePairs -join '; '
-
             # Validate session against TeraBox backend non-blockingly
             $sessionOverride = @{
                 Type = 'web-session'
                 Secret = $cookieHeader
                 JsToken = $jsToken
                 BaseUrl = $origin
+                UserAgent = $ua
             }
 
-            $testCheck = Test-TeraBoxBackendSession -SessionOverride $sessionOverride -Window $browserWin
+            $testCheck = Test-TeraBoxBackendSession -SessionOverride $sessionOverride -Window $activeWin
 
             if ($testCheck.IsValid) {
                 $script:LoginCompleted = $true
 
-                # Store session with DPAPI
-                Save-TeraBoxSession -Type 'web-session' -Secret $cookieHeader -JsToken $jsToken -BaseUrl $origin
+                # Store session with DPAPI (including active BaseUrl and UserAgent)
+                $activeOrigin = if ($testCheck.UserInfo -and $testCheck.UserInfo.BaseUrl) { $testCheck.UserInfo.BaseUrl } else { $origin }
+                Save-TeraBoxSession -Type 'web-session' -Secret $cookieHeader -JsToken $jsToken -BaseUrl $activeOrigin -UserAgent $ua
 
                 $scope = Test-TeraBoxAccountScope -SessionOverride $sessionOverride
-                $files = Get-TeraBoxFileList -Directory $scope.RootPath -SessionOverride $sessionOverride -Window $browserWin
+                $files = Get-TeraBoxFileList -Directory $scope.RootPath -SessionOverride $sessionOverride -Window $activeWin
                 $fileCount = if ($files.Success) { $files.ItemCount } else { 0 }
 
                 $userName = if ($testCheck.UserInfo -and $testCheck.UserInfo.UserName) { $testCheck.UserInfo.UserName } else { 'TeraBox User' }
@@ -408,7 +439,8 @@ function Show-TeraBoxEmbeddedLoginWindow(
                     ItemCount = $fileCount
                     Cookie = $cookieHeader
                     JsToken = $jsToken
-                    BaseUrl = $origin
+                    BaseUrl = $activeOrigin
+                    UserAgent = $ua
                 }
 
                 if ($OnLoginSucceeded) {
@@ -418,7 +450,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 # Clear browsing data from the isolated embedded profile
                 try {
                     $clearTask = $wv.CoreWebView2.Profile.ClearBrowsingDataAsync()
-                    [void](Wait-WpfTask -Task $clearTask -TimeoutMs 2000 -Window $browserWin)
+                    [void](Wait-WpfTask -Task $clearTask -TimeoutMs 2000 -Window $activeWin)
                 } catch { }
 
                 # Brief delay so user sees confirmed success before window closes
@@ -426,7 +458,9 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 $closeTimer.Interval = [TimeSpan]::FromMilliseconds(800)
                 $closeTimer.Add_Tick({
                     $closeTimer.Stop()
-                    $browserWin.Close()
+                    if ($script:CurrentBrowserWindow) {
+                        $script:CurrentBrowserWindow.Close()
+                    }
                 })
                 $closeTimer.Start()
                 return
@@ -437,7 +471,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
             }
         } finally {
             $script:CheckingSession = $false
-            if (-not $script:LoginCompleted) {
+            if (-not $script:LoginCompleted -and -not $script:BrowserWindowClosed) {
                 $checkBtn.IsEnabled = $true
                 $pollTimer.Start()
             }
@@ -450,6 +484,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
 
     $wv.Add_CoreWebView2InitializationCompleted({
         param($sender, $e)
+        if ($script:BrowserWindowClosed -or -not $script:CurrentBrowserWindow) { return }
         if ($e.IsSuccess) {
             $wv.CoreWebView2.Settings.AreDevToolsEnabled = $false
             $wv.CoreWebView2.Settings.IsPasswordAutosaveEnabled = $false
@@ -459,7 +494,9 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 $script:LastTestedCookie = ''
             })
             $wv.CoreWebView2.Navigate('https://www.terabox.com/main')
-            $pollTimer.Start()
+            if (-not $script:BrowserWindowClosed) {
+                $pollTimer.Start()
+            }
         } else {
             $statusBlock.Text = "Embedded browser initialization failed: $($e.InitializationException.Message)"
             $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
@@ -467,6 +504,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
     })
 
     $browserWin.Add_Loaded({
+        if ($script:BrowserWindowClosed -or -not $script:CurrentBrowserWindow) { return }
         try {
             $wv.EnsureCoreWebView2Async()
         } catch {
@@ -476,13 +514,29 @@ function Show-TeraBoxEmbeddedLoginWindow(
     })
 
     $browserWin.Add_Closing({
-        $pollTimer.Stop()
+        $script:BrowserWindowClosed = $true
+        if ($pollTimer) { $pollTimer.Stop() }
         if (-not $script:LoginCompleted -and $OnStateChanged) {
-            & $OnStateChanged 'Disconnected' 'Sign-in window was closed by the user.'
+            try {
+                & $OnStateChanged 'Disconnected' 'Sign-in window was closed by the user.'
+            } catch { }
         }
     })
 
-    [void]$browserWin.ShowDialog()
+    $browserWin.Add_Closed({
+        $script:BrowserWindowClosed = $true
+        if ($pollTimer) { $pollTimer.Stop() }
+        $script:CurrentBrowserWindow = $null
+    })
+
+    try {
+        [void]$browserWin.ShowDialog()
+    } finally {
+        $script:BrowserWindowClosed = $true
+        if ($pollTimer) { $pollTimer.Stop() }
+        $script:CurrentBrowserWindow = $null
+        try { $wv.Dispose() } catch { }
+    }
 
     if ($script:LoginCompleted -and $script:SessionResult) {
         return $script:SessionResult
