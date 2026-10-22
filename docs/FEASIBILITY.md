@@ -82,6 +82,31 @@ The current [`morluto/rea`](https://github.com/morluto/rea) project is an MIT-li
 - Mounts need to run in the interactive signed-in user session if T: is to be visible in that user's Explorer. An elevated mount may be invisible to a non-elevated Explorer.
 - Games and active codebases remain unverified and are poor initial workloads: random I/O, file locks, latency, session expiry, throttling, and remote filesystem semantics can break behavior. Work locally and copy closed files/projects to the mount.
 
+## Build and authentication gate recheck (2026-10-22)
+
+The first build failure was reproduced by running `scripts/Build-PatchedRclone.ps1` from the repository root. It stopped before creating the build directory or cloning source with this exact error:
+
+```text
+Exception: ...\scripts\Build-PatchedRclone.ps1:23
+WinFsp FUSE development header fuse.h was not found under: C:\Program Files (x86)\WinFsp\inc\fuse
+```
+
+The local prerequisite probe also found Git (`2.55.0.windows.2`) but no Go executable, no MinGW GCC/G++ commands, no `rclone.exe`, no standard WinFsp x64 runtime DLL, and no WinFsp FUSE header in either standard install location checked. The .NET runtime is present, but the .NET SDK is not; neither is needed for this Go build. The current error is the first guard reached, not a claim that installing only the header will complete the build.
+
+The pinned source is `gulp79/rclone-extra` tag `v1.75.2-extra`, commit `56bf13885494819bc801302ddf881279bdac7262`. Its tag was checked in a source-only clone. The root `COPYING` file is MIT-licensed; a complete third-party notice/license audit for redistribution remains outstanding. The tag is shown as GitHub-verified, but that authenticates the tagged source commit, not the release executable. The release page publishes a Windows ZIP checksum (`d5a5d9383a607ccb1af9a871d4cb92906121f32cf111497adb94958b99315c69`), but no artifact signature or build attestation was established. We did not download or execute it, so option 1 (trusted compatible release) is not satisfied.
+
+The pinned workflow builds Windows on Ubuntu with Go `1.26.x`, MinGW, WinFsp `v2.1` headers, cgo enabled, and the `cmount` tag. It also obtains `rsrc@latest` and an icon from the moving rclone `master` branch, so that workflow is not fully reproducible as written. The repository's PowerShell builder instead pins the source tag/commit and patch, then requires Go 1.26+, `x86_64-w64-mingw32-gcc`/`g++`, WinFsp Developer headers, and the WinFsp runtime for mounting. Official rclone guidance documents this Windows cgo/MinGW/WinFsp path. It also describes a cgo-disabled Windows build, but that alternative has not been tested against this fork, and the builder has not been changed to use it. A build from the pinned source therefore looks feasible with the documented toolchain, but has not yet been demonstrated on Windows.
+
+**Next local build steps (not performed here):** install Git if absent; install Go 1.26 or newer from the official Go distribution; install MSYS2 and its classic MINGW64 GCC toolchain as described in rclone's Windows build guide (the current builder expects `x86_64-w64-mingw32-gcc` and `...-g++` on `PATH`); install WinFsp from its official MSI and select the Developer files feature; make sure the builder's expected WinFsp FUSE include path is correct for that installation. Then open a fresh PowerShell, verify `go version`, both compiler commands, and `fuse.h`, and rerun the builder. Do not substitute the UCRT64 toolchain or a release binary without first validating compatibility/provenance. WinFsp runtime installation is also required before any mount. These are user-side install steps; no software was installed during this audit.
+
+### Pinned backend auth and secret handling
+
+At the pinned tag, the backend's setup asks for a full website cookie or just `ndus`. `NewFs` normalizes that value and logs the full options struct through the backend debug helper at level 1; the helper emits it when that debug level is enabled. API requests set the supplied value as the HTTP `Cookie` header. The code has no interactive supported login or cookie-renewal flow: a rejected cookie is an error, not a refresh path. It does persist some non-cookie values such as `jsToken`, base URL, and expiring metadata in the rclone config. An encrypted rclone config can protect its contents at rest, but does not create a supported provider sign-in/renewal contract.
+
+The repository patch marks the option sensitive, removes the options-struct debug call, and disables backend-specific debug output. Patch application was checked on the exact pinned source earlier; in this environment, compilation, synthetic-secret log capture, and rclone-level redaction behavior remain unverified. Even if those checks pass, the only documented credential path remains manual website-cookie configuration. No compliant, reliable full-drive login was established, so the live account-mount gate is currently blocked. Never put a cookie in chat, an issue, command history, or diagnostics.
+
+The unofficial backend remains the only candidate in this project for existing full-drive scope, not an approved provider. The official Open API remains a separate narrower candidate: it requires application credentials/approval and documents an assigned-application directory, without establishing access to an existing account root.
+
 ## Local environment evidence
 
 - The starter project under `outputs/terabox-drive-starter/` was inspected, including its README, five scripts, and six research documents. Its scripts parse, but its sign-in task has not been installed and its mount has not been run.
