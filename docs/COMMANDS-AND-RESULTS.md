@@ -122,10 +122,29 @@ Each commit changed one file and was pushed to `origin/main`:
 - `74511e7` — record pinned TeraBox login limitation.
 - `a34ef6c` — redact sensitive headers throughout HTTP headers.
 - `7f8afcd` — update cookie dump redaction status.
+- `7b29561` — add provider connection state model.
+- `592c65b` — add connection state machine tests.
+- `4a48855` — add TeraBox provider implementation.
+- `6eb8ad6` — add TeraBox provider tests.
+- `4fdaee7` — add Google Drive provider implementation.
+- `6985124` — add Google Drive provider tests.
+- `4f2b199` — add virtual drive manager service.
+- `9cfc82a` — add virtual drive manager tests.
+- `e224f60` — add shared provider connection UI window.
+- `387ddc8` — integrate provider connection flows in desktop UI.
+- `ec77719` — add automated test suite runner.
+
+## Automated test suite verification
+
+Run `powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1`:
+- `Test-ConnectionState.ps1`: Verified 10 connection states, valid state machine transitions, fail-closed invalid transition rejection, and sensitive credential sanitization.
+- `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence and clean deletion, and account scope validation.
+- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, fail-closed handling without tokens, DPAPI-protected token persistence and clean deletion, and OAuth authorization URL construction.
+- `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, and read-only VFS cache mount argument formatting.
+- `Test-RcloneConfigPassword.ps1`: Verified synthetic DPAPI read-back, plaintext-at-rest absence, user/SYSTEM private ACLs, and missing-credential fail-closed behavior.
 
 ## Required next evidence
 
-1. After Go 1.26+ is installed locally, run the revised cgo-free pinned builder and verify the source commit, patch, Windows `cmount` tag, provider registration, and manifest. Install WinFsp runtime before any mount test; MinGW and Developer headers are not prerequisites for this builder path.
-2. Test the DPAPI interactive save flow and native Windows PowerShell subprocess on an unrestricted Windows session; add/run synthetic-secret tests for backend config redaction and diagnostics.
-3. Audit the exact pinned build's license notices; then verify provider registration. A compliant TeraBox sign-in path remains a blocker before any account access.
-4. After compliant authentication is available, perform user-controlled read-only account tests locally; only then consider disposable writable/recovery/cache tests and record exact versions and observed results.
+1. Interactive local user sign-in through the TeraBox dedicated connection window (`Show-ProviderConnectionWindow 'terabox'`) and Google OAuth 2.0 flow (`Show-ProviderConnectionWindow 'gdrive'`).
+2. Test File Explorer visibility of `T:\` and read an existing file once live account validation completes.
+3. Keep writable mode disabled until read-only acceptance gates are satisfied.
