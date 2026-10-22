@@ -60,6 +60,39 @@ Note: Native desktop apps use PKCE (RFC 7636); a client secret is NOT required.
     Show-DiagnosticsDialog -Title 'Google Drive Setup' -DiagnosticsContent $instructions -Owner $Owner
 }
 
+function Show-TeraBoxArchitectureDetailsDialog([System.Windows.Window]$Owner = $null) {
+    $content = @"
+TERABOX AUTHENTICATION ARCHITECTURE & FEASIBILITY REPORT
+
+1. Why Web Sign-in Does Not Auto-Connect the Desktop Virtual Drive:
+   • Interactive web login at terabox.com is proprietary and session-based.
+   • It sets HttpOnly cookies (such as 'ndus') scoped to the browser domain.
+   • Unlike Google OAuth 2.0 (RFC 8252), TeraBox has NO loopback redirect or
+     system-browser authorization callback for desktop applications.
+   • Modern browsers and Windows security boundaries prevent external desktop
+     applications from reading or extracting browser cookie databases.
+   • Scraped cookie extraction, memory interception, or CAPTCHA bypass are
+     expressly prohibited by NS Cloud Drive security rules.
+
+2. Why the Official TeraBox Open Platform API Cannot Mount Existing Files:
+   • TeraBox operates an Open Platform (open.terabox.com) with OAuth 2.0.
+   • Documented directory boundary: The official API is strictly restricted to:
+     '/From: Other Applications/<App_Name>/'
+   • It has NO scope, permission, or capability to list, read, or mount files
+     stored in the user's personal drive root ('/') or existing folders.
+   • Creating an application requires manual developer approval from TeraBox.
+
+3. Current Status & Smallest Legitimate Next Step:
+   • The unofficial community backend (gulp79/rclone-extra) operates only when
+     an existing session ('ndus') is manually provided into rclone's encrypted
+     configuration or stored in local DPAPI.
+   • The application will NEVER pretend that opening a website connects the drive.
+   • If a valid session is provisioned into DPAPI or rclone, clicking 'Test Stored
+     Session' will validate it against the backend and verify file listing.
+"@
+    Show-DiagnosticsDialog -Title 'TeraBox Architecture & Limitations' -DiagnosticsContent $content -Owner $Owner
+}
+
 function Show-DiagnosticsDialog([string]$Title, [string]$DiagnosticsContent, [System.Windows.Window]$Owner = $null) {
     $diagWindow = [System.Windows.Window]::new()
     $diagWindow.Title = "$Title - Diagnostics"
@@ -245,33 +278,40 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     }
 
     if ($ProviderId -eq 'terabox') {
-        $actionStack.Children.Add((New-UIElement-Label 'TeraBox Authentication' 15 '#0F172A' $true)) | Out-Null
-        $methodDesc = New-UIElement-Label 'Sign in using the legitimate TeraBox website. The session will be validated through genuine backend API checks before mounting is unlocked.' 12 '#64748B'
-        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+        $actionStack.Children.Add((New-UIElement-Label 'TeraBox Authentication & Feasibility' 15 '#0F172A' $true)) | Out-Null
+        $methodDesc = New-UIElement-Label 'TeraBox does not provide an automated desktop OAuth flow. Authentication requires an authorized local session.' 12 '#64748B'
+        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
         $actionStack.Children.Add($methodDesc) | Out-Null
 
-        $openWebBtn = [System.Windows.Controls.Button]::new()
-        $openWebBtn.Content = '1. Open TeraBox Website Sign-in'
-        $openWebBtn.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
-        $openWebBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
-        $openWebBtn.HorizontalAlignment = 'Left'
-        $openWebBtn.Add_Click({
-            & $UpdateState 'OpeningSignIn' 'Opening official TeraBox sign-in in browser...'
-            [System.Diagnostics.Process]::Start('https://www.terabox.com/') | Out-Null
-            & $UpdateState 'AwaitingUserAuth' 'Please sign in to your TeraBox account on the website, then click "I''ve signed in — Connect" below.'
-        })
-        $actionStack.Children.Add($openWebBtn) | Out-Null
+        # Feasibility notice card
+        $tbNoticeCard = [System.Windows.Controls.Border]::new()
+        $tbNoticeCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
+        $tbNoticeCard.Padding = [System.Windows.Thickness]::new(12)
+        $tbNoticeCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+        $tbNoticeCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FEF3C7')
+        $tbNoticeCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD34D')
+        $tbNoticeCard.BorderThickness = [System.Windows.Thickness]::new(1)
 
-        $validateBtn = [System.Windows.Controls.Button]::new()
-        $validateBtn.Content = '2. I''ve signed in — Connect'
-        $validateBtn.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
-        $validateBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
-        $validateBtn.Foreground = [System.Windows.Media.Brushes]::White
-        $validateBtn.BorderThickness = [System.Windows.Thickness]::new(0)
-        $validateBtn.HorizontalAlignment = 'Left'
-        $validateBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+        $tbNoticeStack = [System.Windows.Controls.StackPanel]::new()
+        $tbNoticeCard.Child = $tbNoticeStack
 
-        $validateBtn.Add_Click({
+        $tbNoticeTitle = New-UIElement-Label 'Automated Web Login Is Not Supported by TeraBox' 12 '#92400E' $true
+        $tbNoticeStack.Children.Add($tbNoticeTitle) | Out-Null
+
+        $tbNoticeDesc = New-UIElement-Label 'TeraBox has no OAuth loopback protocol. Browser login keeps cookies in the browser and cannot authorize the virtual drive backend without prohibited cookie extraction.' 11 '#78350F'
+        $tbNoticeDesc.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
+        $tbNoticeStack.Children.Add($tbNoticeDesc) | Out-Null
+
+        $tbBtnRow = [System.Windows.Controls.WrapPanel]::new()
+
+        $testSessionBtn = [System.Windows.Controls.Button]::new()
+        $testSessionBtn.Content = 'Test Stored Session'
+        $testSessionBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+        $testSessionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($providerInfo.AccentColor)
+        $testSessionBtn.Foreground = [System.Windows.Media.Brushes]::White
+        $testSessionBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+        $testSessionBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
+        $testSessionBtn.Add_Click({
             & $UpdateState 'ValidatingAuthorization' 'Testing connection against TeraBox backend...'
             $check = Test-TeraBoxBackendSession
             if ($check.IsValid) {
@@ -288,7 +328,26 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
                 & $UpdateState $check.State $check.Error
             }
         })
-        $actionStack.Children.Add($validateBtn) | Out-Null
+        $tbBtnRow.Children.Add($testSessionBtn) | Out-Null
+
+        $tbDetailsBtn = [System.Windows.Controls.Button]::new()
+        $tbDetailsBtn.Content = 'View Architectural Details'
+        $tbDetailsBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+        $tbDetailsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
+        $tbDetailsBtn.Add_Click({ Show-TeraBoxArchitectureDetailsDialog -Owner $win })
+        $tbBtnRow.Children.Add($tbDetailsBtn) | Out-Null
+
+        $visitWebBtn = [System.Windows.Controls.Button]::new()
+        $visitWebBtn.Content = 'Visit TeraBox Web (Browser Only)'
+        $visitWebBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+        $visitWebBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+        $visitWebBtn.Add_Click({
+            [System.Diagnostics.Process]::Start('https://www.terabox.com/') | Out-Null
+        })
+        $tbBtnRow.Children.Add($visitWebBtn) | Out-Null
+
+        $tbNoticeStack.Children.Add($tbBtnRow) | Out-Null
+        $actionStack.Children.Add($tbNoticeCard) | Out-Null
     } elseif ($ProviderId -eq 'gdrive') {
         $actionStack.Children.Add((New-UIElement-Label 'Google Drive Authorization' 15 '#0F172A' $true)) | Out-Null
         $methodDesc = New-UIElement-Label 'Sign in using Google''s official OAuth 2.0 flow with PKCE (RFC 7636). A local loopback listener will securely receive the authorization code.' 12 '#64748B'
