@@ -9,7 +9,7 @@ Use a disposable folder and non-important test files in the account. Keep the ap
 - [x] Pin patch-development source to `gulp79/rclone-extra` tag `v1.75.2-extra`, commit `56bf13885494819bc801302ddf881279bdac7262`; the patch applies cleanly.
 - [ ] Audit license notices and record actual build tool versions.
 - [ ] Verify session settings are marked sensitive and synthetic credentials do not appear in logs, exceptions, debug output, crash reports, or sanitized support exports.
-- [ ] Run `scripts/Build-PatchedRclone.ps1` after installing Go 1.26+, MinGW, and WinFsp FUSE developer headers; verify the produced binary and record its SHA-256.
+- [ ] Install Go 1.26+ from its official distribution and run `scripts/Build-PatchedRclone.ps1`; this project builder uses `CGO_ENABLED=0` and does not require MinGW or WinFsp Developer headers. Confirm the exact pinned source/patch, `windows/amd64`, `cmount`, TeraBox provider registration, manifest, and executable SHA-256. The no-cgo build has not yet compiled against this fork.
 - [ ] Install WinFsp from its official source and verify the version.
 - [ ] Verify `rclone config providers` lists `terabox` without displaying configuration values.
 - [ ] Confirm the cache volume is NTFS, has adequate free space, and is not a reparse point or shared/network folder.
