@@ -138,6 +138,7 @@ $outer.Children.Add($header) | Out-Null
 
 $mainScroll = [System.Windows.Controls.ScrollViewer]::new()
 $mainScroll.VerticalScrollBarVisibility = 'Auto'
+$mainScroll.HorizontalScrollBarVisibility = 'Disabled'
 $outer.Children.Add($mainScroll) | Out-Null
 
 $content = [System.Windows.Controls.StackPanel]::new()
@@ -162,7 +163,9 @@ $accountsStack.Children.Add($accountsDesc) | Out-Null
 # Provider buttons grid
 $providersGrid = [System.Windows.Controls.Grid]::new()
 $col1 = [System.Windows.Controls.ColumnDefinition]::new()
+$col1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
 $col2 = [System.Windows.Controls.ColumnDefinition]::new()
+$col2.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
 $providersGrid.ColumnDefinitions.Add($col1)
 $providersGrid.ColumnDefinitions.Add($col2)
 
@@ -187,8 +190,8 @@ $tbBtn.Foreground = [System.Windows.Media.Brushes]::White
 $tbBtn.BorderThickness = [System.Windows.Thickness]::new(0)
 $tbBtn.Add_Click({
     Show-ProviderConnectionWindow -ProviderId 'terabox' -Owner $window -OnStateChanged {
-        param($pid, $st)
-        $tbStatusLabel.Text = "Status: $st"
+        param($providerIdParam, $stateParam)
+        $tbStatusLabel.Text = "Status: $stateParam"
     }
 })
 $tbStack.Children.Add($tbBtn) | Out-Null
@@ -216,8 +219,8 @@ $gdBtn.Foreground = [System.Windows.Media.Brushes]::White
 $gdBtn.BorderThickness = [System.Windows.Thickness]::new(0)
 $gdBtn.Add_Click({
     Show-ProviderConnectionWindow -ProviderId 'gdrive' -Owner $window -OnStateChanged {
-        param($pid, $st)
-        $gdStatusLabel.Text = "Status: $st"
+        param($providerIdParam, $stateParam)
+        $gdStatusLabel.Text = "Status: $stateParam"
     }
 })
 $gdStack.Children.Add($gdBtn) | Out-Null
@@ -247,13 +250,13 @@ $details = New-Label 'Setup checks have not been run.' 13 '#475467'
 $details.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
 $content.Children.Add($details) | Out-Null
 
-$buttons = [System.Windows.Controls.StackPanel]::new()
-$buttons.Orientation = 'Horizontal'
+$buttons = [System.Windows.Controls.WrapPanel]::new()
+$buttons.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
 
 $checkButton = [System.Windows.Controls.Button]::new()
 $checkButton.Content = 'Check setup'
 $checkButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
-$checkButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$checkButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 8)
 $checkButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Accent)
 $checkButton.Foreground = [System.Windows.Media.Brushes]::White
 $checkButton.BorderThickness = [System.Windows.Thickness]::new(0)
@@ -287,7 +290,7 @@ $buttons.Children.Add($checkButton) | Out-Null
 $mountButton = [System.Windows.Controls.Button]::new()
 $mountButton.Content = 'Mount T: Virtual Drive'
 $mountButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
-$mountButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$mountButton.Margin = [System.Windows.Thickness]::new(0, 0, 10, 8)
 $mountButton.Add_Click({
     $status = Get-VirtualDriveStatus -DriveLetter $script:DriveLetter
     if ($status.IsMounted) {
@@ -311,6 +314,7 @@ $buttons.Children.Add($mountButton) | Out-Null
 $unmountButton = [System.Windows.Controls.Button]::new()
 $unmountButton.Content = 'Unmount T:'
 $unmountButton.Padding = [System.Windows.Thickness]::new(16, 9, 16, 9)
+$unmountButton.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $unmountButton.Add_Click({
     $res = Stop-VirtualDriveMount
     [System.Windows.MessageBox]::Show($res.Message, 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
