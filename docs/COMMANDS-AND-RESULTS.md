@@ -15,7 +15,7 @@
 | Parse `scripts/Start-ReadOnlyMount.ps1` with the PowerShell parser | Passed. | Syntax only; no mount was attempted. |
 | Parse `scripts/RcloneConfigPassword.ps1` and exercise its missing-credential path | Passed; the helper exits with a clear error when its DPAPI credential file is absent. | Output was suppressed. No actual config password or provider session was used. |
 | Synthetic DPAPI export/import and helper read-back in the current PowerShell host | Passed; compared the generated value in memory and did not print it. The temporary fixture was removed. | Tests the read helper and Windows DPAPI in this host, not the interactive `-Store` ACL branch. |
-| Run `scripts/Test-RcloneConfigPassword.ps1` | Passed; repeatably checks synthetic serialization, helper output, and missing-credential failure, then removes its temporary fixture. | Does not test the interactive `-Store` ACL branch or the separate Windows PowerShell process. |
+| Run `scripts/Test-RcloneConfigPassword.ps1` | Passed; repeatably checks synthetic DPAPI serialization/read-back, plaintext absence, user-and-SYSTEM ACLs on a temporary directory and file, and missing-credential failure; removes the fixture. | Does not exercise the interactive `-Store` prompt or the separate Windows PowerShell process. |
 | Run the helper as a separate Windows PowerShell process | Blocked by this environment with `AuthorizationManager check failed`. | Does not establish a product defect or a pass; the launcher/password-command subprocess integration remains unverified. No rclone process or mount was involved. |
 | Parse `scripts/Manage-UserMountStartup.ps1` and exercise its safety gate | Passed; it refuses registration without `-ReadOnlyAcceptancePassed`. No task with the reserved name existed. | Task registration, removal, scheduled retries, and logon mount were not run. Build/config prerequisites are absent. |
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
@@ -74,6 +74,7 @@ Each commit changed one file and was pushed to `origin/main`:
 - `c3de7ab` — update security notes for startup support.
 - `42ff8fb` — clarify DPAPI helper test coverage.
 - `20933d8` — add safe DPAPI helper self-test.
+- `448e28f` — test DPAPI credential ACL policy.
 
 ## Required next evidence
 
