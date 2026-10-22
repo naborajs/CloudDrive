@@ -23,9 +23,17 @@ See the research and acceptance plan in the project documentation as it is added
 
 Use a cloud drive for photos, videos, documents, archives, installers, backups, and closed project copies. A cloud mount is not equivalent to a local SSD. Games, active codebases, Git operations, builds, and package managers may be unreliable due to network latency, throttling, session expiry, file locking, and provider filesystem behavior. Keep active work local and copy it to cloud storage when closed.
 
-## Development
+## Development preview
 
-The repository is being established. Build, install, and acceptance instructions will be documented after the Windows implementation and its prerequisites are verified. Do not install an unofficial binary from an unknown source.
+On Windows, open PowerShell and run:
+
+```powershell
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\src\NSCloudDrive.ps1
+```
+
+The preview needs Windows PowerShell 5.1 with WPF. **Check setup** reports whether rclone is on `PATH`, whether common WinFsp installation markers are present, and whether the installed rclone lists a TeraBox provider. These are local checks only; provider registration does not prove login or file access. The mount button is deliberately locked. No account credentials are requested or read.
+
+The preview has only been syntax-checked on the development PC. Its UI and prerequisite detection have not yet been acceptance-tested on a clean Windows install. Do not install an unofficial binary from an unknown source.
 
 ## License
 
