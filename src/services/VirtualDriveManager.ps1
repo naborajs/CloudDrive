@@ -136,8 +136,16 @@ function Get-VirtualDriveStatus(
         try { $freeSpace = [int64]$driveInfo.AvailableFreeSpace } catch { }
         try { $totalSize = [int64]$driveInfo.TotalSize } catch { }
 
+        # A drive is only considered mounted by this virtual drive manager if:
+        # 1. An active rclone mount process is running for it, OR
+        # 2. It is a WinFsp/FUSE filesystem created with our provider volume label
+        $isManagedMount = $processAlive -or (
+            $format -and ($format -like '*WinFsp*' -or $format -like '*FUSE*') -and
+            ($volumeLabel -in @('Google Drive', 'TeraBox', 'NS Cloud Drive'))
+        )
+
         return [ordered]@{
-            IsMounted = $true
+            IsMounted = [bool]$isManagedMount
             ProviderId = $ProviderId
             DriveLetter = $letter
             DriveRoot = $driveRoot
