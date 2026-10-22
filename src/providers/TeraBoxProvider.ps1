@@ -440,6 +440,8 @@ function Test-TeraBoxBackendSession(
                     Uk = $uk
                     BaseUrl = $baseUrl
                     UserAgent = $activeUserAgent
+                    QuotaTotal = $quotaTotal
+                    QuotaUsed = $quotaUsed
                     QuotaTotalBytes = $quotaTotal
                     QuotaUsedBytes = $quotaUsed
                 }
