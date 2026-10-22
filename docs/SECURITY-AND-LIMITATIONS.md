@@ -4,11 +4,13 @@
 
 ## Current security posture
 
-- The only current app code is a WPF preview. It does not read rclone configuration, sign in, request secrets, or mount a drive.
+- The WPF preview does not read rclone configuration, sign in, request secrets, or mount a drive. Separate PowerShell scripts now inspect an encrypted config and start a read-only mount, but they have not run against a real backend.
 - The selected rclone TeraBox backend is unofficial and relies on a web-session token, not TeraBox's official OAuth integration. TeraBox documents an official QR/device-code flow for separately registered applications, but its API is scoped to an application-assigned folder; access to the user's existing full-drive root has not been established.
 - In the reviewed backend, the `cookie` field is required but not marked sensitive. The backend constructor's level-1 debug statement formats the full options struct, which contains that cookie. Higher debug levels are documented to include request/response parameters or bodies.
 - A patch is committed for the pinned `v1.75.2-extra` source: it marks the cookie option sensitive, removes the options-struct debug statement, and disables backend-specific debug output. It has only passed patch-application checks; it has not been compiled or tested with synthetic credentials.
 - A pinned-source Windows build helper and a read-only mount launcher are committed. The launcher checks the build manifest and hashes, requires an encrypted/decryptable rclone config, uses a 20 GiB best-effort cache, sets backend debug to zero, and runs in the current user session. Both scripts are syntax/preflight-tested only; no executable or mount exists on this PC.
+- `scripts/RcloneConfigPassword.ps1` can locally store the **rclone config-encryption password** as a current-user DPAPI-protected PowerShell credential, with an ACL for that user and SYSTEM. The launcher supplies the password through rclone's documented password-command feature and disables interactive fallback. This is not TeraBox authentication and does not store or acquire a TeraBox cookie. The DPAPI storage and successful decrypt round-trip have not been tested; only parser and missing-credential fail-closed checks passed.
+- `scripts/Manage-UserMountStartup.ps1` defines opt-in registration/removal for a limited, interactive-user logon task. Registration requires a matching build, encrypted config, and an explicit read-only acceptance flag. The task has not been registered; its behavior and reconnect handling are unverified.
 - The third-party QR helper is not TeraBox's documented Open API device-code flow: it imitates browser headers against website login endpoints, extracts ndus, passes it as an rclone config command-line argument, and stores it in ordinary config. It is not compatible with this project's no-browser-impersonation and secret-handling requirements; we did not run it.
 - No account was authenticated, no user files were listed, and no remote file operation was executed.
 
@@ -16,7 +18,7 @@
 
 1. Compile the pinned patch and add tests proving a synthetic secret never appears in logs, exceptions, config-redacted output, or diagnostics. The current patch is not yet a security guarantee.
 2. Prefer a user-confirmed QR/device authorization flow. If only cookie copy is available, keep sign-in unavailable; do not ask for or collect a cookie through chat, a script, an issue, or a screenshot.
-3. Store the session under the current Windows user's Credential Manager or DPAPI-protected storage. Do not store it in Git, ordinary settings JSON, command-line arguments, environment that persists beyond the child process, telemetry, or crash dumps.
+3. A future provider session must use a reviewed Windows-protected store and never enter Git, ordinary settings JSON, command-line arguments, persistent environment variables, telemetry, or crash dumps. The current DPAPI helper protects only the rclone config-encryption password; it does not validate or implement provider-session storage.
 4. If a reviewed backend must receive a session through a process environment variable, decrypt it only in memory immediately before process start, set it only in the child environment, clear the parent copy, and verify child logs/process diagnostics do not export it. This is a design option, not implemented or verified here.
 5. Keep app settings and secret storage separate. Restrict config/diagnostic ACLs to the current user and SYSTEM. Protect the device and cache volume with BitLocker where available.
 6. Never run the user's mount as SYSTEM. The interactive user's drive visibility and secret scope are more important than a background service abstraction.
@@ -50,12 +52,13 @@
 
 ## Not implemented or not verified
 
-- No secure sign-in or session renewal implementation.
+- No compliant TeraBox sign-in or session renewal implementation. The backend's cookie-based setup is blocked; the DPAPI helper protects only the separate rclone config-encryption password.
 - The backend patch exists, but has not been compiled; no synthetic-secret logging or config-redaction test has run.
+- The DPAPI credential save/round-trip and encrypted-config mount path have not been tested. Only script parsing and a no-credential failure path were exercised.
 - No mount manager, health-state machine, or clean-unmount implementation.
 - No cache usage reporting or pending-write state tracking.
 - No startup task/service has been created.
-- No sign-in reconnect or secure unattended config unlock is implemented; the manual encrypted-config check and mount are separate rclone processes and may each prompt for the config password.
+- The startup task manager exists but has not registered a task or been tested; the explicit acceptance gate is not evidence that the read-only acceptance tests passed.
 - No remote account, Explorer drive, read, write, interruption, eviction, or recovery behavior has been tested.
 
 Do not describe NS Cloud Drive as a functioning TeraBox mount until the corresponding evidence is recorded in [the acceptance plan](MANUAL-ACCEPTANCE.md) and [the command record](COMMANDS-AND-RESULTS.md).
