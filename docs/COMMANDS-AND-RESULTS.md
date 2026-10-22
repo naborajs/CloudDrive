@@ -13,6 +13,9 @@
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
 | Run the build helper with this PC's current prerequisites | Safely stopped before creating its build folder because WinFsp FUSE development header `fuse.h` is absent. | No source was downloaded by the helper and no software was installed; Go and MinGW are also absent from the earlier environment audit. |
 | Parse `scripts/Start-ReadOnlyMount.ps1` with the PowerShell parser | Passed. | Syntax only; no mount was attempted. |
+| Parse `scripts/RcloneConfigPassword.ps1` and exercise its missing-credential path | Passed; the helper exits with an error when its DPAPI credential file is absent. | Output was suppressed. The credential was not stored, and no DPAPI save/decrypt round-trip was attempted. |
+| Parse the updated read-only launcher and invoke its Windows PowerShell credential helper without a stored credential | Passed; it fails closed without emitting output to the test console. | No rclone process, config, account session, or mount was involved. |
+| Parse `scripts/Manage-UserMountStartup.ps1` and exercise its safety gate | Passed; it refuses registration without `-ReadOnlyAcceptancePassed`. No task with the reserved name existed. | Task registration, removal, scheduled retries, and logon mount were not run. Build/config prerequisites are absent. |
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
 | Review TeraBox official Open API integration documentation | Confirmed documented OAuth/device-code QR flow, separate client credential application, short-lived access/refresh tokens, and an assigned-application directory boundary. | Documentation review only; no application request, token call, or account access; does not prove compatibility with the existing full drive. |
@@ -61,10 +64,16 @@ Each commit changed one file and was pushed to `origin/main`:
 - `a20c860` — reject browser-mimicking QR login helper.
 - `bfdad0e` — reject unsafe QR session handling.
 - `45714f1` — gate acceptance on compliant authentication.
+- `54bf793` — add DPAPI-protected rclone config unlock helper.
+- `e3d50de` — use local config unlock helper in the read-only launcher.
+- `b6b18e1` — document local encrypted config unlock.
+- `d54ef8b` — add gated per-user mount startup manager.
+- `410ddda` — document opt-in read-only logon mounting.
+- `c3de7ab` — update security notes for startup support.
 
 ## Required next evidence
 
 1. Provide Go 1.26+, MinGW, and WinFsp FUSE development headers; run the pinned builder and verify its output.
-2. Add and run synthetic-secret tests for config redaction and diagnostic logs.
-3. Audit the exact pinned build's license notices; then verify provider registration and perform user-controlled read-only account tests locally.
-4. Only after read tests pass, run disposable writable/recovery/cache tests and update this record with exact versions and observed results.
+2. Run a synthetic DPAPI save/decrypt round-trip and add/run synthetic-secret tests for config redaction and diagnostic logs.
+3. Audit the exact pinned build's license notices; then verify provider registration. A compliant TeraBox sign-in path remains a blocker before any account access.
+4. After compliant authentication is available, perform user-controlled read-only account tests locally; only then consider disposable writable/recovery/cache tests and record exact versions and observed results.
