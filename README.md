@@ -49,6 +49,18 @@ powershell.exe -NoProfile -File .\scripts\Build-PatchedRclone.ps1
 
 The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. A successful build proves only that the pinned source builds and registers the provider; the build has not yet been run in this environment, and account login, Explorer mounting, file reads, and writes remain unverified.
 
+## Read-only mount test
+
+After a successful build and after a TeraBox remote has been configured locally with rclone's encrypted configuration, start the manual read-only test:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Start-ReadOnlyMount.ps1
+```
+
+The launcher verifies the build manifest and file hashes, checks that T: is free and the cache volume is NTFS with at least 25 GiB free, confirms the rclone configuration is encrypted and decryptable, then runs rclone visibly in the signed-in user's session. The encryption check and the mount are separate rclone processes, so the config password may be requested twice. Press Ctrl+C in that window to unmount. It does not write remotely, create a startup task, or delete cache files.
+
+No safe local sign-in flow for the unofficial cookie-based backend has been established yet. Do not paste session values into chat, scripts, logs, or this repository. The launcher is scaffolding for a later locally configured and reviewed test; a successful script parse or build is not proof that a live T: mount works.
+
 ## License
 
 License terms will be selected and documented before distributing application binaries or source derived from third-party projects.
