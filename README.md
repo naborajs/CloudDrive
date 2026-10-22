@@ -57,9 +57,19 @@ After a successful build and after a TeraBox remote has been configured locally 
 powershell.exe -NoProfile -File .\scripts\Start-ReadOnlyMount.ps1
 ```
 
-The launcher verifies the build manifest and file hashes, checks that T: is free and the cache volume is NTFS with at least 25 GiB free, confirms the rclone configuration is encrypted and decryptable, then runs rclone visibly in the signed-in user's session. The encryption check and the mount are separate rclone processes, so the config password may be requested twice. Press Ctrl+C in that window to unmount. It does not write remotely, create a startup task, or delete cache files.
+The launcher verifies the build manifest and file hashes, checks that T: is free and the cache volume is NTFS with at least 25 GiB free, confirms the rclone configuration is encrypted and decryptable, then runs rclone visibly in the signed-in user's session. It uses the local DPAPI helper below to unlock the config without prompting twice or putting the unlock password in command-line arguments. Press Ctrl+C in that window to unmount. It does not write remotely, create a startup task, or delete cache files.
 
-No safe local sign-in flow for the unofficial cookie-based backend has been established yet. Do not paste session values into chat, scripts, logs, or this repository. The launcher is scaffolding for a later locally configured and reviewed test; a successful script parse or build is not proof that a live T: mount works.
+### Optional local config unlock
+
+After an encrypted rclone config has been prepared locally, you can store its **config-encryption password** for the current Windows account:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\RcloneConfigPassword.ps1 -Store
+```
+
+The password is entered through a hidden prompt and exported as a current-user DPAPI-protected PowerShell credential under `%LOCALAPPDATA%\NSCloudDrive\credentials`, with an ACL limited to that user and SYSTEM. The launcher supplies it to rclone through its documented password-command interface. This is a convenience for unlocking the encrypted rclone file; it does not create a TeraBox login, store a TeraBox cookie, prove the backend works, or create a startup task. A process or attacker already running as the same Windows user may still be able to use or retrieve the credential. To remove it, delete `rclone-config.xml` from that folder while the mount is stopped.
+
+No compliant sign-in flow for the unofficial cookie-based backend has been established yet. Do not paste session values into chat, scripts, logs, or this repository. The launcher is scaffolding for a later locally configured and reviewed test; a successful script parse or build is not proof that a live T: mount works.
 
 ## License
 
