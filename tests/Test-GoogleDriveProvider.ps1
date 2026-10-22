@@ -193,6 +193,54 @@ try {
     }
     Write-Output '  [PASS] Publisher configuration import, placeholder filtering, and client secret discovery verified'
 
+    # 8. Test multi-account token isolation and remote environment generation
+    $personalTokens = @{
+        access_token = 'personal_access_token_123'
+        refresh_token = 'personal_refresh_token_456'
+        token_type = 'Bearer'
+        expires_in = 3600
+        scope = 'https://www.googleapis.com/auth/drive.readonly'
+    }
+    $workTokens = @{
+        access_token = 'work_access_token_789'
+        refresh_token = 'work_refresh_token_012'
+        token_type = 'Bearer'
+        expires_in = 3600
+        scope = 'https://www.googleapis.com/auth/drive.readonly'
+    }
+
+    Save-GoogleDriveTokens -TokenData $personalTokens -AccountId 'gdrive_personal'
+    Save-GoogleDriveTokens -TokenData $workTokens -AccountId 'gdrive_work'
+
+    $loadedPersonal = Get-GoogleDriveStoredTokens -AccountId 'gdrive_personal'
+    $loadedWork = Get-GoogleDriveStoredTokens -AccountId 'gdrive_work'
+
+    if (-not $loadedPersonal -or $loadedPersonal.access_token -ne 'personal_access_token_123') {
+        throw 'Failed to load isolated personal tokens'
+    }
+    if (-not $loadedWork -or $loadedWork.access_token -ne 'work_access_token_789') {
+        throw 'Failed to load isolated work tokens'
+    }
+
+    $workRclone = Get-GoogleDriveRcloneEnvironment -AccountId 'gdrive_work' -RemoteName 'gdrive_work'
+    if ($workRclone['RCLONE_CONFIG_GDRIVE_WORK_TYPE'] -ne 'drive') {
+        throw 'Expected RCLONE_CONFIG_GDRIVE_WORK_TYPE to be drive'
+    }
+    $workParsed = $workRclone['RCLONE_CONFIG_GDRIVE_WORK_TOKEN'] | ConvertFrom-Json
+    if ($workParsed.access_token -ne 'work_access_token_789') {
+        throw 'Work rclone token does not match work account access token'
+    }
+
+    Remove-GoogleDriveSession -AccountId 'gdrive_personal'
+    if (Get-GoogleDriveStoredTokens -AccountId 'gdrive_personal') {
+        throw 'Expected personal account tokens to be removed'
+    }
+    if (-not (Get-GoogleDriveStoredTokens -AccountId 'gdrive_work')) {
+        throw 'Work account tokens should remain after personal account removal'
+    }
+    Remove-GoogleDriveSession -AccountId 'gdrive_work'
+    Write-Output '  [PASS] Multi-account Google Drive token isolation and dynamic rclone remotes verified'
+
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue

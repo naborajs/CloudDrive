@@ -7,8 +7,13 @@ function Get-GoogleCredentialDirectory {
     return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
 }
 
-function Get-GoogleCredentialFilePath {
-    return (Join-Path (Get-GoogleCredentialDirectory) 'google-drive-tokens.xml')
+function Get-GoogleCredentialFilePath([string]$AccountId = '') {
+    $dir = Get-GoogleCredentialDirectory
+    if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+        $clean = ($AccountId -replace '[^a-zA-Z0-9_\-]', '_')
+        return (Join-Path $dir "google-drive-tokens-$clean.xml")
+    }
+    return (Join-Path $dir 'google-drive-tokens.xml')
 }
 
 $script:GoogleAuthEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -77,10 +82,19 @@ function New-PkceChallenge([string]$Verifier) {
     return [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 
-function Get-GoogleDriveStoredTokens {
-    $credPath = Get-GoogleCredentialFilePath
+function Get-GoogleDriveStoredTokens([string]$AccountId = '') {
+    $credPath = Get-GoogleCredentialFilePath -AccountId $AccountId
     if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
-        return $null
+        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            $defaultPath = Get-GoogleCredentialFilePath
+            if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
+                $credPath = $defaultPath
+            } else {
+                return $null
+            }
+        } else {
+            return $null
+        }
     }
 
     try {
@@ -104,13 +118,13 @@ function Get-GoogleDriveStoredTokens {
     return $null
 }
 
-function Save-GoogleDriveTokens([hashtable]$TokenData) {
+function Save-GoogleDriveTokens([hashtable]$TokenData, [string]$AccountId = '') {
     if (-not $TokenData -or -not $TokenData.access_token) {
         throw 'Cannot store invalid Google Drive tokens.'
     }
 
     $credDir = Get-GoogleCredentialDirectory
-    $credPath = Get-GoogleCredentialFilePath
+    $credPath = Get-GoogleCredentialFilePath -AccountId $AccountId
 
     if (-not (Test-Path -LiteralPath $credDir)) {
         New-Item -ItemType Directory -Path $credDir | Out-Null
@@ -128,8 +142,8 @@ function Save-GoogleDriveTokens([hashtable]$TokenData) {
     }
 }
 
-function Remove-GoogleDriveSession {
-    $tokens = Get-GoogleDriveStoredTokens
+function Remove-GoogleDriveSession([string]$AccountId = '') {
+    $tokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
     $tokenToRevoke = if ($tokens -and $tokens.refresh_token) { $tokens.refresh_token } elseif ($tokens -and $tokens.access_token) { $tokens.access_token } else { $null }
     if ($tokenToRevoke) {
         try {
@@ -139,7 +153,7 @@ function Remove-GoogleDriveSession {
         } catch { }
     }
 
-    $credPath = Get-GoogleCredentialFilePath
+    $credPath = Get-GoogleCredentialFilePath -AccountId $AccountId
     if (Test-Path -LiteralPath $credPath) {
         Remove-Item -LiteralPath $credPath -Force -ErrorAction SilentlyContinue
     }
@@ -269,7 +283,8 @@ function Build-GoogleAuthorizationUrl(
     [string]$RedirectUri,
     [string]$State,
     [string]$CodeChallenge = $null,
-    [string]$Scope = $script:GoogleDefaultScope
+    [string]$Scope = $script:GoogleDefaultScope,
+    [string]$Prompt = 'select_account consent'
 ) {
     if ([string]::IsNullOrEmpty($ClientId)) {
         throw 'Cannot build authorization URL without a valid Client ID.'
@@ -278,8 +293,9 @@ function Build-GoogleAuthorizationUrl(
     $escRedirect = [System.Uri]::EscapeDataString($RedirectUri)
     $escScope = [System.Uri]::EscapeDataString($Scope)
     $escState = [System.Uri]::EscapeDataString($State)
+    $escPrompt = [System.Uri]::EscapeDataString($Prompt)
 
-    $url = "$($script:GoogleAuthEndpoint)?client_id=$escClient&redirect_uri=$escRedirect&response_type=code&scope=$escScope&state=$escState&access_type=offline&prompt=consent"
+    $url = "$($script:GoogleAuthEndpoint)?client_id=$escClient&redirect_uri=$escRedirect&response_type=code&scope=$escScope&state=$escState&access_type=offline&prompt=$escPrompt"
     if (-not [string]::IsNullOrEmpty($CodeChallenge)) {
         $escChallenge = [System.Uri]::EscapeDataString($CodeChallenge)
         $url += "&code_challenge=$escChallenge&code_challenge_method=S256"
@@ -466,7 +482,7 @@ function Exchange-GoogleAuthCode(
     }
 }
 
-function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [string]$RefreshToken) {
+function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [string]$RefreshToken, [string]$AccountId = '') {
     $body = @{
         client_id = $ClientId
         refresh_token = $RefreshToken
@@ -479,7 +495,7 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
     try {
         $response = Invoke-RestMethod -Uri $script:GoogleTokenEndpoint -Method Post -Body $body -TimeoutSec 15 -ErrorAction Stop
         if ($response -and $response.access_token) {
-            $currentTokens = Get-GoogleDriveStoredTokens
+            $currentTokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
             $tokenData = [ordered]@{
                 access_token = $response.access_token
                 refresh_token = $(if ($response.refresh_token) { $response.refresh_token } else { $RefreshToken })
@@ -488,7 +504,7 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
                 scope = $(if ($response.scope) { $response.scope } else { $currentTokens.scope })
                 obtained_at = [DateTime]::UtcNow.ToString('o')
             }
-            Save-GoogleDriveTokens -TokenData $tokenData
+            Save-GoogleDriveTokens -TokenData $tokenData -AccountId $AccountId
             return [ordered]@{
                 Success = $true
                 Tokens = $tokenData
@@ -509,8 +525,8 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
     }
 }
 
-function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$TokensOverride = $null) {
-    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens }
+function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
+    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     if (-not $tokens -or -not $tokens.access_token) {
         throw 'No Google Drive tokens available.'
     }
@@ -525,7 +541,7 @@ function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$Tok
             # Attempt automatic token refresh
             $oauthConfig = Get-GoogleOAuthConfig
             if ($oauthConfig -and $oauthConfig.ClientId) {
-                $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token
+                $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token -AccountId $AccountId
                 if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
                     # Retry once with newly refreshed access token
                     return (& $ApiAction $refreshResult.Tokens.access_token)
@@ -536,8 +552,8 @@ function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$Tok
     }
 }
 
-function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
-    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens }
+function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [string]$AccountId = '') {
+    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     if (-not $tokens -or -not $tokens.access_token) {
         return [ordered]@{
             IsValid = $false
@@ -548,7 +564,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
     }
 
     try {
-        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -ApiAction {
+        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
             param([string]$accessToken)
             $headers = @{
                 'Authorization' = "Bearer $accessToken"
@@ -588,8 +604,8 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null) {
     }
 }
 
-function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride = $null) {
-    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens }
+function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
+    $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     if (-not $tokens -or -not $tokens.access_token) {
         return [ordered]@{
             Success = $false
@@ -599,7 +615,7 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     }
 
     try {
-        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -ApiAction {
+        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
             param([string]$accessToken)
             $headers = @{
                 'Authorization' = "Bearer $accessToken"
@@ -638,18 +654,21 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     }
 }
 
-function Get-GoogleDriveRcloneEnvironment {
-    $tokens = Get-GoogleDriveStoredTokens
+function Get-GoogleDriveRcloneEnvironment([string]$AccountId = '', [string]$RemoteName = 'gdrive') {
+    $tokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
     $oauthConfig = Get-GoogleOAuthConfig
     if (-not $tokens -or -not $tokens.access_token) {
         throw 'No Google Drive tokens available to configure rclone environment.'
     }
 
+    $hasObtainedAt = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
+    $hasExpiresIn = ($tokens.PSObject.Properties['expires_in'] -and $tokens.expires_in)
+
     $tokenObj = [ordered]@{
         access_token = $tokens.access_token
-        token_type = if ($tokens.token_type) { $tokens.token_type } else { 'Bearer' }
-        refresh_token = $tokens.refresh_token
-        expiry = if ($tokens.obtained_at -and $tokens.expires_in) {
+        token_type = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
+        refresh_token = if ($tokens.PSObject.Properties['refresh_token']) { $tokens.refresh_token } else { $null }
+        expiry = if ($hasObtainedAt -and $hasExpiresIn) {
             try {
                 ([DateTime]::Parse($tokens.obtained_at).AddSeconds($tokens.expires_in)).ToString('o')
             } catch {
@@ -661,17 +680,19 @@ function Get-GoogleDriveRcloneEnvironment {
     }
     $tokenJson = $tokenObj | ConvertTo-Json -Compress
 
+    $upperRemote = $RemoteName.ToUpperInvariant()
+
     $envMap = @{
-        'RCLONE_CONFIG_GDRIVE_TYPE' = 'drive'
-        'RCLONE_CONFIG_GDRIVE_SCOPE' = 'drive.readonly'
-        'RCLONE_CONFIG_GDRIVE_TOKEN' = $tokenJson
+        "RCLONE_CONFIG_${upperRemote}_TYPE" = 'drive'
+        "RCLONE_CONFIG_${upperRemote}_SCOPE" = 'drive.readonly'
+        "RCLONE_CONFIG_${upperRemote}_TOKEN" = $tokenJson
     }
 
     if ($oauthConfig.ClientId) {
-        $envMap['RCLONE_CONFIG_GDRIVE_CLIENT_ID'] = $oauthConfig.ClientId
+        $envMap["RCLONE_CONFIG_${upperRemote}_CLIENT_ID"] = $oauthConfig.ClientId
     }
     if ($oauthConfig.ClientSecret) {
-        $envMap['RCLONE_CONFIG_GDRIVE_CLIENT_SECRET'] = $oauthConfig.ClientSecret
+        $envMap["RCLONE_CONFIG_${upperRemote}_CLIENT_SECRET"] = $oauthConfig.ClientSecret
     }
 
     return $envMap
