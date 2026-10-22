@@ -22,6 +22,7 @@ function Get-DefaultSettings {
             gdrive = 'G'
             terabox = 'T'
         }
+        Accounts = @()
     }
 }
 
@@ -36,6 +37,23 @@ function Get-NSCloudDriveSettings {
         $json = $raw | ConvertFrom-Json
         $defaults = Get-DefaultSettings
 
+        $accountsList = @()
+        if ($json.PSObject.Properties['Accounts'] -and $json.Accounts) {
+            foreach ($acc in $json.Accounts) {
+                if ($acc -and $acc.PSObject.Properties['Id']) {
+                    $accountsList += [ordered]@{
+                        Id = [string]$acc.Id
+                        ProviderId = [string]$acc.ProviderId
+                        DisplayName = if ($acc.PSObject.Properties['DisplayName'] -and $acc.DisplayName) { [string]$acc.DisplayName } else { [string]$acc.Id }
+                        AccountEmail = if ($acc.PSObject.Properties['AccountEmail'] -and $acc.AccountEmail) { [string]$acc.AccountEmail } else { '' }
+                        DriveLetter = if ($acc.PSObject.Properties['DriveLetter'] -and $acc.DriveLetter) { [string]$acc.DriveLetter } else { '' }
+                        AutoMount = if ($acc.PSObject.Properties['AutoMount'] -and $null -ne $acc.AutoMount) { [bool]$acc.AutoMount } else { $true }
+                        Created = if ($acc.PSObject.Properties['Created'] -and $acc.Created) { [string]$acc.Created } else { [DateTime]::UtcNow.ToString('o') }
+                    }
+                }
+            }
+        }
+
         $settings = [ordered]@{
             AutoStartWithWindows = if ($json.PSObject.Properties['AutoStartWithWindows'] -and $null -ne $json.AutoStartWithWindows) { [bool]$json.AutoStartWithWindows } else { $defaults.AutoStartWithWindows }
             AutoMountDrives = if ($json.PSObject.Properties['AutoMountDrives'] -and $null -ne $json.AutoMountDrives) { [bool]$json.AutoMountDrives } else { $defaults.AutoMountDrives }
@@ -48,6 +66,7 @@ function Get-NSCloudDriveSettings {
                 gdrive = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['gdrive']) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
                 terabox = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['terabox']) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
             }
+            Accounts = $accountsList
         }
         return $settings
     } catch {
@@ -90,6 +109,145 @@ function Set-PreferredDriveLetter([string]$ProviderId, [string]$Letter) {
     }
     $settings.ProviderDriveLetters[$ProviderId] = $cleanLetter
     Set-NSCloudDriveSettings $settings
+}
+
+function Get-CloudAccounts {
+    $settings = Get-NSCloudDriveSettings
+    $list = @()
+    if ($settings.Accounts -and $settings.Accounts.Count -gt 0) {
+        foreach ($acc in $settings.Accounts) {
+            $item = [ordered]@{
+                Id = [string]$acc.Id
+                ProviderId = [string]$acc.ProviderId
+                DisplayName = [string]$acc.DisplayName
+                AccountEmail = [string]$acc.AccountEmail
+                DriveLetter = [string]$acc.DriveLetter
+                AutoMount = if ($null -ne $acc.AutoMount) { [bool]$acc.AutoMount } else { $true }
+                Created = if ($acc.Created) { [string]$acc.Created } else { [DateTime]::UtcNow.ToString('o') }
+            }
+            $list += $item
+        }
+    }
+    if ($list.Count -eq 0) {
+        return @()
+    }
+    return ,$list
+}
+
+function Get-CloudAccount([string]$AccountId) {
+    if (-not $AccountId) { return $null }
+    $accounts = Get-CloudAccounts
+    foreach ($a in $accounts) {
+        if ($a.Id -eq $AccountId) {
+            return $a
+        }
+    }
+    return $null
+}
+
+function Add-CloudAccount([hashtable]$Account) {
+    if (-not $Account -or -not $Account.ContainsKey('Id') -or -not $Account.Id) {
+        throw 'Account with valid Id is required.'
+    }
+
+    $settings = Get-NSCloudDriveSettings
+    $accounts = @()
+    if ($settings.Accounts) {
+        foreach ($a in $settings.Accounts) {
+            if ($a.Id -ne $Account.Id) {
+                $accounts += $a
+            }
+        }
+    }
+
+    $cleanLetter = if ($Account.ContainsKey('DriveLetter') -and $Account.DriveLetter) {
+        [string]$Account.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    } else {
+        ''
+    }
+
+    $item = [ordered]@{
+        Id = [string]$Account.Id
+        ProviderId = [string]$Account.ProviderId
+        DisplayName = if ($Account.ContainsKey('DisplayName') -and $Account.DisplayName) { [string]$Account.DisplayName } else { [string]$Account.Id }
+        AccountEmail = if ($Account.ContainsKey('AccountEmail') -and $Account.AccountEmail) { [string]$Account.AccountEmail } else { '' }
+        DriveLetter = $cleanLetter
+        AutoMount = if ($Account.ContainsKey('AutoMount') -and $null -ne $Account.AutoMount) { [bool]$Account.AutoMount } else { $true }
+        Created = if ($Account.ContainsKey('Created') -and $Account.Created) { [string]$Account.Created } else { [DateTime]::UtcNow.ToString('o') }
+    }
+
+    $accounts += $item
+    $settings.Accounts = $accounts
+    Set-NSCloudDriveSettings $settings
+    return $item
+}
+
+function Remove-CloudAccount([string]$AccountId) {
+    if (-not $AccountId) { return $false }
+    $settings = Get-NSCloudDriveSettings
+    $accounts = @()
+    $found = $false
+    if ($settings.Accounts) {
+        foreach ($a in $settings.Accounts) {
+            if ($a.Id -eq $AccountId) {
+                $found = $true
+            } else {
+                $accounts += $a
+            }
+        }
+    }
+    if ($found) {
+        $settings.Accounts = $accounts
+        Set-NSCloudDriveSettings $settings
+    }
+    return $found
+}
+
+function Get-AllocatedDriveLetters {
+    $accounts = Get-CloudAccounts
+    $letters = @()
+    foreach ($acc in $accounts) {
+        if ($acc.DriveLetter) {
+            $clean = [string]$acc.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+            if ($clean.Length -eq 1 -and $clean -match '^[A-Z]$' -and -not ($letters -contains $clean)) {
+                $letters += $clean
+            }
+        }
+    }
+    if ($letters.Count -eq 0) {
+        return @()
+    }
+    return ,$letters
+}
+
+function Get-NextAvailableDriveLetter([string]$Preferred = 'G') {
+    $occupied = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+            [void]$occupied.Add($d.Name.Substring(0, 1).ToUpperInvariant())
+        }
+    } catch { }
+
+    $allocated = Get-AllocatedDriveLetters
+    foreach ($a in $allocated) {
+        if (-not [string]::IsNullOrWhiteSpace($a)) {
+            [void]$occupied.Add($a.Substring(0, 1).ToUpperInvariant())
+        }
+    }
+
+    $cleanPref = $Preferred.Trim().TrimEnd(':').TrimEnd('\').ToUpperInvariant()
+    if ($cleanPref.Length -eq 1 -and $cleanPref -match '^[A-Z]$' -and -not $occupied.Contains($cleanPref)) {
+        return $cleanPref
+    }
+
+    $candidates = @('G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','E','F')
+    foreach ($cand in $candidates) {
+        if (-not $occupied.Contains($cand)) {
+            return $cand
+        }
+    }
+
+    return 'Z'
 }
 
 function Test-WindowsStartupEnabled {
