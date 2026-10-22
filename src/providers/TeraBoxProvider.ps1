@@ -282,10 +282,16 @@ function Invoke-TeraBoxHttp(
         }
 
         $resp = $task.Result
+        $prefix = $null
+        if ($resp.Headers.Contains('Url-Domain-Prefix')) {
+            $prefix = ($resp.Headers.GetValues('Url-Domain-Prefix') | Select-Object -First 1)
+        }
+
         if ([int]$resp.StatusCode -ge 300 -and [int]$resp.StatusCode -lt 400) {
             return [ordered]@{
                 errno = -6
                 error = 'TeraBox redirected the request (session expired or login required).'
+                UrlDomainPrefix = $prefix
             }
         }
 
@@ -293,6 +299,7 @@ function Invoke-TeraBoxHttp(
             return [ordered]@{
                 errno = -6
                 error = "HTTP status $([int]$resp.StatusCode) ($($resp.ReasonPhrase))"
+                UrlDomainPrefix = $prefix
             }
         }
 
@@ -370,12 +377,7 @@ function Test-TeraBoxBackendSession(
             }
         }
 
-        $response = $null
-        if ($Window) {
-            $response = Invoke-TeraBoxHttp -Url $checkUrl -Headers $headers -TimeoutSec 15 -Window $Window
-        } else {
-            $response = Invoke-RestMethod -Uri $checkUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
-        }
+        $response = Invoke-TeraBoxHttp -Url $checkUrl -Headers $headers -TimeoutSec 15 -Window $Window
 
         $errno = Get-SafeProperty $response 'errno' $null
         $prefix = Get-SafeProperty $response 'UrlDomainPrefix' $null
@@ -389,14 +391,13 @@ function Test-TeraBoxBackendSession(
                 if ($session.JsToken) {
                     $retryUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
                 }
-                if ($Window) {
-                    $response = Invoke-TeraBoxHttp -Url $retryUrl -Headers $headers -TimeoutSec 15 -Window $Window
-                } else {
-                    $response = Invoke-RestMethod -Uri $retryUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
-                }
+                $response = Invoke-TeraBoxHttp -Url $retryUrl -Headers $headers -TimeoutSec 15 -Window $Window
                 $errno = Get-SafeProperty $response 'errno' $null
                 if ($null -ne $errno -and [int]$errno -eq 0) {
                     $baseUrl = $switchedBaseUrl
+                    try {
+                        Save-TeraBoxSession -Type $session.Type -Secret $session.Secret -JsToken $session.JsToken -BaseUrl $baseUrl -UserAgent $activeUserAgent
+                    } catch { }
                 }
             }
         }
@@ -405,6 +406,19 @@ function Test-TeraBoxBackendSession(
             $uname = Get-SafeProperty $response 'username' $null
             if (-not $uname) { $uname = Get-SafeProperty $response 'user_name' $null }
             if (-not $uname) { $uname = Get-SafeProperty $response 'uname' $null }
+
+            $quotaTotal = [int64]0
+            $quotaUsed = [int64]0
+            try {
+                $quotaUrl = "$baseUrl/api/quota?checkexpire=1&checkfree=1"
+                $qResp = Invoke-TeraBoxHttp -Url $quotaUrl -Headers $headers -TimeoutSec 10 -Window $Window
+                if ($qResp) {
+                    $t = Get-SafeProperty $qResp 'total' 0
+                    $u = Get-SafeProperty $qResp 'used' 0
+                    if ($t) { $quotaTotal = [int64]$t }
+                    if ($u) { $quotaUsed = [int64]$u }
+                }
+            } catch { }
 
             $displayName = if ($uname) {
                 [string]$uname
@@ -426,6 +440,8 @@ function Test-TeraBoxBackendSession(
                     Uk = $uk
                     BaseUrl = $baseUrl
                     UserAgent = $activeUserAgent
+                    QuotaTotalBytes = $quotaTotal
+                    QuotaUsedBytes = $quotaUsed
                 }
             }
         } else {
