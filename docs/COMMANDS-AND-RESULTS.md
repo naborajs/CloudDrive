@@ -11,6 +11,7 @@
 | Shallow-clone `gulp79/rclone-extra` tag `v1.75.2-extra` and verify `HEAD` | `56bf13885494819bc801302ddf881279bdac7262`. | Public source checkout only; no release binary was downloaded or executed. |
 | Recheck Windows build prerequisites | Git `2.55.0.windows.2` is present. Go, `x86_64-w64-mingw32-gcc`, `x86_64-w64-mingw32-g++`, `rclone.exe`, standard WinFsp x64 runtime DLL, and WinFsp `fuse.h` are absent. `dotnet.exe` exists but no .NET SDK is installed; neither is a Go-build prerequisite. | Command/path probes only; nothing installed. The exact standard WinFsp locations checked are recorded in [FEASIBILITY.md](FEASIBILITY.md). |
 | Apply the committed cookie-safety patch to a clean detached worktree at that tag | `git apply --check`, patch application, and `git diff --check` passed; the changed source file is `backend/terabox/terabox.go`. | Static patch-application test only; no Go compiler is installed and no runtime secret-redaction test ran. |
+| Re-audit HTTP dump redaction in the exact pinned source | The pinned `fs/fshttp` helper originally redacted `Authorization` and `X-Auth-Token`, but not request `Cookie` or response `Set-Cookie`; response dumps were logged without passing through the redactor. The project patch now adds those headers, handles repeated matching header lines, sanitizes response dumps unless explicit `--dump auth` is selected, and adds synthetic helper/curl unit cases. | Public source clone verified at `56bf13885494819bc801302ddf881279bdac7262`; `git apply --check` passed, then patch application and source `git diff --check` passed in an isolated temporary clone. The project patch diff was reviewed. The sanitizer retains the upstream 4 KiB search window. Go is absent, so tests—including response-dump integration—and the patched build were not run. Explicit `--dump auth` remains a sensitive opt-in and is not used by the NS Cloud Drive launcher. |
 | Inspect pinned backend debug calls and option registry | `fs.Option.Sensitive` exists in the pinned rclone source; backend `debug()` returns when `DebugLevel < level`; `NewFs` contains the complete-options debug call removed by the patch. | Source review only. The patch pins backend debug level to zero, disabling all backend-specific debug traces. |
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
 | Run the original `scripts/Build-PatchedRclone.ps1` with the original cgo prerequisites | Reproduced exact first error: `Exception: ...\scripts\Build-PatchedRclone.ps1:23` followed by `WinFsp FUSE development header fuse.h was not found under: C:\Program Files (x86)\WinFsp\inc\fuse`. The build root did not exist afterward. | Stopped at its first preflight guard, before source clone/download or build. This triggered review of the no-cgo route; no installation or source build occurred. |
@@ -108,6 +109,10 @@ Each commit changed one file and was pushed to `origin/main`:
 - `58b34cb` — update build acceptance prerequisites.
 - `56290ec` — record Go toolchain in build manifest.
 - `3372d40` — document build manifest evidence fields.
+- `92795c3` — clarify build manifest verification scope.
+- `1fb4d03` — record current builder execution policy block.
+- `f9edfca` — redact TeraBox cookies from HTTP dumps.
+- `23ba3c4` — document expanded cookie dump redaction.
 
 ## Required next evidence
 
