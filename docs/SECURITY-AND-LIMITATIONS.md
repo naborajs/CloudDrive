@@ -63,15 +63,22 @@ Do not read WebView2 cookies, copy its profile database, inject cookies into rcl
 - Rclone and WinFsp provide filesystem plumbing, not a promise that every Windows application will behave as if T: were a local SSD.
 - Games, active codebases, Git operations, package managers, and builds can fail or become slow because of network latency, random I/O, locks, session expiry, throttling, and remote filesystem behavior. Keep active work local and copy closed files/projects to cloud storage.
 
-## Not implemented or not verified
+## Provider authentication and security architecture
 
-- No compliant TeraBox sign-in or session renewal implementation. The backend's cookie-based setup is blocked; the DPAPI helper protects only the separate rclone config-encryption password.
-- The backend patch exists, but has not been compiled; no synthetic-secret logging or config-redaction test has run.
-- The DPAPI helper's synthetic read-back and temporary ACL checks passed in the current host, but the interactive save flow, native PowerShell subprocess, encrypted-config mount path, and actual rclone password-command integration have not been tested.
-- No mount manager, health-state machine, or clean-unmount implementation.
-- No cache usage reporting or pending-write state tracking.
-- No startup task/service has been created.
-- The startup task manager exists but has not registered a task or been tested; the explicit acceptance gate is not evidence that the read-only acceptance tests passed.
-- No remote account, Explorer drive, read, write, interruption, eviction, or recovery behavior has been tested.
+- **Multi-provider model**: Connection interfaces are isolated per provider (`TeraBoxProvider.ps1`, `GoogleDriveProvider.ps1`) and coordinated through a strict 10-state lifecycle model (`ConnectionState.ps1`). State transitions fail closed and prevent premature mount operations until file query verification succeeds.
+- **Google Drive OAuth 2.0**: Uses RFC 8252 loopback authorization with cryptographically random `state` parameter validation to prevent CSRF attacks. Access scope defaults to the minimum required read-only permission (`drive.readonly`). Local loopback listener runs strictly on `127.0.0.1` and halts after single callback processing or timeout.
+- **DPAPI credential protection**: Stored provider sessions and OAuth tokens are protected using Windows Data Protection API (DPAPI) tied to the current interactive user, with explicit NTFS file security rules granting access exclusively to the current user SID and SYSTEM.
+- **Diagnostics sanitization**: Diagnostic messages and log buffers pass through `Format-SanitizedDiagnosticMessage`, which strips all access tokens, refresh tokens, client secrets, auth codes, ndus values, cookies, Bearer tokens, and passwords.
+- **Sign-out and revocation**: Disconnecting removes local credential files with explicit wipe and triggers remote token revocation where supported (e.g. Google OAuth revocation endpoint).
 
-Do not describe NS Cloud Drive as a functioning TeraBox mount until the corresponding evidence is recorded in [the acceptance plan](MANUAL-ACCEPTANCE.md) and [the command record](COMMANDS-AND-RESULTS.md).
+## Implemented and verified vs. remaining acceptance
+
+- **Verified via automated test suite (`tests/Run-AllTests.ps1`)**:
+  - Connection state machine transitions, metadata, and secret sanitization (`Test-ConnectionState.ps1`).
+  - TeraBox provider metadata, fail-closed handling, DPAPI storage, and scope validation (`Test-TeraBoxProvider.ps1`).
+  - Google Drive provider metadata, cryptographic state entropy, fail-closed handling, DPAPI tokens storage, and auth URL formatting (`Test-GoogleDriveProvider.ps1`).
+  - Virtual drive manager binary discovery, WinFsp detection, drive availability, and mount argument formatting (`Test-VirtualDriveManager.ps1`).
+  - DPAPI rclone config password helper (`Test-RcloneConfigPassword.ps1`).
+- **Remaining acceptance gates**:
+  - Interactive user login completion with live provider accounts.
+  - Verification of File Explorer `T:\` access to a real remote file.
