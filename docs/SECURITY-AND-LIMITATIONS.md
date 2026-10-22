@@ -28,6 +28,7 @@
 ## Cache and data integrity
 
 - The VFS cache contains local content, including potentially sensitive user files. Default it to the user's `D:\CloudCache\TeraBox` only after checking that D: is available, NTFS, writable, and has enough free space.
+- The read-only mount launcher now requires an absolute local path on a ready fixed NTFS volume, at least 25 GiB free, and a cache directory below the volume root. It rejects existing junctions or symbolic links in the target path and checks again after creating missing folders. This is path validation, not protection against later same-user changes, and it has not been tested during a real mount.
 - `--vfs-cache-max-size` and `--vfs-cache-max-age` are eviction targets, not strict quotas. Open files and periodic checks can keep actual usage above the target.
 - A pending or uncertain write is user data, not disposable cache. Never delete cache contents on exit, reconnect, uninstall, or mount failure. Preserve them until the remote copy is independently verified or the user explicitly resolves the conflict.
 - Do not infer upload success from file close, an exit code, or a local appearance. Verify remote state independently during writable acceptance tests.
