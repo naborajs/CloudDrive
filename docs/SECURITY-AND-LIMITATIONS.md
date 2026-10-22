@@ -14,6 +14,12 @@
 - The third-party QR helper is not TeraBox's documented Open API device-code flow: it imitates browser headers against website login endpoints, extracts ndus, passes it as an rclone config command-line argument, and stores it in ordinary config. It is not compatible with this project's no-browser-impersonation and secret-handling requirements; we did not run it.
 - No account was authenticated, no user files were listed, and no remote file operation was executed.
 
+### Pinned-source authentication review (2026-10-22)
+
+The exact pinned `gulp79/rclone-extra` source accepts either a full website cookie or `ndus`; the API client adds that configured value to the HTTP `Cookie` header. Its `NewFs` path logs the complete options struct at backend debug level 1, and the backend debug helper emits messages when the configured level allows it. The source review found no supported interactive sign-in, refresh, or cookie-renewal routine. An invalid-cookie response is an error; cached `jsToken`, base URL, and time-limited metadata are not a session refresh mechanism. The credential would be supplied through the rclone remote configuration, which must be encrypted/protected separately and is still not a permitted app-managed login flow.
+
+The committed source patch targets the discovered explicit exposure: it marks `cookie` as sensitive for rclone option handling, removes the full-options debug call, and fixes backend debug output to off. Patch-apply success does **not** establish that the patch compiles, that every rclone/config/HTTP error path is sanitized, or that all diagnostics redact synthetic credentials. No runtime log/config-redaction test has passed. Treat the patch as an unverified mitigation, not proof that credentials cannot enter logs. The unresolved manual website-cookie requirement remains sufficient reason to keep authentication and real-account testing blocked.
+
 ## Secret-handling requirements before adding sign-in
 
 1. Compile the pinned patch and add tests proving a synthetic secret never appears in logs, exceptions, config-redacted output, or diagnostics. The current patch is not yet a security guarantee.
