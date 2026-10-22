@@ -17,6 +17,8 @@ The pinned `gulp79/rclone-extra` tag and source patch are identified, and patch 
 
 The backend requires a website cookie/`ndus`, transmits it in the Cookie header, and has no supported interactive login or renewal path. Its level-1 setup debug call includes the complete options struct. A source patch addresses the debug disclosure path but is uncompiled and has not passed synthetic-secret or config-redaction tests. Authentication is therefore not ready for account testing, even if a source build succeeds. Do not request or handle session credentials to unblock development.
 
+The embedded-browser review found no safe supported bridge: WebView2 can persist its own per-user browser profile, but Microsoft warns against scraping credentials from embedded authentication, and TeraBox/backend documentation provides no browser-to-rclone handoff or renewal contract. Replaying extracted cookies is not established as a publicly supported TeraBox interface, so do not implement cookie extraction or a login UI that suggests it can connect the mount. The official Open API is a separate candidate requiring TeraBox app approval and currently documented application-folder scope; it does not establish existing-root access. Keep auth and mount controls locked. Reopen this gate only after TeraBox confirms a supported Windows desktop flow and the required existing-account scope; then prototype the official flow independently of the mount manager.
+
 ## Architecture
 
 Keep the Windows application split into these replaceable parts:
