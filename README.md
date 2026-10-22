@@ -71,6 +71,22 @@ The password is entered through a hidden prompt and exported as a current-user D
 
 No compliant sign-in flow for the unofficial cookie-based backend has been established yet. Do not paste session values into chat, scripts, logs, or this repository. The launcher is scaffolding for a later locally configured and reviewed test; a successful script parse or build is not proof that a live T: mount works.
 
+### Optional sign-in startup
+
+After the backend and local authentication pass the manual read-only acceptance checks, the per-user task can be registered explicitly:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Manage-UserMountStartup.ps1 -Enable -ReadOnlyAcceptancePassed
+```
+
+This registers a limited, interactive-user logon task for the **read-only** mount. It does not start the task immediately, run as SYSTEM, or elevate. The task has up to three scheduled retries if startup fails. To remove the task:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Manage-UserMountStartup.ps1 -Remove
+```
+
+The task has not been registered or tested on this PC. It does not prove network reconnect behavior; connection recovery and visible failure reporting remain acceptance work. Do not enable it until the documented live read-only checks pass.
+
 ## License
 
 License terms will be selected and documented before distributing application binaries or source derived from third-party projects.
