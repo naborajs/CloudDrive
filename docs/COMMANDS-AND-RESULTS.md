@@ -164,8 +164,8 @@ Each commit changed one file and was pushed to `origin/main`:
 
 Run `powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1`:
 - `Test-ConnectionState.ps1`: Verified 10 connection states, valid state machine transitions, fail-closed invalid transition rejection, and sensitive credential sanitization across JSON payloads, URL queries, and raw tokens.
-- `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence in sandboxed LOCALAPPDATA, and account scope validation.
-- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, RFC 7636 PKCE S256 verifier and official Appendix B test vector challenge computation, fail-closed handling without tokens, DPAPI-protected token persistence in sandboxed LOCALAPPDATA, rclone environment variable construction, Google installed client format JSON discovery without requiring client secret, OAuth authorization URL construction with PKCE challenge, and WebUtility HTML encoding.
+- `Test-TeraBoxProvider.ps1`: Verified provider metadata, fail-closed handling without session, DPAPI-protected session persistence in sandboxed LOCALAPPDATA, account scope validation, `Get-TeraBoxRcloneEnvironment` variable formatting (`RCLONE_CONFIG_TERABOX_TYPE` and `RCLONE_CONFIG_TERABOX_COOKIE`), and `Set-TeraBoxManualSession` fail-closed rejection of invalid credentials.
+- `Test-GoogleDriveProvider.ps1`: Verified provider metadata, cryptographic state generation entropy and URL-safety, RFC 7636 PKCE S256 verifier and official Appendix B test vector challenge computation, fail-closed handling without tokens, DPAPI-protected token persistence in sandboxed LOCALAPPDATA, rclone environment variable construction, Google installed client format JSON discovery without requiring client secret, OAuth authorization URL construction with PKCE challenge, WebUtility HTML encoding, publisher bundled configuration discovery (`config/google-oauth.json`), placeholder filtering, and one-click JSON credential import (`Import-GoogleOAuthConfigFile`).
 - `Test-VirtualDriveManager.ps1`: Verified rclone binary discovery, WinFsp runtime and service detection, drive availability checks, read-only VFS cache mount argument formatting with security flags, next available drive letter allocation and conflict resolution, distinct provider volume labels (`Google Drive`, `TeraBox`), cache usage statistics calculation, and multi-provider virtual drive status querying.
 - `Test-SettingsManager.ps1`: Verified default configuration generation, settings persistence across reloads, provider preferred drive letter mapping, and Windows user logon startup registry configuration with clean removal.
 - `Test-DesktopUIRegression.ps1`: Verified that no read-only `$pid` parameter declarations exist in `src/`, that `NSCloudDrive.ps1` and `ProviderConnectionWindow.ps1` explicitly disable horizontal scrollbar measurement to prevent layout overflow, that `NSCloudDrive.ps1` loads cleanly in an STA session, and that single-instance detection gracefully catches abandoned mutexes and restores running windows to the foreground.
@@ -203,6 +203,29 @@ Benchmark executed via `powershell.exe -NoProfile -File .\tests\Benchmark-Resour
 | Idle Private Memory | **143.80 MB** | `PrivateMemorySize64` dedicated memory commit |
 | Idle CPU Utilization | **0.10%** | Total processor time over 1.5s sample normalized across all logical cores |
 | Local Cache Storage | `D:\CloudCache` | Fixed NTFS volume with 124 GiB free; 20.00 GiB soft target limit |
+
+## Codex Audit Root-Cause Repairs & Verification (2026-10-23)
+
+### 1. Google Drive Authentication Pipeline
+- **Defect:** OAuth flow had PKCE and loopback handling, but authentication failed to start because no Client ID was discovered out of the box, requiring users to create individual Google Cloud projects.
+- **Fix:** Enhanced `Get-GoogleOAuthConfig` to support publisher bundled configurations (`config/google-oauth.json`, `google-client.json`), user config folders, and auto-discovery of downloaded `client_secret*.json` files in `Downloads`/`Desktop`. Added `Import-GoogleOAuthConfigFile` and an "Import client_secret.json" file dialog directly in `ProviderConnectionWindow.ps1`.
+- **Status:** Verified with automated test #8 in `Test-GoogleDriveProvider.ps1`. When the publisher or user supplies a Google OAuth client ID, the application opens the real Google authorization screen, exchanges code with PKCE, verifies the backend session via `/drive/v3/about`, and injects tokens into the rclone mount.
+
+### 2. TeraBox Feasibility, Scope, and Virtual Drive Pipeline
+- **Defect A (Handoff Failure):** The UI previously opened `terabox.com` in an external browser, which had no mechanism to hand tokens back to the desktop app.
+- **Defect B (Disconnected Credential Test):** The stored-session test checked a separate local credential file (`terabox-session.xml`) without an in-app method to connect or validate credentials.
+- **Defect C (Disconnected Virtual Drive):** The virtual drive manager invoked `rclone mount terabox: ...` without passing any session credentials or environment variables, causing mounts to fail immediately.
+- **Fixes Implemented:**
+  1. Implemented `Get-TeraBoxRcloneEnvironment` in `TeraBoxProvider.ps1`: Converts DPAPI-stored session secrets into `RCLONE_CONFIG_TERABOX_TYPE=terabox` and `RCLONE_CONFIG_TERABOX_COOKIE=ndus=<secret>` environment variables.
+  2. Integrated `Get-TeraBoxRcloneEnvironment` into `Start-VirtualDriveMount` in `NSCloudDrive.ps1` across manual mount, tray mount, and startup auto-mount handlers.
+  3. Added `Set-TeraBoxManualSession` with live backend validation against `https://www.terabox.com/api/check/login` and directory scope validation prior to DPAPI persistence.
+  4. Added interactive session input card in `ProviderConnectionWindow.ps1` for personal BYOC session connection with clear guidance on obtaining `ndus`.
+  5. Documented architectural reality: automated browser login cannot extract cookies without info-stealer techniques, and the official Open Platform API is restricted to `/From: Other Applications/<App_Name>/` and cannot access the user's root (`/`).
+
+### 3. Virtual Drive & Rclone Build Status
+- **Rclone Executable:** `C:\Users\Naboraj_sarkar\Downloads\CloudPlayX\tools\rclone\rclone.exe` is located, reporting `rclone v1.75.2-cloudplayx.3`, Windows amd64, and `cmount` tag. It natively supports Google Drive (`drive`) and WebDAV (`webdav`).
+- **Toolchain Status:** The local pinned `rclone-extra` build (`scripts/Build-PatchedRclone.ps1`) requires Go 1.26+ to compile the custom `terabox` Go backend. Because Go is not installed on this system, `Get-VerifiedRclonePath` gracefully reports the build requirement instead of crashing.
+- **WinFsp:** WinFsp 2.1 is running and verified.
 
 ## Required next evidence
 
