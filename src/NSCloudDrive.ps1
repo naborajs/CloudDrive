@@ -886,6 +886,12 @@ if ($Minimized) {
 
 if ($MyInvocation.InvocationName -ne '.') {
     $app = [System.Windows.Application]::new()
+    $app.Add_DispatcherUnhandledException({
+        param($sender, $e)
+        $msg = if ($e.Exception) { Format-SanitizedDiagnosticMessage $e.Exception.Message } else { 'Unknown dispatcher error' }
+        [System.Diagnostics.Debug]::WriteLine("NSCloudDrive Dispatcher Exception: $msg")
+        $e.Handled = $true
+    })
     if ($Minimized) {
         $window.Hide()
         $app.Run()
