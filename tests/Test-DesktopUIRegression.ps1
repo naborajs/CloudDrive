@@ -39,14 +39,17 @@ if ($dotSourceCheck -notmatch 'LoadedOK') {
 Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA and constructs window elements'
 
 # 5. Test single-instance mutex detection and second-instance graceful foreground restoration
-$testMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex')
+$createdNew = $false
+$testMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$createdNew)
 try {
     $secondInstanceOutput = powershell.exe -NoProfile -STA -File (Join-Path $PSScriptRoot '..\src\NSCloudDrive.ps1') 2>&1 | Out-String
     if ($secondInstanceOutput -notmatch 'NS Cloud Drive is already running') {
         throw "Expected single-instance detection message, got: $secondInstanceOutput"
     }
 } finally {
-    $testMutex.ReleaseMutex()
+    if ($createdNew) {
+        $testMutex.ReleaseMutex()
+    }
     $testMutex.Dispose()
 }
 Write-Output '  [PASS] NSCloudDrive.ps1 detects running instance, restores foreground window, and exits cleanly'
