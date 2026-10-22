@@ -21,7 +21,7 @@
 | Parse `src/NSCloudDrive.ps1` and exercise extracted setup-diagnostic functions | Passed; no verified pinned build was found, T: reported available, and D: reported NTFS with about 124 GiB free. | Function-level checks only; the WPF window was not launched, and no mount/cache directory was created. |
 | Run the mount launcher without a built artifact | Safely stopped because `rclone.exe` and its build manifest are absent; the configured cache directory remained unchanged. | No config was read, no account authentication occurred, and no mount was started. |
 | Inspect requested TeraBox backend Go source and docs | Confirmed source paths for listing, range-aware open, upload, move/copy, and delete; found cookie/debug exposure and unsupported zero-byte/unknown-size writes. | Static review only; methods were not called against TeraBox. |
-| Review TeraBox official Open API integration documentation | Confirmed documented OAuth/device-code QR flow, separate client credential application, short-lived access/refresh tokens, and an assigned-application directory boundary. | Documentation review only; no application request, token call, or account access; does not prove compatibility with the existing full drive. |
+| Review TeraBox official Open API integration documentation | Confirmed documented OAuth/device-code QR flow, separate client credential application, short-lived access/refresh tokens, and an assigned-application directory boundary. The current localized device-code docs say `user_code` and `verification_url` are unavailable and describe Base64 QR plus polling. | Documentation review only; no application request, token call, app approval attempt, or account access; no evidence of compatibility with the existing full drive or the consent UX. |
 | Clone and inspect `mill-master/rclone-terabox` at `38482fe6bdabae350c627a43d3a4f57691bfb725` | Its QR helper calls website `/passport/qrcode/*` endpoints with Chrome-like headers, extracts `ndus`, passes it on the `rclone config create/update` argument list, and saves to regular config. | Source review only. The helper was not executed or adapted because it imitates a browser and exposes session data in process arguments/config. |
 | Parse the supplied five PowerShell starter scripts | All five parsed. | Syntax check only; no mount or account operation. |
 | Parse `src/NSCloudDrive.ps1` with `System.Management.Automation.Language.Parser` | Passed. | Does not prove rendered UI or button behavior. |
@@ -81,6 +81,7 @@ Each commit changed one file and was pushed to `origin/main`:
 - `5b43e6e` — document DPAPI helper regression command.
 - `947fa3c` — add verified build and cache diagnostics.
 - `2ecc9db` — document preview readiness diagnostics.
+- `c9b3ab0` — clarify official TeraBox OAuth limitations.
 
 ## Required next evidence
 
