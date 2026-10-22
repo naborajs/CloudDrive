@@ -126,7 +126,7 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $setWin = [System.Windows.Window]::new()
     $setWin.Title = 'Settings & Preferences - NS Cloud Drive'
     $setWin.Width = 520
-    $setWin.Height = 440
+    $setWin.Height = 490
     $setWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $setWin.Owner = $Owner }
     $setWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
@@ -195,13 +195,35 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $chkTray = [System.Windows.Controls.CheckBox]::new()
     $chkTray.Content = 'Minimize to System Tray when closing the window'
     $chkTray.IsChecked = $settings.MinimizeToTrayOnClose
-    $chkTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+    $chkTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $chkTray.Add_Click({
         $settings.MinimizeToTrayOnClose = ($chkTray.IsChecked -eq $true)
         Set-NSCloudDriveSettings $settings
         if ($OnSettingsChanged) { & $OnSettingsChanged }
     })
     $bgStack.Children.Add($chkTray) | Out-Null
+
+    $chkStartMin = [System.Windows.Controls.CheckBox]::new()
+    $chkStartMin.Content = 'Start Minimized'
+    $chkStartMin.IsChecked = $settings.StartMinimized
+    $chkStartMin.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $chkStartMin.Add_Click({
+        $settings.StartMinimized = ($chkStartMin.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $settings
+        if ($OnSettingsChanged) { & $OnSettingsChanged }
+    })
+    $bgStack.Children.Add($chkStartMin) | Out-Null
+
+    $chkOpenExp = [System.Windows.Controls.CheckBox]::new()
+    $chkOpenExp.Content = 'Open File Explorer when a drive has connected'
+    $chkOpenExp.IsChecked = $settings.OpenExplorerOnMount
+    $chkOpenExp.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+    $chkOpenExp.Add_Click({
+        $settings.OpenExplorerOnMount = ($chkOpenExp.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $settings
+        if ($OnSettingsChanged) { & $OnSettingsChanged }
+    })
+    $bgStack.Children.Add($chkOpenExp) | Out-Null
     $stack.Children.Add($bgCard) | Out-Null
 
     # Cache Group
