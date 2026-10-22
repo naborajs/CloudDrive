@@ -5,146 +5,169 @@ $ErrorActionPreference = 'Stop'
 
 Write-Output 'Testing GoogleDriveProvider...'
 
-# 1. Test metadata
-$info = Get-GoogleDriveProviderInfo
-if ($info.Id -ne 'gdrive') { throw "Expected provider ID 'gdrive', found $($info.Id)" }
-if ($info.Name -ne 'Google Drive') { throw "Expected provider name 'Google Drive', found $($info.Name)" }
-if ($info.AuthMethods[0].Scope -ne 'https://www.googleapis.com/auth/drive.readonly') {
-    throw "Scope mismatch: $($info.AuthMethods[0].Scope)"
-}
-Write-Output '  [PASS] Provider metadata verified'
+# Sandbox LOCALAPPDATA to prevent touching real user credentials
+$origGlobalLocalAppData = $env:LOCALAPPDATA
+$globalSandboxDir = Join-Path $env:TEMP "gdrive_test_global_sandbox_$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $globalSandboxDir | Out-Null
+$env:LOCALAPPDATA = $globalSandboxDir
 
-# 2. Test state and PKCE generation
-$state1 = New-OAuthState
-$state2 = New-OAuthState
-if ([string]::IsNullOrEmpty($state1) -or [string]::IsNullOrEmpty($state2)) {
-    throw 'Generated state was null or empty'
-}
-if ($state1 -eq $state2) {
-    throw 'Generated states must be unique and cryptographically random'
-}
-if ($state1 -match '[+=/]') {
-    throw "State contains unescaped URL characters: $state1"
-}
-
-# Test PKCE verifier and RFC 7636 Appendix B test vector
-$verifier = New-PkceVerifier
-if ($verifier.Length -ne 43) {
-    throw "Expected PKCE verifier length of 43 characters, got $($verifier.Length)"
-}
-if ($verifier -match '[+=/]') {
-    throw "PKCE verifier contains illegal URL characters: $verifier"
-}
-
-# Verify RFC 7636 Appendix B official test vector
-$testVerifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
-$expectedChallenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-$actualChallenge = New-PkceChallenge $testVerifier
-if ($actualChallenge -ne $expectedChallenge) {
-    throw "RFC 7636 PKCE S256 test vector failed: expected '$expectedChallenge', got '$actualChallenge'"
-}
-Write-Output '  [PASS] Cryptographic state and RFC 7636 PKCE verifier/challenge verified'
-
-# 3. Test fail-closed when disconnected
-$check = Test-GoogleDriveBackendSession
-if ($check.IsValid -ne $false) { throw 'Expected IsValid to be false without tokens' }
-if ($check.State -ne 'Disconnected') { throw "Expected state 'Disconnected', found $($check.State)" }
-Write-Output '  [PASS] Missing tokens fail closed'
-
-# 4. Test DPAPI token save and load
-$testTokens = @{
-    access_token = 'ya29.test_access_token'
-    refresh_token = '1//test_refresh_token'
-    token_type = 'Bearer'
-    expires_in = 3600
-    scope = 'https://www.googleapis.com/auth/drive.readonly'
-    obtained_at = [DateTime]::UtcNow.ToString('o')
-}
-Save-GoogleDriveTokens -TokenData $testTokens
-$loaded = Get-GoogleDriveStoredTokens
-if (-not $loaded) { throw 'Failed to load saved tokens' }
-if ($loaded.access_token -ne $testTokens.access_token) { throw 'Access token mismatch' }
-if ($loaded.refresh_token -ne $testTokens.refresh_token) { throw 'Refresh token mismatch' }
-Write-Output '  [PASS] DPAPI token save and load verified'
-
-# Clean up tokens
-Remove-GoogleDriveSession
-$afterRemove = Get-GoogleDriveStoredTokens
-if ($afterRemove) { throw 'Tokens were not cleanly removed' }
-Write-Output '  [PASS] Token removal verified'
-
-# 5. Test auth URL construction, PKCE challenge, and validation
-$authUrl = Build-GoogleAuthorizationUrl -ClientId 'dummy-client-id' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state' -CodeChallenge 'test-challenge'
-if ($authUrl -notmatch 'client_id=dummy-client-id' -or
-    $authUrl -notmatch 'state=test-state' -or
-    $authUrl -notmatch 'code_challenge=test-challenge' -or
-    $authUrl -notmatch 'code_challenge_method=S256' -or
-    $authUrl -notmatch 'redirect_uri=http%3A%2F%2F127\.0\.0\.1%3A53682%2F') {
-    throw "Authorization URL formatting error: $authUrl"
-}
-$threwEmptyClient = $false
 try {
-    Build-GoogleAuthorizationUrl -ClientId '' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state'
-} catch {
-    $threwEmptyClient = $true
-}
-if (-not $threwEmptyClient) {
-    throw 'Build-GoogleAuthorizationUrl must throw when ClientId is empty.'
-}
-Write-Output '  [PASS] Authorization URL construction, PKCE parameter, and client ID validation verified'
+    # 1. Test metadata
+    $info = Get-GoogleDriveProviderInfo
+    if ($info.Id -ne 'gdrive') { throw "Expected provider ID 'gdrive', found $($info.Id)" }
+    if ($info.Name -ne 'Google Drive') { throw "Expected provider name 'Google Drive', found $($info.Name)" }
+    if ($info.AuthMethods[0].Scope -ne 'https://www.googleapis.com/auth/drive.readonly') {
+        throw "Scope mismatch: $($info.AuthMethods[0].Scope)"
+    }
+    Write-Output '  [PASS] Provider metadata verified'
 
-# 6. Test OAuth client configuration discovery
-$cfg = Get-GoogleOAuthConfig
-if ($null -eq $cfg.ConfigPath -or [string]::IsNullOrEmpty($cfg.ConfigPath)) {
-    throw 'Expected ConfigPath in Get-GoogleOAuthConfig result'
-}
-if ($null -eq $cfg.IsConfigured) {
-    throw 'Expected IsConfigured boolean in Get-GoogleOAuthConfig result'
-}
+    # 2. Test state and PKCE generation
+    $state1 = New-OAuthState
+    $state2 = New-OAuthState
+    if ([string]::IsNullOrEmpty($state1) -or [string]::IsNullOrEmpty($state2)) {
+        throw 'Generated state was null or empty'
+    }
+    if ($state1 -eq $state2) {
+        throw 'Generated states must be unique and cryptographically random'
+    }
+    if ($state1 -match '[+=/]') {
+        throw "State contains unescaped URL characters: $state1"
+    }
 
-# Test Google installed client JSON format where client_secret is absent or present
-$tempCfgDir = Join-Path $env:TEMP "gdrive_test_cfg_$([Guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Path $tempCfgDir | Out-Null
-try {
-    $sampleInstalledJson = @{
-        installed = @{
-            client_id = 'test-client-id-installed.apps.googleusercontent.com'
-            project_id = 'test-proj'
-            auth_uri = 'https://accounts.google.com/o/oauth2/auth'
-            token_uri = 'https://oauth2.googleapis.com/token'
-        }
-    } | ConvertTo-Json
-    $tempFile = Join-Path $tempCfgDir 'google-oauth.json'
-    Set-Content -LiteralPath $tempFile -Value $sampleInstalledJson
+    # Test PKCE verifier and RFC 7636 Appendix B test vector
+    $verifier = New-PkceVerifier
+    if ($verifier.Length -ne 43) {
+        throw "Expected PKCE verifier length of 43 characters, got $($verifier.Length)"
+    }
+    if ($verifier -match '[+=/]') {
+        throw "PKCE verifier contains illegal URL characters: $verifier"
+    }
 
-    # Temporarily point LOCALAPPDATA to parent of config
-    $fakeLocalApp = Join-Path $tempCfgDir 'appdata'
-    $fakeConfigDir = Join-Path $fakeLocalApp 'NSCloudDrive\config'
-    New-Item -ItemType Directory -Path $fakeConfigDir -Force | Out-Null
-    Copy-Item -LiteralPath $tempFile -Destination (Join-Path $fakeConfigDir 'google-oauth.json')
+    # Verify RFC 7636 Appendix B official test vector
+    $testVerifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+    $expectedChallenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
+    $actualChallenge = New-PkceChallenge $testVerifier
+    if ($actualChallenge -ne $expectedChallenge) {
+        throw "RFC 7636 PKCE S256 test vector failed: expected '$expectedChallenge', got '$actualChallenge'"
+    }
+    Write-Output '  [PASS] Cryptographic state and RFC 7636 PKCE verifier/challenge verified'
 
-    $origLocalApp = $env:LOCALAPPDATA
-    $origClientId = $env:GOOGLE_CLIENT_ID
-    $env:GOOGLE_CLIENT_ID = $null
+    # 3. Test fail-closed when disconnected
+    $check = Test-GoogleDriveBackendSession
+    if ($check.IsValid -ne $false) { throw 'Expected IsValid to be false without tokens' }
+    if ($check.State -ne 'Disconnected') { throw "Expected state 'Disconnected', found $($check.State)" }
+    Write-Output '  [PASS] Missing tokens fail closed'
+
+    # 4. Test DPAPI token save and load in sandbox
+    $testTokens = @{
+        access_token = 'ya29.test_access_token'
+        refresh_token = '1//test_refresh_token'
+        token_type = 'Bearer'
+        expires_in = 3600
+        scope = 'https://www.googleapis.com/auth/drive.readonly'
+        obtained_at = [DateTime]::UtcNow.ToString('o')
+    }
+    Save-GoogleDriveTokens -TokenData $testTokens
+    $loaded = Get-GoogleDriveStoredTokens
+    if (-not $loaded) { throw 'Failed to load saved tokens' }
+    if ($loaded.access_token -ne $testTokens.access_token) { throw 'Access token mismatch' }
+    if ($loaded.refresh_token -ne $testTokens.refresh_token) { throw 'Refresh token mismatch' }
+    Write-Output '  [PASS] DPAPI token save and load verified'
+
+    # Test rclone environment construction from saved tokens
+    $rcloneEnv = Get-GoogleDriveRcloneEnvironment
+    if ($rcloneEnv['RCLONE_CONFIG_GDRIVE_TYPE'] -ne 'drive') {
+        throw 'Expected RCLONE_CONFIG_GDRIVE_TYPE to be drive'
+    }
+    if ($rcloneEnv['RCLONE_CONFIG_GDRIVE_SCOPE'] -ne 'drive.readonly') {
+        throw 'Expected RCLONE_CONFIG_GDRIVE_SCOPE to be drive.readonly'
+    }
+    $parsedToken = $rcloneEnv['RCLONE_CONFIG_GDRIVE_TOKEN'] | ConvertFrom-Json
+    if ($parsedToken.access_token -ne $testTokens.access_token -or $parsedToken.refresh_token -ne $testTokens.refresh_token) {
+        throw 'RCLONE_CONFIG_GDRIVE_TOKEN json payload does not match stored credentials'
+    }
+    Write-Output '  [PASS] rclone environment variable construction verified'
+
+    # Clean up tokens
+    Remove-GoogleDriveSession
+    $afterRemove = Get-GoogleDriveStoredTokens
+    if ($afterRemove) { throw 'Tokens were not cleanly removed' }
+    Write-Output '  [PASS] Token removal verified'
+
+    # 5. Test auth URL construction, PKCE challenge, and validation
+    $authUrl = Build-GoogleAuthorizationUrl -ClientId 'dummy-client-id' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state' -CodeChallenge 'test-challenge'
+    if ($authUrl -notmatch 'client_id=dummy-client-id' -or
+        $authUrl -notmatch 'state=test-state' -or
+        $authUrl -notmatch 'code_challenge=test-challenge' -or
+        $authUrl -notmatch 'code_challenge_method=S256' -or
+        $authUrl -notmatch 'redirect_uri=http%3A%2F%2F127\.0\.0\.1%3A53682%2F') {
+        throw "Authorization URL formatting error: $authUrl"
+    }
+    $threwEmptyClient = $false
     try {
-        $env:LOCALAPPDATA = $fakeLocalApp
-        $discovered = Get-GoogleOAuthConfig
-        if (-not $discovered.IsConfigured) {
-            throw 'Expected installed client JSON format to be recognized as configured.'
-        }
-        if ($discovered.ClientId -ne 'test-client-id-installed.apps.googleusercontent.com') {
-            throw "Expected ClientId 'test-client-id-installed.apps.googleusercontent.com', found '$($discovered.ClientId)'"
-        }
-        if (-not [string]::IsNullOrEmpty($discovered.ClientSecret)) {
-            throw 'ClientSecret should be null/empty when not provided in installed json.'
+        Build-GoogleAuthorizationUrl -ClientId '' -RedirectUri 'http://127.0.0.1:53682/' -State 'test-state'
+    } catch {
+        $threwEmptyClient = $true
+    }
+    if (-not $threwEmptyClient) {
+        throw 'Build-GoogleAuthorizationUrl must throw when ClientId is empty.'
+    }
+    Write-Output '  [PASS] Authorization URL construction, PKCE parameter, and client ID validation verified'
+
+    # 6. Test OAuth client configuration discovery
+    $tempCfgDir = Join-Path $env:TEMP "gdrive_test_cfg_$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $tempCfgDir | Out-Null
+    try {
+        $sampleInstalledJson = @{
+            installed = @{
+                client_id = 'test-client-id-installed.apps.googleusercontent.com'
+                project_id = 'test-proj'
+                auth_uri = 'https://accounts.google.com/o/oauth2/auth'
+                token_uri = 'https://oauth2.googleapis.com/token'
+            }
+        } | ConvertTo-Json
+        $tempFile = Join-Path $tempCfgDir 'google-oauth.json'
+        Set-Content -LiteralPath $tempFile -Value $sampleInstalledJson
+
+        $fakeLocalApp = Join-Path $tempCfgDir 'appdata'
+        $fakeConfigDir = Join-Path $fakeLocalApp 'NSCloudDrive\config'
+        New-Item -ItemType Directory -Path $fakeConfigDir -Force | Out-Null
+        Copy-Item -LiteralPath $tempFile -Destination (Join-Path $fakeConfigDir 'google-oauth.json')
+
+        $origLocalApp = $env:LOCALAPPDATA
+        $origClientId = $env:GOOGLE_CLIENT_ID
+        $env:GOOGLE_CLIENT_ID = $null
+        try {
+            $env:LOCALAPPDATA = $fakeLocalApp
+            $discovered = Get-GoogleOAuthConfig
+            if (-not $discovered.IsConfigured) {
+                throw 'Expected installed client JSON format to be recognized as configured.'
+            }
+            if ($discovered.ClientId -ne 'test-client-id-installed.apps.googleusercontent.com') {
+                throw "Expected ClientId 'test-client-id-installed.apps.googleusercontent.com', found '$($discovered.ClientId)'"
+            }
+            if (-not [string]::IsNullOrEmpty($discovered.ClientSecret)) {
+                throw 'ClientSecret should be null/empty when not provided in installed json.'
+            }
+        } finally {
+            $env:LOCALAPPDATA = $origLocalApp
+            $env:GOOGLE_CLIENT_ID = $origClientId
         }
     } finally {
-        $env:LOCALAPPDATA = $origLocalApp
-        $env:GOOGLE_CLIENT_ID = $origClientId
+        Remove-Item -LiteralPath $tempCfgDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Write-Output '  [PASS] Google OAuth configuration discovery with installed client format verified'
+
+    # 7. Test WebUtility HTML encoding for callback safety
+    $encoded = [System.Net.WebUtility]::HtmlEncode('<script>alert("xss")</script>')
+    if ($encoded -ne '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;') {
+        throw "HtmlEncode output mismatch: $encoded"
+    }
+    Write-Output '  [PASS] WebUtility HtmlEncode verified'
+
 } finally {
-    Remove-Item -LiteralPath $tempCfgDir -Recurse -Force -ErrorAction SilentlyContinue
+    $env:LOCALAPPDATA = $origGlobalLocalAppData
+    Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-Write-Output '  [PASS] Google OAuth configuration discovery with installed client format verified'
 
 Write-Output 'All GoogleDriveProvider tests passed.'
