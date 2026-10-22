@@ -75,10 +75,13 @@ Each commit changed one file and was pushed to `origin/main`:
 - `42ff8fb` — clarify DPAPI helper test coverage.
 - `20933d8` — add safe DPAPI helper self-test.
 - `448e28f` — test DPAPI credential ACL policy.
+- `1e08624` — record private credential ACL test.
+- `7ae62dc` — record credential ACL self-test evidence.
+- `5b43e6e` — document DPAPI helper regression command.
 
 ## Required next evidence
 
 1. Provide Go 1.26+, MinGW, and WinFsp FUSE development headers; run the pinned builder and verify its output.
-2. Test the DPAPI interactive save/ACL branch and native Windows PowerShell subprocess on an unrestricted Windows session; add/run synthetic-secret tests for config redaction and diagnostic logs.
+2. Test the DPAPI interactive save flow and native Windows PowerShell subprocess on an unrestricted Windows session; add/run synthetic-secret tests for backend config redaction and diagnostics.
 3. Audit the exact pinned build's license notices; then verify provider registration. A compliant TeraBox sign-in path remains a blocker before any account access.
 4. After compliant authentication is available, perform user-controlled read-only account tests locally; only then consider disposable writable/recovery/cache tests and record exact versions and observed results.
