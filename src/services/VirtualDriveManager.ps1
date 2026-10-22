@@ -20,9 +20,11 @@ function Find-RcloneBinary([string]$CustomPath = '') {
     if ($env:RCLONE_EXE_PATH) {
         $candidates += $env:RCLONE_EXE_PATH
     }
+    $candidates += (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
     $candidates += (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra\rclone.exe')
     if ($env:USERPROFILE) {
         $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX\tools\rclone\rclone.exe')
+        $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX_extracted\CloudPlayX\tools\rclone\rclone.exe')
     }
 
     $onPath = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
