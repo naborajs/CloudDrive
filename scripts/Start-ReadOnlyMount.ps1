@@ -14,8 +14,10 @@ $ErrorActionPreference = 'Stop'
 $rclonePath = Join-Path $BuildRoot 'rclone.exe'
 $manifestPath = Join-Path $BuildRoot 'rclone.build.json'
 $patchPath = Join-Path $PSScriptRoot '..\patches\rclone-terabox-v1.75.2-extra-secret-safety.patch'
+$passwordHelperPath = Join-Path $PSScriptRoot 'RcloneConfigPassword.ps1'
+$passwordHostPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
-foreach ($path in @($rclonePath, $manifestPath, $ConfigPath, $patchPath)) {
+foreach ($path in @($rclonePath, $manifestPath, $ConfigPath, $patchPath, $passwordHelperPath, $passwordHostPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Required file was not found: $path"
     }
@@ -47,31 +49,41 @@ if ($cacheVolume.AvailableFreeSpace -lt 25GB) {
     throw "At least 25 GiB must be free on the cache volume before using the 20 GiB best-effort cache: $cacheRoot"
 }
 
-& $rclonePath --config $ConfigPath config encryption check
-if ($LASTEXITCODE -ne 0) {
-    throw 'The rclone configuration must be encrypted and decryptable before mounting. No mount was started.'
+$previousPasswordCommand = $env:RCLONE_PASSWORD_COMMAND
+try {
+    $quotedHelperPath = '"' + $passwordHelperPath + '"'
+    $env:RCLONE_PASSWORD_COMMAND = '"' + $passwordHostPath + '" -NoLogo -NoProfile -NonInteractive -File ' + $quotedHelperPath
+
+    & $rclonePath --config $ConfigPath --ask-password=false config encryption check
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The rclone configuration must be encrypted and locally unlockable before mounting. No mount was started.'
+    }
+
+    if (-not (Test-Path -LiteralPath $CacheDirectory)) {
+        New-Item -ItemType Directory -Path $CacheDirectory | Out-Null
+    }
+
+    Write-Output "Starting read-only $RemoteName mount at $drivePath. Keep this window open; press Ctrl+C to unmount."
+    Write-Output 'Backend diagnostics are disabled. No log file is written.'
+
+    & $rclonePath mount "${RemoteName}:" $drivePath `
+        --config $ConfigPath `
+        --ask-password=false `
+        --read-only `
+        --network-mode `
+        --volname 'NS Cloud Drive' `
+        --cache-dir $CacheDirectory `
+        --vfs-cache-mode full `
+        --vfs-cache-max-size 20G `
+        --vfs-cache-max-age 24h `
+        --vfs-cache-poll-interval 1m `
+        --terabox-debug-level 0 `
+        --log-level ERROR
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "rclone mount exited with code $LASTEXITCODE. Any files in the cache are preserved; do not delete them if a future writable mount has been used."
+    }
 }
-
-if (-not (Test-Path -LiteralPath $CacheDirectory)) {
-    New-Item -ItemType Directory -Path $CacheDirectory | Out-Null
-}
-
-Write-Output "Starting read-only $RemoteName mount at $drivePath. Keep this window open; press Ctrl+C to unmount."
-Write-Output 'Backend diagnostics are disabled. No log file is written.'
-
-& $rclonePath mount "${RemoteName}:" $drivePath `
-    --config $ConfigPath `
-    --read-only `
-    --network-mode `
-    --volname 'NS Cloud Drive' `
-    --cache-dir $CacheDirectory `
-    --vfs-cache-mode full `
-    --vfs-cache-max-size 20G `
-    --vfs-cache-max-age 24h `
-    --vfs-cache-poll-interval 1m `
-    --terabox-debug-level 0 `
-    --log-level ERROR
-
-if ($LASTEXITCODE -ne 0) {
-    throw "rclone mount exited with code $LASTEXITCODE. Any files in the cache are preserved; do not delete them if a future writable mount has been used."
+finally {
+    $env:RCLONE_PASSWORD_COMMAND = $previousPasswordCommand
 }
