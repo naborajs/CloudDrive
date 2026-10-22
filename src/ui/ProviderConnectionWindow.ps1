@@ -148,12 +148,16 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     # Explanation and Action Area
     $contentScroll = [System.Windows.Controls.ScrollViewer]::new()
     $contentScroll.VerticalScrollBarVisibility = 'Auto'
+    $contentScroll.HorizontalScrollBarVisibility = 'Disabled'
     $root.Children.Add($contentScroll) | Out-Null
 
     $contentStack = [System.Windows.Controls.StackPanel]::new()
     $contentScroll.Content = $contentStack
 
     $contentStack.Children.Add($statusCard) | Out-Null
+
+    $isWindowClosing = $false
+    $win.Add_Closing({ $isWindowClosing = $true })
 
     # Diagnostics log buffer
     $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
@@ -260,22 +264,42 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $signInBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
 
         $signInBtn.Add_Click({
+            $oauthCfg = Get-GoogleOAuthConfig
+            if (-not $oauthCfg.IsConfigured) {
+                & $UpdateState 'Error' "Google OAuth Client ID is not configured. Set GOOGLE_CLIENT_ID environment variable or create $($oauthCfg.ConfigPath) with client_id and client_secret."
+                return
+            }
+
             & $UpdateState 'OpeningSignIn' 'Starting local authorization listener...'
             $state = New-OAuthState
             try {
                 $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
-                $authUrl = Build-GoogleAuthorizationUrl -ClientId 'NSCloudDrive' -RedirectUri $listenerCtx.RedirectUri -State $state
+                $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthCfg.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state
                 & $UpdateState 'AwaitingUserAuth' "Please complete Google authorization in the browser ($($listenerCtx.RedirectUri))..."
                 [System.Diagnostics.Process]::Start($authUrl) | Out-Null
 
                 # Asynchronously wait for callback without blocking UI thread completely
-                $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx
+                $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { $isWindowClosing -or -not $win.IsVisible }
                 if ($waitResult.Success) {
                     & $UpdateState 'ValidatingAuthorization' 'Exchanging authorization code for credentials...'
-                    # Validation and token verification
-                    & $UpdateState 'CheckingAccountScope' 'Verifying Google Drive scope...'
-                    & $UpdateState 'ListingFiles' 'Testing Google Drive file query...'
-                    & $UpdateState 'Connected' 'Google Drive successfully connected and validated.'
+                    $tokenResult = Exchange-GoogleAuthCode -ClientId $oauthCfg.ClientId -ClientSecret $oauthCfg.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri
+                    if ($tokenResult.Success) {
+                        & $UpdateState 'CheckingAccountScope' 'Verifying Google Drive scope...'
+                        $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
+                        if ($verify.IsValid) {
+                            & $UpdateState 'ListingFiles' 'Testing Google Drive file query...'
+                            $files = Get-GoogleDriveFileList -TokensOverride $tokenResult.Tokens
+                            if ($files.Success) {
+                                & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName) ($($files.ItemCount) items found in root)."
+                            } else {
+                                & $UpdateState 'Connected' "Connected as $($verify.UserInfo.DisplayName) (Directory listing returned 0 items)."
+                            }
+                        } else {
+                            & $UpdateState $verify.State $verify.Error
+                        }
+                    } else {
+                        & $UpdateState 'Error' $tokenResult.Error
+                    }
                 } else {
                     & $UpdateState 'Error' $waitResult.Error
                 }
@@ -287,14 +311,13 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     }
 
     # Common buttons row: Test connection, Disconnect, Diagnostics
-    $commonButtons = [System.Windows.Controls.StackPanel]::new()
-    $commonButtons.Orientation = 'Horizontal'
+    $commonButtons = [System.Windows.Controls.WrapPanel]::new()
     $commonButtons.Margin = [System.Windows.Thickness]::new(0, 10, 0, 0)
 
     $testBtn = [System.Windows.Controls.Button]::new()
     $testBtn.Content = 'Test connection'
     $testBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-    $testBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $testBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
     $testBtn.Add_Click({
         if ($ProviderId -eq 'terabox') {
             & $UpdateState 'ValidatingAuthorization' 'Validating TeraBox session...'
@@ -319,7 +342,7 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     $disconnectBtn = [System.Windows.Controls.Button]::new()
     $disconnectBtn.Content = 'Disconnect'
     $disconnectBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-    $disconnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $disconnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
     $disconnectBtn.Add_Click({
         if ($ProviderId -eq 'terabox') {
             Remove-TeraBoxSession
@@ -333,6 +356,7 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
     $diagBtn = [System.Windows.Controls.Button]::new()
     $diagBtn.Content = 'View Diagnostics'
     $diagBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $diagBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $diagBtn.Add_Click({
         $diagText = $script:LogBuffer -join "`r`n"
         Show-DiagnosticsDialog -Title $providerInfo.Name -DiagnosticsContent $diagText -Owner $win
