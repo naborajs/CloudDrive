@@ -17,6 +17,9 @@ try {
     if (-not $settings.AutoStartWithWindows) { throw 'Expected AutoStartWithWindows to default to true' }
     if (-not $settings.AutoMountDrives) { throw 'Expected AutoMountDrives to default to true' }
     if (-not $settings.MinimizeToTrayOnClose) { throw 'Expected MinimizeToTrayOnClose to default to true' }
+    if ($settings.StartMinimized -ne $false) { throw 'Expected StartMinimized to default to false' }
+    if ($settings.OpenExplorerOnMount -ne $true) { throw 'Expected OpenExplorerOnMount to default to true' }
+    if ($settings.Theme -ne 'Light') { throw "Expected Theme to default to Light, got $($settings.Theme)" }
     if ($settings.CacheDirectory -ne 'D:\CloudCache') { throw "Expected CacheDirectory to default to D:\CloudCache, got $($settings.CacheDirectory)" }
     if ($settings.ProviderDriveLetters.gdrive -ne 'G') { throw "Expected gdrive to default to G, got $($settings.ProviderDriveLetters.gdrive)" }
     if ($settings.ProviderDriveLetters.terabox -ne 'T') { throw "Expected terabox to default to T, got $($settings.ProviderDriveLetters.terabox)" }
@@ -27,6 +30,9 @@ try {
         AutoStartWithWindows = $false
         AutoMountDrives = $false
         MinimizeToTrayOnClose = $false
+        StartMinimized = $true
+        OpenExplorerOnMount = $false
+        Theme = 'Dark'
         CacheDirectory = 'D:\CloudCache\Custom'
         ProviderDriveLetters = [ordered]@{
             gdrive = 'S'
@@ -38,6 +44,9 @@ try {
     $reloaded = Get-NSCloudDriveSettings
     if ($reloaded.AutoStartWithWindows -ne $false) { throw 'Expected AutoStartWithWindows to be false' }
     if ($reloaded.AutoMountDrives -ne $false) { throw 'Expected AutoMountDrives to be false' }
+    if ($reloaded.StartMinimized -ne $true) { throw 'Expected StartMinimized to be true' }
+    if ($reloaded.OpenExplorerOnMount -ne $false) { throw 'Expected OpenExplorerOnMount to be false' }
+    if ($reloaded.Theme -ne 'Dark') { throw 'Expected Theme to be Dark' }
     if ($reloaded.CacheDirectory -ne 'D:\CloudCache\Custom') { throw 'Expected CacheDirectory to match custom value' }
     if ($reloaded.ProviderDriveLetters.gdrive -ne 'S') { throw 'Expected gdrive to be S' }
     if ($reloaded.ProviderDriveLetters.terabox -ne 'X') { throw 'Expected terabox to be X' }
