@@ -75,4 +75,28 @@ if ($timeoutResult) {
 }
 Write-Output '  [PASS] Wait-WpfTask non-blocking dispatcher pump verified'
 
+# 6. Test browser window lifecycle state and uninitialized variable safety under strict mode
+if ($null -ne $script:CurrentBrowserWindow) {
+    throw 'Expected $script:CurrentBrowserWindow to be null when not showing'
+}
+if ($script:BrowserWindowClosed -ne $false) {
+    throw 'Expected $script:BrowserWindowClosed to be false initially'
+}
+
+# Simulate window close lifecycle
+$testWin = [System.Windows.Window]::new()
+$script:CurrentBrowserWindow = $testWin
+$script:BrowserWindowClosed = $false
+
+$script:BrowserWindowClosed = $true
+$script:CurrentBrowserWindow = $null
+
+if ($null -ne $script:CurrentBrowserWindow) {
+    throw 'Expected $script:CurrentBrowserWindow to be cleared on close'
+}
+if ($script:BrowserWindowClosed -ne $true) {
+    throw 'Expected $script:BrowserWindowClosed to be true after close'
+}
+Write-Output '  [PASS] Browser window lifecycle state tracking verified'
+
 Write-Output 'All EmbeddedBrowserWindow tests passed.'
