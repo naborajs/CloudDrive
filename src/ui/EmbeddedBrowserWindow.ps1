@@ -237,7 +237,6 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $cancelBtn.Foreground = [System.Windows.Media.Brushes]::White
     $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(0)
     $cancelBtn.Add_Click({
-        $script:BrowserWindowClosed = $true
         if ($script:CurrentBrowserWindow) { $script:CurrentBrowserWindow.Close() }
     })
     $btnStack.Children.Add($cancelBtn) | Out-Null
@@ -273,6 +272,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $script:CheckingSession = $false
     $script:SessionResult = $null
     $script:LastTestedCookie = ''
+    $script:LastTestedTime = [DateTime]::MinValue
 
     $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
     $pollTimer.Interval = [TimeSpan]::FromSeconds(2)
@@ -324,36 +324,48 @@ function Show-TeraBoxEmbeddedLoginWindow(
         try {
             $origin = "https://$($pageUri.Host)"
 
-            # Capture active WebView2 UserAgent to avoid security rejection
+            # Capture active WebView2 UserAgent via DOM execution
             $ua = $null
             try {
-                if ($wv.CoreWebView2.Settings -and $wv.CoreWebView2.Settings.UserAgent) {
-                    $ua = [string]$wv.CoreWebView2.Settings.UserAgent
+                $uaTask = $wv.CoreWebView2.ExecuteScriptAsync("navigator.userAgent")
+                $uaDone = Wait-WpfTask -Task $uaTask -TimeoutMs 2000 -Window $activeWin
+                if ($uaDone -and $uaTask.Result) {
+                    $rawUa = [string]$uaTask.Result
+                    if ($rawUa.StartsWith('"') -and $rawUa.EndsWith('"') -and $rawUa.Length -gt 2) {
+                        $ua = $rawUa.Substring(1, $rawUa.Length - 2)
+                    } else {
+                        $ua = $rawUa
+                    }
+                }
+            } catch { }
+            if (-not $ua) {
+                try {
+                    if ($wv.CoreWebView2.Settings -and $wv.CoreWebView2.Settings.UserAgent) {
+                        $ua = [string]$wv.CoreWebView2.Settings.UserAgent
+                    }
+                } catch { }
+            }
+
+            # Non-blocking cookie retrieval across domains and active origin
+            $cookieList = [System.Collections.Generic.List[Microsoft.Web.WebView2.Core.CoreWebView2Cookie]]::new()
+            try {
+                $allTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync("")
+                $allDone = Wait-WpfTask -Task $allTask -TimeoutMs 3000 -Window $activeWin
+                if ($allDone -and $allTask.Result) {
+                    foreach ($c in $allTask.Result) {
+                        $cookieList.Add($c)
+                    }
                 }
             } catch { }
 
-            # Non-blocking cookie retrieval for origin and root domain
-            $cookieTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync($origin)
-            $cookieDone = Wait-WpfTask -Task $cookieTask -TimeoutMs 4000 -Window $activeWin
-            if (-not $cookieDone -or -not $cookieTask.Result) {
-                if (-not $Automatic) {
-                    $statusBlock.Text = 'Unable to read browser cookies. Please wait for the page to finish loading and try again.'
-                    $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
-                }
-                return
-            }
-
-            $cookieList = [System.Collections.Generic.List[Microsoft.Web.WebView2.Core.CoreWebView2Cookie]]::new($cookieTask.Result)
-            if ($origin -ne 'https://www.terabox.com') {
-                try {
-                    $baseTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync('https://www.terabox.com')
-                    $baseDone = Wait-WpfTask -Task $baseTask -TimeoutMs 2000 -Window $activeWin
-                    if ($baseDone -and $baseTask.Result) {
-                        foreach ($bc in $baseTask.Result) {
-                            $cookieList.Add($bc)
-                        }
+            if ($cookieList.Count -eq 0) {
+                $cookieTask = $wv.CoreWebView2.CookieManager.GetCookiesAsync($origin)
+                $cookieDone = Wait-WpfTask -Task $cookieTask -TimeoutMs 3000 -Window $activeWin
+                if ($cookieDone -and $cookieTask.Result) {
+                    foreach ($c in $cookieTask.Result) {
+                        $cookieList.Add($c)
                     }
-                } catch { }
+                }
             }
 
             $cookieDict = [ordered]@{}
@@ -382,16 +394,6 @@ function Show-TeraBoxEmbeddedLoginWindow(
             }
             $cookieHeader = $cookiePairs -join '; '
 
-            # Avoid spamming the backend with the exact same rejected cookie during automatic polling
-            if ($Automatic -and $script:LastTestedCookie -eq $cookieHeader) {
-                return
-            }
-            $script:LastTestedCookie = $cookieHeader
-
-            # Session cookie detected: inform user that backend validation is taking place
-            $statusBlock.Text = 'Session detected. Validating authorization with TeraBox…'
-            $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#38BDF8')
-
             # Extract window.jsToken from DOM asynchronously
             $jsToken = $null
             try {
@@ -406,6 +408,19 @@ function Show-TeraBoxEmbeddedLoginWindow(
                     }
                 }
             } catch { }
+
+            # Avoid spamming the backend during automatic polling if nothing changed recently
+            $checkKey = "$cookieHeader|$jsToken"
+            $now = [DateTime]::UtcNow
+            if ($Automatic -and $script:LastTestedCookie -eq $checkKey -and ($now - $script:LastTestedTime).TotalSeconds -lt 5) {
+                return
+            }
+            $script:LastTestedCookie = $checkKey
+            $script:LastTestedTime = $now
+
+            # Session cookie detected: inform user that backend validation is taking place
+            $statusBlock.Text = 'Session detected. Validating authorization with TeraBox…'
+            $statusBlock.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#38BDF8')
 
             # Validate session against TeraBox backend non-blockingly
             $sessionOverride = @{
@@ -514,8 +529,45 @@ function Show-TeraBoxEmbeddedLoginWindow(
     })
 
     $browserWin.Add_Closing({
-        $script:BrowserWindowClosed = $true
         if ($pollTimer) { $pollTimer.Stop() }
+
+        # If login was not marked complete yet, check if there is an active valid session before closing
+        if (-not $script:LoginCompleted) {
+            try {
+                if ($wv -and $wv.CoreWebView2) {
+                    & $TryConnect $false
+                }
+            } catch { }
+
+            # If still not marked complete, check if a valid DPAPI session already exists
+            if (-not $script:LoginCompleted) {
+                try {
+                    $savedSession = Get-TeraBoxSession
+                    if ($savedSession -and $savedSession.Secret) {
+                        $savedCheck = Test-TeraBoxBackendSession -SessionOverride $savedSession -Window $browserWin
+                        if ($savedCheck.IsValid) {
+                            $script:LoginCompleted = $true
+                            $uName = if ($savedCheck.UserInfo -and $savedCheck.UserInfo.UserName) { $savedCheck.UserInfo.UserName } else { 'TeraBox User' }
+                            $script:SessionResult = [ordered]@{
+                                Success = $true
+                                UserName = $uName
+                                ItemCount = 0
+                                Cookie = $savedSession.Secret
+                                JsToken = $savedSession.JsToken
+                                BaseUrl = $savedSession.BaseUrl
+                                UserAgent = $savedSession.UserAgent
+                            }
+                            if ($OnLoginSucceeded) {
+                                & $OnLoginSucceeded $script:SessionResult
+                            }
+                        }
+                    }
+                } catch { }
+            }
+        }
+
+        $script:BrowserWindowClosed = $true
+
         if (-not $script:LoginCompleted -and $OnStateChanged) {
             try {
                 & $OnStateChanged 'Disconnected' 'Sign-in window was closed by the user.'
