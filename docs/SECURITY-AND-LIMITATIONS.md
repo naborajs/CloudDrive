@@ -9,7 +9,7 @@
 - In the reviewed backend, the `cookie` field is required but not marked sensitive. The backend constructor's level-1 debug statement formats the full options struct, which contains that cookie. Higher debug levels are documented to include request/response parameters or bodies.
 - A patch is committed for the pinned `v1.75.2-extra` source: it marks the cookie option sensitive, removes the options-struct debug statement, and disables backend-specific debug output. It has only passed patch-application checks; it has not been compiled or tested with synthetic credentials.
 - A pinned-source Windows build helper and a read-only mount launcher are committed. The launcher checks the build manifest and hashes, requires an encrypted/decryptable rclone config, uses a 20 GiB best-effort cache, sets backend debug to zero, and runs in the current user session. Both scripts are syntax/preflight-tested only; no executable or mount exists on this PC.
-- The QR-login helper prevents manual cookie copying but writes the obtained session token to the ordinary rclone config. That does not establish safe at-rest storage or Windows compatibility.
+- The third-party QR helper is not TeraBox's documented Open API device-code flow: it imitates browser headers against website login endpoints, extracts ndus, passes it as an rclone config command-line argument, and stores it in ordinary config. It is not compatible with this project's no-browser-impersonation and secret-handling requirements; we did not run it.
 - No account was authenticated, no user files were listed, and no remote file operation was executed.
 
 ## Secret-handling requirements before adding sign-in
