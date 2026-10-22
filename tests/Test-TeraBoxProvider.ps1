@@ -92,6 +92,21 @@ try {
     $manualRes = Set-TeraBoxManualSession -SessionSecret 'invalid_test_secret_123'
     if ($manualRes.Success -ne $false) { throw 'Expected invalid manual session to fail closed' }
     Write-Output '  [PASS] Manual session validation fails closed on invalid credentials'
+
+    # 7. Test Get-SafeProperty and strict mode resilience on API response shapes
+    $jsonObj = ConvertFrom-Json '{"errno":0,"uk":123456789,"request_id":"test-req-1"}'
+    if ((Get-SafeProperty $jsonObj 'errno') -ne 0) { throw 'Expected errno = 0' }
+    if ((Get-SafeProperty $jsonObj 'uk') -ne 123456789) { throw 'Expected uk = 123456789' }
+    if ($null -ne (Get-SafeProperty $jsonObj 'username')) { throw 'Expected username to safely return null' }
+    if ($null -ne (Get-SafeProperty $jsonObj 'user_name')) { throw 'Expected user_name to safely return null' }
+    if ($null -ne (Get-SafeProperty $jsonObj 'non_existent_field')) { throw 'Expected absent property to return null' }
+    if ((Get-SafeProperty $jsonObj 'non_existent_field' 'fallback') -ne 'fallback') { throw 'Expected default value' }
+
+    # Test Get-SafeProperty with null and hashtables
+    if ($null -ne (Get-SafeProperty $null 'key')) { throw 'Expected null object to return null' }
+    if ((Get-SafeProperty @{ 'foo' = 'bar' } 'foo') -ne 'bar') { throw 'Expected hashtable lookup' }
+    if ($null -ne (Get-SafeProperty @{ 'foo' = 'bar' } 'baz')) { throw 'Expected absent hashtable key to return null' }
+    Write-Output '  [PASS] Get-SafeProperty and strict mode response parsing verified'
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
