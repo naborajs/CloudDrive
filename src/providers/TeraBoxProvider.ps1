@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
+
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 
 function Get-TeraBoxCredentialDirectory {
@@ -71,9 +73,28 @@ function Get-TeraBoxStoredSession {
             try {
                 $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password)
                 $secret = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+
+                $cookieVal = $secret
+                $jsTokenVal = $null
+                $baseUrlVal = 'https://www.terabox.com'
+
+                if ($secret -and $secret.StartsWith('{') -and $secret.EndsWith('}')) {
+                    try {
+                        $meta = ConvertFrom-Json $secret -ErrorAction SilentlyContinue
+                        if ($meta -and $meta.Cookie) {
+                            $cookieVal = [string]$meta.Cookie
+                            if ($meta.JsToken) { $jsTokenVal = [string]$meta.JsToken }
+                            if ($meta.BaseUrl) { $baseUrlVal = [string]$meta.BaseUrl }
+                        }
+                    } catch { }
+                }
+
                 return [ordered]@{
                     Type = $cred.UserName
-                    Secret = $secret
+                    Secret = $cookieVal
+                    JsToken = $jsTokenVal
+                    BaseUrl = $baseUrlVal
+                    RawSecret = $secret
                     StoredTime = (Get-Item -LiteralPath $credPath).LastWriteTimeUtc
                 }
             } finally {
@@ -89,7 +110,12 @@ function Get-TeraBoxStoredSession {
     return $null
 }
 
-function Save-TeraBoxSession([string]$Type, [string]$Secret) {
+function Save-TeraBoxSession(
+    [string]$Type,
+    [string]$Secret,
+    [string]$JsToken = $null,
+    [string]$BaseUrl = $null
+) {
     if ([string]::IsNullOrEmpty($Secret)) {
         throw 'Cannot store empty TeraBox session secret.'
     }
@@ -102,7 +128,17 @@ function Save-TeraBoxSession([string]$Type, [string]$Secret) {
         Set-StrictTeraBoxCredentialAcl -Path $credDir
     }
 
-    $secString = ConvertTo-SecureString -String $Secret -AsPlainText -Force
+    $secretToStore = $Secret
+    if (-not [string]::IsNullOrEmpty($JsToken) -or (-not [string]::IsNullOrEmpty($BaseUrl) -and $BaseUrl -ne 'https://www.terabox.com')) {
+        $metaObj = [ordered]@{
+            Cookie = $Secret
+            JsToken = $JsToken
+            BaseUrl = $(if ($BaseUrl) { $BaseUrl } else { 'https://www.terabox.com' })
+        }
+        $secretToStore = ConvertTo-Json $metaObj -Compress
+    }
+
+    $secString = ConvertTo-SecureString -String $secretToStore -AsPlainText -Force
     $credential = [System.Management.Automation.PSCredential]::new($Type, $secString)
     try {
         Export-Clixml -InputObject $credential -LiteralPath $credPath
@@ -122,6 +158,14 @@ function Remove-TeraBoxSession {
 function Format-TeraBoxCookieHeader([string]$Secret) {
     if ([string]::IsNullOrWhiteSpace($Secret)) { return '' }
     $trimmed = $Secret.Trim()
+    if ($trimmed.StartsWith('{') -and $trimmed.EndsWith('}')) {
+        try {
+            $meta = ConvertFrom-Json $trimmed -ErrorAction SilentlyContinue
+            if ($meta -and $meta.Cookie) {
+                $trimmed = ([string]$meta.Cookie).Trim()
+            }
+        } catch { }
+    }
     if ($trimmed.StartsWith('Cookie:', [System.StringComparison]::OrdinalIgnoreCase)) {
         $trimmed = $trimmed.Substring(7).Trim()
     }
@@ -179,7 +223,70 @@ function Set-TeraBoxManualSession(
     }
 }
 
-function Test-TeraBoxBackendSession([hashtable]$SessionOverride = $null) {
+function Invoke-TeraBoxHttp(
+    [string]$Url,
+    [hashtable]$Headers = $null,
+    [int]$TimeoutSec = 15,
+    [object]$Window = $null
+) {
+    if (-not ([System.Management.Automation.PSTypeName]'System.Net.Http.HttpClient').Type) {
+        try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
+    }
+
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $handler.UseCookies = $false
+
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+    try {
+        $req = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Url)
+        if ($Headers) {
+            foreach ($k in $Headers.Keys) {
+                $req.Headers.TryAddWithoutValidation($k, [string]$Headers[$k]) | Out-Null
+            }
+        }
+
+        $task = $client.SendAsync($req)
+        if ($Window -and (Get-Command 'Wait-WpfTask' -ErrorAction SilentlyContinue)) {
+            $done = Wait-WpfTask -Task $task -TimeoutMs ($TimeoutSec * 1000) -Window $Window
+            if (-not $done) {
+                throw "HTTP request timed out after $TimeoutSec seconds."
+            }
+        } else {
+            $task.Wait()
+        }
+
+        $resp = $task.Result
+        if ([int]$resp.StatusCode -ge 300 -and [int]$resp.StatusCode -lt 400) {
+            return [ordered]@{
+                errno = -6
+                error = 'TeraBox redirected the request (session expired or login required).'
+            }
+        }
+
+        $readTask = $resp.Content.ReadAsStringAsync()
+        if ($Window -and (Get-Command 'Wait-WpfTask' -ErrorAction SilentlyContinue)) {
+            [void](Wait-WpfTask -Task $readTask -TimeoutMs 5000 -Window $Window)
+        } else {
+            $readTask.Wait()
+        }
+
+        $body = $readTask.Result
+        if ($body) {
+            return (ConvertFrom-Json $body -ErrorAction SilentlyContinue)
+        }
+        return $null
+    } finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
+function Test-TeraBoxBackendSession(
+    [hashtable]$SessionOverride = $null,
+    [object]$Window = $null
+) {
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
     if (-not $session) {
         return [ordered]@{
@@ -191,9 +298,10 @@ function Test-TeraBoxBackendSession([hashtable]$SessionOverride = $null) {
     }
 
     try {
+        $standardUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         $headers = @{
             'Accept' = 'application/json, text/plain, */*'
-            'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NSCloudDrive/1.0'
+            'User-Agent' = $standardUserAgent
         }
 
         $checkUrl = ''
@@ -201,31 +309,56 @@ function Test-TeraBoxBackendSession([hashtable]$SessionOverride = $null) {
             $checkUrl = "https://www.terabox.com/openapi/uinfo?access_tokens=$([System.Uri]::EscapeDataString($session.Secret))"
         } else {
             # Web session
-            $headers['Referer'] = 'https://www.terabox.com/'
+            $baseUrl = if ($session.BaseUrl) { $session.BaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
+            $headers['Referer'] = "$baseUrl/"
             $headers['X-Requested-With'] = 'XMLHttpRequest'
             $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
-            $checkUrl = "https://www.terabox.com/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1"
+            $checkUrl = "$baseUrl/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1"
+            if ($session.JsToken) {
+                $checkUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+            }
         }
 
-        $response = Invoke-RestMethod -Uri $checkUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
+        $response = $null
+        if ($Window) {
+            $response = Invoke-TeraBoxHttp -Url $checkUrl -Headers $headers -TimeoutSec 15 -Window $Window
+        } else {
+            $response = Invoke-RestMethod -Uri $checkUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
+        }
 
-        if ($response -and $response.errno -eq 0) {
+        if ($response -and $null -ne $response.errno -and $response.errno -eq 0) {
+            $displayName = if ($response.username) {
+                $response.username
+            } elseif ($response.uk) {
+                $ukStr = [string]$response.uk
+                "TeraBox user …$($ukStr.Substring([Math]::Max(0, $ukStr.Length - 4)))"
+            } else {
+                'TeraBox User'
+            }
+
             return [ordered]@{
                 IsValid = $true
                 State = 'Connected'
                 Error = $null
                 UserInfo = [ordered]@{
                     Type = $session.Type
-                    UserName = $(if ($response.username) { $response.username } else { 'TeraBox User' })
+                    UserName = $displayName
                     Uk = $response.uk
                 }
             }
         } else {
-            $errno = if ($response.errno) { $response.errno } else { -1 }
+            $errno = if ($response -and $null -ne $response.errno) { $response.errno } else { -1 }
+            $errDetail = switch ($errno) {
+                -6 { 'TeraBox backend returned error code: -6 (Session may have expired or requires re-authentication).' }
+                4000023 { 'TeraBox backend returned error code: 4000023 (Page token jsToken is missing or expired).' }
+                450016 { 'TeraBox backend returned error code: 450016 (Security verification required by TeraBox).' }
+                default { "TeraBox backend returned error code: $errno." }
+            }
+
             return [ordered]@{
                 IsValid = $false
                 State = 'AuthenticationExpired'
-                Error = "TeraBox backend returned error code: $errno (Session may have expired or requires re-authentication)."
+                Error = $errDetail
                 UserInfo = $null
             }
         }
@@ -270,7 +403,11 @@ function Test-TeraBoxAccountScope([hashtable]$SessionOverride = $null) {
     }
 }
 
-function Get-TeraBoxFileList([string]$Directory = '/', [hashtable]$SessionOverride = $null) {
+function Get-TeraBoxFileList(
+    [string]$Directory = '/',
+    [hashtable]$SessionOverride = $null,
+    [object]$Window = $null
+) {
     $scopeInfo = Test-TeraBoxAccountScope -SessionOverride $SessionOverride
     if (-not $scopeInfo.ScopeVerified) {
         return [ordered]@{
@@ -282,9 +419,10 @@ function Get-TeraBoxFileList([string]$Directory = '/', [hashtable]$SessionOverri
 
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
     try {
+        $standardUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         $headers = @{
             'Accept' = 'application/json, text/plain, */*'
-            'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NSCloudDrive/1.0'
+            'User-Agent' = $standardUserAgent
         }
 
         $listUrl = ''
@@ -293,16 +431,25 @@ function Get-TeraBoxFileList([string]$Directory = '/', [hashtable]$SessionOverri
             $tokenParam = [System.Uri]::EscapeDataString($session.Secret)
             $listUrl = "https://www.terabox.com/openapi/api/list?dir=$dirParam&access_tokens=$tokenParam&page=1&num=100"
         } else {
-            $headers['Referer'] = 'https://www.terabox.com/'
+            $baseUrl = if ($session.BaseUrl) { $session.BaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
+            $headers['Referer'] = "$baseUrl/"
             $headers['X-Requested-With'] = 'XMLHttpRequest'
             $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
             $dirParam = [System.Uri]::EscapeDataString($Directory)
-            $listUrl = "https://www.terabox.com/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1&dir=$dirParam&page=1&num=100"
+            $listUrl = "$baseUrl/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&web=1&dir=$dirParam&page=1&num=100"
+            if ($session.JsToken) {
+                $listUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+            }
         }
 
-        $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
+        $response = $null
+        if ($Window) {
+            $response = Invoke-TeraBoxHttp -Url $listUrl -Headers $headers -TimeoutSec 15 -Window $Window
+        } else {
+            $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
+        }
 
-        if ($response -and $response.errno -eq 0) {
+        if ($response -and $null -ne $response.errno -and $response.errno -eq 0) {
             $items = @()
             if ($response.list) {
                 foreach ($item in $response.list) {
@@ -323,10 +470,11 @@ function Get-TeraBoxFileList([string]$Directory = '/', [hashtable]$SessionOverri
                 Error = $null
             }
         } else {
+            $errno = if ($response -and $null -ne $response.errno) { $response.errno } else { -1 }
             return [ordered]@{
                 Success = $false
                 Files = @()
-                Error = "TeraBox directory listing failed with code $($response.errno)"
+                Error = "TeraBox directory listing failed with code $errno"
             }
         }
     } catch {
