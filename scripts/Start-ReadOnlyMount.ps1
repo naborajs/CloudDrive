@@ -11,6 +11,51 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Resolve-SafeCacheDirectory([string]$Path) {
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        throw 'The cache directory must be an absolute local drive path.'
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($volumeRoot -notmatch '^[A-Za-z]:\\$') {
+        throw 'The cache directory must be on a local drive, not a network or device path.'
+    }
+
+    $normalizedPath = $fullPath.TrimEnd('\')
+    if ($normalizedPath -eq $volumeRoot.TrimEnd('\')) {
+        throw 'The cache directory cannot be the root of a volume.'
+    }
+
+    $volume = [System.IO.DriveInfo]::new($volumeRoot)
+    if (-not $volume.IsReady -or $volume.DriveType -ne [System.IO.DriveType]::Fixed -or $volume.DriveFormat -ne 'NTFS') {
+        throw "The cache must be on a ready, fixed NTFS volume: $volumeRoot"
+    }
+    if ($volume.AvailableFreeSpace -lt 25GB) {
+        throw "At least 25 GiB must be free on the cache volume before using the 20 GiB best-effort cache: $volumeRoot"
+    }
+
+    $rootWithoutSeparator = $volumeRoot.TrimEnd('\')
+    $currentPath = $normalizedPath
+    while ($currentPath -and $currentPath -ne $rootWithoutSeparator) {
+        if (Test-Path -LiteralPath $currentPath) {
+            $item = Get-Item -LiteralPath $currentPath -Force
+            if (-not $item.PSIsContainer) {
+                throw "A cache path component is not a directory: $currentPath"
+            }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "The cache path cannot contain a junction or symbolic link: $currentPath"
+            }
+        }
+
+        $parent = [System.IO.Directory]::GetParent($currentPath)
+        if (-not $parent) { break }
+        $currentPath = $parent.FullName.TrimEnd('\')
+    }
+
+    return $fullPath
+}
+
 $rclonePath = Join-Path $BuildRoot 'rclone.exe'
 $manifestPath = Join-Path $BuildRoot 'rclone.build.json'
 $patchPath = Join-Path $PSScriptRoot '..\patches\rclone-terabox-v1.75.2-extra-secret-safety.patch'
@@ -40,14 +85,7 @@ if ([System.IO.DriveInfo]::GetDrives().Name -contains $drivePath) {
     throw "Drive $drivePath is already in use. Choose another drive letter or disconnect the existing drive first."
 }
 
-$cacheRoot = [System.IO.Path]::GetPathRoot($CacheDirectory)
-$cacheVolume = [System.IO.DriveInfo]::new($cacheRoot)
-if (-not $cacheVolume.IsReady -or $cacheVolume.DriveFormat -ne 'NTFS') {
-    throw "The cache volume must be a ready NTFS volume: $cacheRoot"
-}
-if ($cacheVolume.AvailableFreeSpace -lt 25GB) {
-    throw "At least 25 GiB must be free on the cache volume before using the 20 GiB best-effort cache: $cacheRoot"
-}
+$CacheDirectory = Resolve-SafeCacheDirectory -Path $CacheDirectory
 
 $previousPasswordCommand = $env:RCLONE_PASSWORD_COMMAND
 try {
@@ -62,6 +100,7 @@ try {
     if (-not (Test-Path -LiteralPath $CacheDirectory)) {
         New-Item -ItemType Directory -Path $CacheDirectory | Out-Null
     }
+    $CacheDirectory = Resolve-SafeCacheDirectory -Path $CacheDirectory
 
     Write-Output "Starting read-only $RemoteName mount at $drivePath. Keep this window open; press Ctrl+C to unmount."
     Write-Output 'Backend diagnostics are disabled. No log file is written.'
