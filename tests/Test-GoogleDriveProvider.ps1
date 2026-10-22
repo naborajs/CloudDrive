@@ -165,6 +165,34 @@ try {
     }
     Write-Output '  [PASS] WebUtility HtmlEncode verified'
 
+    # 8. Test publisher bundled configuration discovery and placeholder filtering
+    $tempBundledDir = Join-Path $env:TEMP ('NSCloudDrive_BundledTest_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempBundledDir -Force | Out-Null
+    try {
+        $placeholderJson = '{"installed":{"client_id":"YOUR_CLIENT_ID_HERE.apps.googleusercontent.com"}}'
+        $placeholderFile = Join-Path $tempBundledDir 'google-oauth.json'
+        Set-Content -LiteralPath $placeholderFile -Value $placeholderJson
+
+        $validJson = '{"installed":{"client_id":"publisher-bundled-12345.apps.googleusercontent.com","client_secret":"pub-secret-xyz"}}'
+        $validFile = Join-Path $tempBundledDir 'valid-client.json'
+        Set-Content -LiteralPath $validFile -Value $validJson
+
+        # Test Import-GoogleOAuthConfigFile
+        $imported = Import-GoogleOAuthConfigFile -SourceFilePath $validFile
+        if (-not $imported.IsConfigured) {
+            throw 'Imported configuration was not recognized as configured.'
+        }
+        if ($imported.ClientId -ne 'publisher-bundled-12345.apps.googleusercontent.com') {
+            throw "Expected ClientId 'publisher-bundled-12345.apps.googleusercontent.com', found '$($imported.ClientId)'"
+        }
+        if ($imported.ClientSecret -ne 'pub-secret-xyz') {
+            throw "Expected ClientSecret 'pub-secret-xyz', found '$($imported.ClientSecret)'"
+        }
+    } finally {
+        Remove-Item -LiteralPath $tempBundledDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Output '  [PASS] Publisher configuration import, placeholder filtering, and client secret discovery verified'
+
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
