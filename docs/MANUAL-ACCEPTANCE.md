@@ -74,8 +74,10 @@ Only perform session-expiry testing through a supported user-controlled revoke/r
 - [ ] Reauthenticate locally and verify the same mount recovers without displaying a secret.
 - [ ] Repeat launch, mount, stop, and restart to verify idempotence and no duplicate T: mounts.
 - [ ] Test sleep/resume, network changes, sign-out, multiple user sessions, and T: conflicts.
-- [ ] Only after all previous gates pass, enable optional per-user sign-in startup; verify it waits for network, uses the same account/config, and reports failures visibly.
-- [ ] Remove startup opt-in and uninstall; confirm credentials are removed only with explicit user intent and cache/pending data is preserved.
+- [ ] Only after Gates 0-2 pass and a read-only mount is still the intended mode, run `scripts/Manage-UserMountStartup.ps1 -Enable -ReadOnlyAcceptancePassed` to register the limited current-user logon task. Verify its trigger, principal, and retry settings in Task Scheduler.
+- [ ] Test logon while online and while offline; record whether the mount starts after connectivity returns. The current task setup has bounded retries but no verified network-availability detector.
+- [ ] Remove startup opt-in with `scripts/Manage-UserMountStartup.ps1 -Remove`; confirm only the named NS Cloud Drive task is removed.
+- [ ] On uninstall, remove credentials only with explicit user intent and preserve the cache and any pending data.
 
 ## Acceptance record
 
