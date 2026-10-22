@@ -110,4 +110,11 @@ if ($gdStatus.IsMounted -ne $false -or $gdStatus.ProviderId -ne 'gdrive') {
 }
 Write-Output '  [PASS] Provider-specific virtual drive status verified'
 
+# 11. Test Multi-account Get-VirtualDriveStatus with AccountId
+$accountStatus = Get-VirtualDriveStatus -AccountId 'gdrive_work' -ProviderId 'gdrive'
+if ($accountStatus.IsMounted -ne $false) {
+    throw 'Expected account status object to reflect unmounted state'
+}
+Write-Output '  [PASS] Multi-account virtual drive status tracking verified'
+
 Write-Output 'All VirtualDriveManager tests passed.'

@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\scripts\CachePathSafety.ps1')
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot 'SettingsManager.ps1')
+. (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 
 $script:DefaultDriveLetter = 'T'
 $script:DefaultCacheDirectory = 'D:\CloudCache'
@@ -101,15 +102,24 @@ function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
 
 function Get-VirtualDriveStatus(
     [string]$DriveLetter = '',
-    [string]$ProviderId = ''
+    [string]$ProviderId = '',
+    [string]$AccountId = ''
 ) {
+    $mountKey = if (-not [string]::IsNullOrEmpty($AccountId)) {
+        $AccountId
+    } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
+        $ProviderId
+    } else {
+        ''
+    }
+
     $letter = ''
     if (-not [string]::IsNullOrEmpty($DriveLetter)) {
         $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
-        if ($script:ProviderDriveMapping.ContainsKey($ProviderId)) {
-            $letter = $script:ProviderDriveMapping[$ProviderId]
-        } else {
+    } elseif (-not [string]::IsNullOrEmpty($mountKey)) {
+        if ($script:ProviderDriveMapping.ContainsKey($mountKey)) {
+            $letter = $script:ProviderDriveMapping[$mountKey]
+        } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
             $letter = Get-PreferredDriveLetter $ProviderId
         }
     } else {
@@ -120,8 +130,8 @@ function Get-VirtualDriveStatus(
     $driveInfo = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -eq $driveRoot }
 
     $processAlive = $false
-    if (-not [string]::IsNullOrEmpty($ProviderId) -and $script:ActiveMountProcesses.ContainsKey($ProviderId)) {
-        $p = $script:ActiveMountProcesses[$ProviderId]
+    if (-not [string]::IsNullOrEmpty($mountKey) -and $script:ActiveMountProcesses.ContainsKey($mountKey)) {
+        $p = $script:ActiveMountProcesses[$mountKey]
         if ($p -and (-not $p.HasExited)) { $processAlive = $true }
     } elseif ($script:MountProcess -and (-not $script:MountProcess.HasExited)) {
         $processAlive = $true
@@ -222,6 +232,7 @@ function Start-VirtualDriveMount(
     [Parameter(Mandatory = $true)]
     [string]$RemoteName,
     [string]$ProviderId = '',
+    [string]$AccountId = '',
     [string]$DriveLetter = '',
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
@@ -238,8 +249,26 @@ function Start-VirtualDriveMount(
     }
 
     $resolvedProvider = if (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
+    $mountKey = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } elseif (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
+
+    # If TeraBox is being mounted, start the local CPX WebDAV bridge and configure WebDAV rclone remote
+    if ($RemoteName -eq 'terabox' -or $resolvedProvider -eq 'terabox') {
+        try {
+            $bridgeStatus = Start-TeraBoxBridge
+            if ($bridgeStatus.Success) {
+                $bridgeEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus.Password -Port $bridgeStatus.Port -RcloneBinary $rclonePath -RemoteName $RemoteName
+                foreach ($k in $bridgeEnv.Keys) {
+                    $EnvironmentVariables[$k] = $bridgeEnv[$k]
+                }
+            }
+        } catch {
+            throw "Failed to start TeraBox WebDAV bridge: $($_.Exception.Message)"
+        }
+    }
+
     $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
-    $letter = Get-NextAvailableDriveLetter $prefLetter
+    $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $letter = if (Test-DriveLetterAvailable $cleanLetter) { $cleanLetter } else { Get-NextAvailableDriveLetter $cleanLetter }
     $driveRoot = "$letter`:\"
 
     $volName = if (-not [string]::IsNullOrEmpty($VolumeLabel)) {
@@ -252,8 +281,8 @@ function Start-VirtualDriveMount(
         'NS Cloud Drive'
     }
 
-    # Isolated provider cache directory
-    $providerCache = Join-Path $CacheDirectory $resolvedProvider
+    # Isolated cache directory per mountKey
+    $providerCache = Join-Path $CacheDirectory $mountKey
     $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath ''
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -268,16 +297,16 @@ function Start-VirtualDriveMount(
     }
 
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $script:ActiveMountProcesses[$resolvedProvider] = $proc
-    $script:ProviderDriveMapping[$resolvedProvider] = $letter
+    $script:ActiveMountProcesses[$mountKey] = $proc
+    $script:ProviderDriveMapping[$mountKey] = $letter
     $script:MountProcess = $proc
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         if ($proc.HasExited) {
             $err = $proc.StandardError.ReadToEnd()
-            $script:ActiveMountProcesses.Remove($resolvedProvider)
-            $script:ProviderDriveMapping.Remove($resolvedProvider)
+            $script:ActiveMountProcesses.Remove($mountKey)
+            $script:ProviderDriveMapping.Remove($mountKey)
             if ($script:MountProcess -eq $proc) { $script:MountProcess = $null }
             throw "rclone mount exited prematurely (exit code $($proc.ExitCode)): $err"
         }
@@ -287,6 +316,7 @@ function Start-VirtualDriveMount(
             return [ordered]@{
                 Success = $true
                 ProviderId = $resolvedProvider
+                AccountId = $AccountId
                 DriveLetter = $letter
                 DriveRoot = $driveRoot
                 VolumeLabel = $volName
@@ -298,19 +328,22 @@ function Start-VirtualDriveMount(
     }
 
     # If timeout elapsed without mount appearing
-    Stop-VirtualDriveMount -ProviderId $resolvedProvider
+    Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId
     throw "Mount operation timed out waiting for $driveRoot to appear in Windows."
 }
 
 function Stop-VirtualDriveMount(
     [string]$ProviderId = '',
+    [string]$AccountId = '',
     [string]$DriveLetter = ''
 ) {
     $stoppedAny = $false
 
-    # Determine which providers to stop
+    # Determine which targets to stop
     $targets = @()
-    if (-not [string]::IsNullOrEmpty($ProviderId)) {
+    if (-not [string]::IsNullOrEmpty($AccountId)) {
+        $targets += $AccountId
+    } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
         $targets += $ProviderId
     } elseif (-not [string]::IsNullOrEmpty($DriveLetter)) {
         $cleanLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
@@ -347,6 +380,11 @@ function Stop-VirtualDriveMount(
             $stoppedAny = $true
         } catch { }
         $script:MountProcess = $null
+    }
+
+    # If stopping TeraBox, also gracefully terminate TeraBox bridge daemon
+    if ($ProviderId -eq 'terabox' -or $AccountId -match 'terabox' -or ($targets -contains 'terabox')) {
+        try { Stop-TeraBoxBridge } catch { }
     }
 
     # Clean up any matching orphaned rclone processes
