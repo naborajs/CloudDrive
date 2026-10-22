@@ -86,6 +86,7 @@ Each commit changed one file and was pushed to `origin/main`:
 - `c9b3ab0` — clarify official TeraBox OAuth limitations.
 - `0d10f2f` — ignore local credentials and runtime artifacts.
 - `a1191aa` — reject unsafe read-only mount cache paths.
+- `bb44e2f` — document read-only cache path guard.
 
 ## Required next evidence
 
