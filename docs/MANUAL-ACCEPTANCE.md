@@ -6,9 +6,10 @@ Use a disposable folder and non-important test files in the account. Keep the ap
 
 ## Gate 0: source, build, and local prerequisites
 
-- [ ] Pin the backend source commit and record its license notices and build tool versions.
+- [x] Pin patch-development source to `gulp79/rclone-extra` tag `v1.75.2-extra`, commit `56bf13885494819bc801302ddf881279bdac7262`; the patch applies cleanly.
+- [ ] Audit license notices and record actual build tool versions.
 - [ ] Verify session settings are marked sensitive and synthetic credentials do not appear in logs, exceptions, debug output, crash reports, or sanitized support exports.
-- [ ] Build a Windows binary with the TeraBox backend and Windows mount support from reviewed source; record its SHA-256.
+- [ ] Run `scripts/Build-PatchedRclone.ps1` after installing Go 1.26+, MinGW, and WinFsp FUSE developer headers; verify the produced binary and record its SHA-256.
 - [ ] Install WinFsp from its official source and verify the version.
 - [ ] Verify `rclone config providers` lists `terabox` without displaying configuration values.
 - [ ] Confirm the cache volume is NTFS, has adequate free space, and is not a reparse point or shared/network folder.
@@ -26,9 +27,11 @@ Do not attempt authentication if any of the security/build checks fail.
 
 If the reviewed backend only supports cookie copying, stop and report the limitation instead of asking the user to paste a cookie.
 
+**Current blocker:** the pinned backend still documents cookie-based session configuration; no approved local sign-in or session-store flow has been established. Do not proceed to Gate 2 by manually copying browser cookies.
+
 ## Gate 2: read-only mount
 
-- [ ] Start the mount as `T:` in read-only mode, non-elevated, with `D:\CloudCache\TeraBox` and a 20 GiB best-effort size target.
+- [ ] After Gates 0 and 1 pass, run `scripts/Start-ReadOnlyMount.ps1` in a visible, non-elevated PowerShell session. It starts a foreground `T:` read-only mount using `D:\CloudCache\TeraBox` and a 20 GiB best-effort cache target; Ctrl+C stops it.
 - [ ] Verify the app reports `ReadOnlyMounted` only after T: is visible in the same user's File Explorer session and a remote health/list probe succeeds.
 - [ ] Browse root and nested folders, including Unicode names, duplicate-looking names, directories with many entries, and files with unusual extensions.
 - [ ] Compare metadata displayed by Explorer with the TeraBox web/app view; record known limitations for modtime/hash.
