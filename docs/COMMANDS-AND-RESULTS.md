@@ -13,7 +13,9 @@
 | Apply the committed cookie-safety patch to a clean detached worktree at that tag | `git apply --check`, patch application, and `git diff --check` passed; the changed source file is `backend/terabox/terabox.go`. | Static patch-application test only; no Go compiler is installed and no runtime secret-redaction test ran. |
 | Inspect pinned backend debug calls and option registry | `fs.Option.Sensitive` exists in the pinned rclone source; backend `debug()` returns when `DebugLevel < level`; `NewFs` contains the complete-options debug call removed by the patch. | Source review only. The patch pins backend debug level to zero, disabling all backend-specific debug traces. |
 | Parse `scripts/Build-PatchedRclone.ps1` with the PowerShell parser | Passed. | Syntax only; build was not run. |
-| Run `scripts/Build-PatchedRclone.ps1` with this PC's current prerequisites | Reproduced exact first error: `Exception: ...\scripts\Build-PatchedRclone.ps1:23` followed by `WinFsp FUSE development header fuse.h was not found under: C:\Program Files (x86)\WinFsp\inc\fuse`. The build root did not exist afterward. | Stopped at its first preflight guard, before source clone/download or build. Go and both expected MinGW compiler commands are also absent, so later build stages remain untested. |
+| Run the original `scripts/Build-PatchedRclone.ps1` with the original cgo prerequisites | Reproduced exact first error: `Exception: ...\scripts\Build-PatchedRclone.ps1:23` followed by `WinFsp FUSE development header fuse.h was not found under: C:\Program Files (x86)\WinFsp\inc\fuse`. The build root did not exist afterward. | Stopped at its first preflight guard, before source clone/download or build. This triggered review of the no-cgo route; no installation or source build occurred. |
+| Parse and rerun revised `scripts/Build-PatchedRclone.ps1` using `CGO_ENABLED=0` | PowerShell parser passed. Helper now stops with `Required build tool is missing from PATH: go`; the build root did not exist afterward. | Confirms syntax and missing-Go fail-fast behavior only. No source clone, Go compilation, provider-list check, or mount occurred. The revised no-cgo route is not yet built against this exact source tag. |
+| Check pinned Windows mount dependency for a no-cgo route | Pinned `go.mod` uses `github.com/winfsp/cgofuse v1.6.1-0.20260126094232-f2c4fccdb286`; current rclone and cgofuse docs describe Windows `CGO_ENABLED=0` support. | Dependency/source and documentation check only. The exact fork/tag compile remains unverified without Go. |
 | Compare pinned Windows build workflow with official rclone Windows guidance | Pinned workflow uses Go `1.26.x`, MinGW, WinFsp `v2.1` headers, cgo, and `cmount`; official rclone guidance documents the Windows cgo/MinGW/WinFsp Developer route and separately mentions cgo-disabled Windows builds. | Source/documentation comparison only. The cgo-disabled alternative was not attempted against this fork; the GitHub workflow also references moving `rsrc@latest` and `master` icon inputs. |
 | Inspect exact pinned TeraBox cookie path | Backend config requires full website cookie or `ndus`; the constructor logs the full options struct at backend debug level 1, and API requests send the option as the HTTP `Cookie` header. No cookie renewal flow was found; invalid-cookie errors are not a refresh flow. | Pinned source review only. No cookie was obtained or used; patched build and synthetic-secret log/config-redaction checks remain unrun. |
 | Check pinned release asset trust evidence | GitHub release metadata publishes a Windows ZIP SHA-256; a signed/verified source tag is shown. No binary signature or build attestation was established. | Metadata/source inspection only. Asset not downloaded or executed; checksum alone does not verify publisher build provenance. |
@@ -97,10 +99,14 @@ Each commit changed one file and was pushed to `origin/main`:
 - `a450a0e` — gate mount testing on build and auth evidence.
 - `46ef5be` — document pinned TeraBox auth and log limits.
 - `4c1ade9` — add exact local backend build prerequisites.
+- `dae1386` — build Windows cmount without cgo toolchain.
+- `68a2ed7` — update backend plan for no-cgo build.
+- `1a02d4e` — document no-cgo Windows backend build.
+- `9153dd0` — record no-cgo source build route.
 
 ## Required next evidence
 
-1. Provide Go 1.26+, MinGW, and WinFsp FUSE development headers; run the pinned builder and verify its output.
+1. After Go 1.26+ is installed locally, run the revised cgo-free pinned builder and verify the source commit, patch, Windows `cmount` tag, provider registration, and manifest. Install WinFsp runtime before any mount test; MinGW and Developer headers are not prerequisites for this builder path.
 2. Test the DPAPI interactive save flow and native Windows PowerShell subprocess on an unrestricted Windows session; add/run synthetic-secret tests for backend config redaction and diagnostics.
 3. Audit the exact pinned build's license notices; then verify provider registration. A compliant TeraBox sign-in path remains a blocker before any account access.
 4. After compliant authentication is available, perform user-controlled read-only account tests locally; only then consider disposable writable/recovery/cache tests and record exact versions and observed results.
