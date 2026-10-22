@@ -39,15 +39,15 @@ The preview has only been syntax-checked on the development PC. Its UI and prere
 
 [`scripts/Build-PatchedRclone.ps1`](scripts/Build-PatchedRclone.ps1) builds a Windows x64 executable from the pinned `gulp79/rclone-extra` source tag and applies the repository's cookie-safety patch. It refuses to reuse an existing build folder and verifies the executable reports both `cmount` and the `terabox` provider. It does not install prerequisites, configure an account, or test a live TeraBox connection.
 
-The pinned source requires Go 1.26 or newer. Its Windows `cmount` build workflow also uses MinGW and WinFsp FUSE development headers; the helper checks for these prerequisites before downloading source. rclone's Windows mounting guidance requires WinFsp, and the Developer feature is required when building with cgo. See [rclone Windows build instructions](https://rclone.org/install/) and the [pinned backend workflow](https://github.com/gulp79/rclone-extra/blob/v1.75.2-extra/.github/workflows/build.yml).
+The pinned source requires Go 1.26 or newer. The project helper builds its Windows `cmount` target with `CGO_ENABLED=0`; the pinned source uses cgofuse, whose Windows no-cgo mode is documented by [rclone](https://rclone.org/install/) and [cgofuse](https://github.com/winfsp/cgofuse). This removes MinGW and WinFsp FUSE development headers from the local build prerequisites. WinFsp itself is still required at runtime to mount the filesystem. The pinned upstream workflow uses a separate cgo-enabled MinGW build; the project helper does not copy that workflow and this exact no-cgo build still requires a successful compile before it is considered verified. See also the [pinned backend workflow](https://github.com/gulp79/rclone-extra/blob/v1.75.2-extra/.github/workflows/build.yml).
 
-After installing those prerequisites through sources you trust, run the helper from the repository root:
+After installing Go from a source you trust, run the helper from the repository root:
 
 ```powershell
 powershell.exe -NoProfile -File .\scripts\Build-PatchedRclone.ps1
 ```
 
-The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. A successful build proves only that the pinned source builds and registers the provider; the build has not yet been run in this environment, and account login, Explorer mounting, file reads, and writes remain unverified.
+The helper needs Git (already present in this environment) and Go 1.26 or newer; it does not require MinGW or WinFsp Developer headers. The resulting files are kept under `%LOCALAPPDATA%\NSCloudDrive\builds\rclone-extra-v1.75.2-extra`. The revised helper passes PowerShell syntax and missing-Go preflight checks, but has not compiled the pinned source. A successful build must report `windows/amd64`, `cmount`, and the registered `terabox` provider. Account login, Explorer mounting, file reads, and writes remain unverified.
 
 ## Read-only mount test
 
