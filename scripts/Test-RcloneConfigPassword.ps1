@@ -25,6 +25,8 @@ $helperPath = Join-Path $PSScriptRoot 'RcloneConfigPassword.ps1'
 $savedLocalAppData = $env:LOCALAPPDATA
 $savedConsoleOut = [Console]::Out
 $consoleCapture = [System.IO.StringWriter]::new()
+$userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
 $secureMarker = $null
 $marker = 'synthetic-' + [Guid]::NewGuid().ToString('N')
 
@@ -34,9 +36,40 @@ try {
     }
 
     New-Item -ItemType Directory -Path $credentialDirectory -Force | Out-Null
+    $helperTokens = $null
+    $helperErrors = $null
+    $helperAst = [System.Management.Automation.Language.Parser]::ParseFile($helperPath, [ref]$helperTokens, [ref]$helperErrors)
+    if ($helperErrors.Count -gt 0) {
+        throw 'Could not parse the credential helper for its ACL self-test.'
+    }
+    $aclFunctionAst = $helperAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'New-PrivateAcl'
+    }, $true)
+    if (-not $aclFunctionAst) {
+        throw 'The credential helper ACL function was not found.'
+    }
+    Invoke-Expression $aclFunctionAst.Extent.Text
+
+    Set-Acl -LiteralPath $credentialDirectory -AclObject (New-PrivateAcl $true)
+    $directoryAcl = Get-Acl -LiteralPath $credentialDirectory
+    $directorySids = @($directoryAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+    if (-not $directoryAcl.AreAccessRulesProtected -or $directorySids.Count -ne 2 -or
+        $directorySids -notcontains $userSid.Value -or $directorySids -notcontains $systemSid.Value) {
+        throw 'The test credential directory ACL does not match the user-and-SYSTEM policy.'
+    }
+
     $secureMarker = ConvertTo-SecureString $marker -AsPlainText -Force
     $credential = [System.Management.Automation.PSCredential]::new('synthetic-test-only', $secureMarker)
     Export-Clixml -InputObject $credential -LiteralPath $credentialPath
+    Set-Acl -LiteralPath $credentialPath -AclObject (New-PrivateAcl $false)
+
+    $fileAcl = Get-Acl -LiteralPath $credentialPath
+    $fileSids = @($fileAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+    if (-not $fileAcl.AreAccessRulesProtected -or $fileSids.Count -ne 2 -or
+        $fileSids -notcontains $userSid.Value -or $fileSids -notcontains $systemSid.Value) {
+        throw 'The test credential file ACL does not match the user-and-SYSTEM policy.'
+    }
 
     $savedContent = Get-Content -LiteralPath $credentialPath -Raw
     if ($savedContent.Contains($marker)) {
@@ -78,4 +111,4 @@ finally {
     }
 }
 
-Write-Output 'Synthetic DPAPI fixture/read-helper round-trip passed; plaintext-at-rest and missing-credential checks passed. No real credential was used.'
+Write-Output 'Synthetic DPAPI read-back, plaintext-at-rest, private ACL, and missing-credential checks passed. No real credential was used.'
