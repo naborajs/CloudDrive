@@ -19,6 +19,47 @@ function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#
     return $block
 }
 
+function Show-GoogleSetupInstructionsDialog([System.Windows.Window]$Owner = $null) {
+    $instructions = @"
+GOOGLE DRIVE OAUTH 2.0 SETUP GUIDE FOR NS CLOUD DRIVE
+
+To connect Google Drive using official, secure OAuth 2.0 with PKCE (RFC 8252):
+
+1. Create a Google Cloud Project:
+   • Open Google Cloud Console: https://console.cloud.google.com/
+   • Create a new project (e.g., 'NS Cloud Drive').
+
+2. Enable Google Drive API:
+   • Navigate to 'APIs & Services' > 'Library'.
+   • Search for 'Google Drive API' and click 'Enable'.
+
+3. Configure OAuth Consent Screen:
+   • Navigate to 'APIs & Services' > 'OAuth consent screen'.
+   • User Type: Select 'External' (for standard personal Google accounts).
+   • App name: 'NS Cloud Drive' (enter your email under User support and Developer contact).
+   • Scopes: Add '.../auth/drive.readonly'.
+   • Test Users: Add your Google account email under 'Test users' (required while publishing status is 'Testing').
+   • Click Save and Continue.
+
+4. Create OAuth 2.0 Desktop Credentials:
+   • Navigate to 'APIs & Services' > 'Credentials' > '+ CREATE CREDENTIALS' > 'OAuth client ID'.
+   • Application type: Select 'Desktop app'.
+   • Name: 'NS Cloud Drive Desktop Client'.
+   • Click 'CREATE'.
+
+5. Configure NS Cloud Drive:
+   • Click 'DOWNLOAD JSON' in Google Cloud Console.
+   • Copy the downloaded JSON file into:
+     $env:LOCALAPPDATA\NSCloudDrive\config\google-oauth.json
+     (Or drop the downloaded 'client_secret_*.json' directly into that folder).
+   • Alternatively, set the environment variable:
+     setx GOOGLE_CLIENT_ID "your-client-id.apps.googleusercontent.com"
+
+Note: Native desktop apps use PKCE (RFC 7636); a client secret is NOT required.
+"@
+    Show-DiagnosticsDialog -Title 'Google Drive Setup' -DiagnosticsContent $instructions -Owner $Owner
+}
+
 function Show-DiagnosticsDialog([string]$Title, [string]$DiagnosticsContent, [System.Windows.Window]$Owner = $null) {
     $diagWindow = [System.Windows.Window]::new()
     $diagWindow.Title = "$Title - Diagnostics"
@@ -250,9 +291,63 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $actionStack.Children.Add($validateBtn) | Out-Null
     } elseif ($ProviderId -eq 'gdrive') {
         $actionStack.Children.Add((New-UIElement-Label 'Google Drive Authorization' 15 '#0F172A' $true)) | Out-Null
-        $methodDesc = New-UIElement-Label 'Sign in using Google''s official OAuth 2.0 flow. A local loopback listener will securely receive the authorization code.' 12 '#64748B'
-        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+        $methodDesc = New-UIElement-Label 'Sign in using Google''s official OAuth 2.0 flow with PKCE (RFC 7636). A local loopback listener will securely receive the authorization code.' 12 '#64748B'
+        $methodDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
         $actionStack.Children.Add($methodDesc) | Out-Null
+
+        $oauthCfg = Get-GoogleOAuthConfig
+
+        # Configuration status banner
+        $cfgCard = [System.Windows.Controls.Border]::new()
+        $cfgCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
+        $cfgCard.Padding = [System.Windows.Thickness]::new(12)
+        $cfgCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+
+        $cfgStack = [System.Windows.Controls.StackPanel]::new()
+        $cfgCard.Child = $cfgStack
+
+        if ($oauthCfg.IsConfigured) {
+            $cfgCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#ECFDF5')
+            $cfgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A7F3D0')
+            $cfgCard.BorderThickness = [System.Windows.Thickness]::new(1)
+            $maskedId = if ($oauthCfg.ClientId.Length -gt 16) { $oauthCfg.ClientId.Substring(0, 12) + '...' + $oauthCfg.ClientId.Substring($oauthCfg.ClientId.Length - 4) } else { $oauthCfg.ClientId }
+            $cfgLabel = New-UIElement-Label "OAuth Client Configured ($maskedId)" 12 '#065F46' $true
+            $cfgStack.Children.Add($cfgLabel) | Out-Null
+            $cfgSub = New-UIElement-Label 'PKCE desktop authorization ready. Click "Sign in with Google" to connect.' 11 '#047857'
+            $cfgSub.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
+            $cfgStack.Children.Add($cfgSub) | Out-Null
+        } else {
+            $cfgCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FEF3C7')
+            $cfgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FCD34D')
+            $cfgCard.BorderThickness = [System.Windows.Thickness]::new(1)
+            $cfgLabel = New-UIElement-Label 'Google OAuth Client ID Required' 12 '#92400E' $true
+            $cfgStack.Children.Add($cfgLabel) | Out-Null
+            $cfgSub = New-UIElement-Label 'A Desktop app OAuth client ID is required to connect to Google Drive. Client secret is optional with PKCE.' 11 '#78350F'
+            $cfgSub.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
+            $cfgStack.Children.Add($cfgSub) | Out-Null
+
+            $cfgBtnRow = [System.Windows.Controls.WrapPanel]::new()
+
+            $guideBtn = [System.Windows.Controls.Button]::new()
+            $guideBtn.Content = 'View Setup Guide'
+            $guideBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+            $guideBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+            $guideBtn.Add_Click({ Show-GoogleSetupInstructionsDialog -Owner $win })
+            $cfgBtnRow.Children.Add($guideBtn) | Out-Null
+
+            $openDirBtn = [System.Windows.Controls.Button]::new()
+            $openDirBtn.Content = 'Open Config Folder'
+            $openDirBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+            $openDirBtn.Add_Click({
+                if (-not (Test-Path -LiteralPath $oauthCfg.ConfigDirectory)) {
+                    New-Item -ItemType Directory -Path $oauthCfg.ConfigDirectory -Force | Out-Null
+                }
+                [System.Diagnostics.Process]::Start('explorer.exe', $oauthCfg.ConfigDirectory) | Out-Null
+            })
+            $cfgBtnRow.Children.Add($openDirBtn) | Out-Null
+            $cfgStack.Children.Add($cfgBtnRow) | Out-Null
+        }
+        $actionStack.Children.Add($cfgCard) | Out-Null
 
         $signInBtn = [System.Windows.Controls.Button]::new()
         $signInBtn.Content = 'Sign in with Google'
@@ -264,25 +359,28 @@ function Show-ProviderConnectionWindow([string]$ProviderId, [System.Windows.Wind
         $signInBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
 
         $signInBtn.Add_Click({
-            $oauthCfg = Get-GoogleOAuthConfig
-            if (-not $oauthCfg.IsConfigured) {
-                & $UpdateState 'Error' "Google OAuth Client ID is not configured. Set GOOGLE_CLIENT_ID environment variable or create $($oauthCfg.ConfigPath) with client_id and client_secret."
+            $currentOauth = Get-GoogleOAuthConfig
+            if (-not $currentOauth.IsConfigured) {
+                & $UpdateState 'Error' "Google OAuth Client ID is not configured. Click 'View Setup Guide' above for instructions or set GOOGLE_CLIENT_ID."
+                Show-GoogleSetupInstructionsDialog -Owner $win
                 return
             }
 
             & $UpdateState 'OpeningSignIn' 'Starting local authorization listener...'
             $state = New-OAuthState
+            $verifier = New-PkceVerifier
+            $challenge = New-PkceChallenge $verifier
             try {
                 $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
-                $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthCfg.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state
+                $authUrl = Build-GoogleAuthorizationUrl -ClientId $currentOauth.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge
                 & $UpdateState 'AwaitingUserAuth' "Please complete Google authorization in the browser ($($listenerCtx.RedirectUri))..."
                 [System.Diagnostics.Process]::Start($authUrl) | Out-Null
 
                 # Asynchronously wait for callback without blocking UI thread completely
                 $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { $isWindowClosing -or -not $win.IsVisible }
                 if ($waitResult.Success) {
-                    & $UpdateState 'ValidatingAuthorization' 'Exchanging authorization code for credentials...'
-                    $tokenResult = Exchange-GoogleAuthCode -ClientId $oauthCfg.ClientId -ClientSecret $oauthCfg.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri
+                    & $UpdateState 'ValidatingAuthorization' 'Exchanging authorization code with PKCE verifier...'
+                    $tokenResult = Exchange-GoogleAuthCode -ClientId $currentOauth.ClientId -ClientSecret $currentOauth.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
                     if ($tokenResult.Success) {
                         & $UpdateState 'CheckingAccountScope' 'Verifying Google Drive scope...'
                         $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
