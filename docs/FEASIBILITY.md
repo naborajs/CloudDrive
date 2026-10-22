@@ -140,3 +140,18 @@ The unofficial backend remains the only candidate in this project for existing f
 3. Produce a reproducible Windows build containing the backend and `cmount` support; verify `rclone config providers` reports `terabox` before any authentication.
 4. For full-drive scope, obtain a user-confirmed login flow that does not require copying cookies into chat or scripts, and document secure local session storage/renewal. If official Open API credentials are available, assess its assigned-folder scope as a separate provider rather than assuming it can expose the existing root.
 5. Only then proceed to an actual read-only mount and File Explorer test. No account credential is needed to continue source/build work; any later interactive account test must remain local to the user.
+
+## Error -6 Root-Cause Diagnosis & Embedded WebView2 Implementation (2026-10-23)
+
+### 1. Diagnosis of Error -6
+- **Request Endpoint:** `GET https://www.terabox.com/api/check/login?app_id=250528&channel=dubox&clienttype=0&web=1` and `GET https://www.terabox.com/api/quota?checkexpire=1&checkfree=1`
+- **Response Payload:** `{"errno": -6, "errmsg": "user not login", "request_id": 9151262417005902708}`
+- **Technical Finding:** `errno: -6` is an internal Baidu/Netdisk application-layer error code explicitly indicating `"user not login"`. When a user attempts manual cookie extraction from DevTools while still on `https://dm.terabox.com` or during Google OAuth redirect negotiation, TeraBox assigns a temporary, unauthenticated guest cookie. This guest cookie is rejected by the backend session validator because it has not completed the server-side login association to an authenticated user account.
+- **Resolution:** Rather than relying on fragile manual developer-tools cookie extraction that frequently captures pre-login tokens, an embedded Microsoft Edge WebView2 sign-in window was integrated.
+
+### 2. Embedded Microsoft Edge WebView2 Architecture
+- **Dedicated Application Profile:** WebView2 initializes with an isolated user data directory at `%LOCALAPPDATA%\NSCloudDrive\webview2-profile`. It never accesses or modifies the user's primary browser profile (Brave, Chrome, or Edge).
+- **Embedded Navigation:** The embedded browser navigates to `https://www.terabox.com/main`, allowing the user to complete interactive sign-in personally (Google OAuth, password, SMS, QR code).
+- **Automatic Session Detection:** A non-intrusive Dispatcher timer monitors `CoreWebView2.CookieManager.GetCookiesAsync('https://www.terabox.com')`. When authenticated session cookies (`ndus`, `browserid`) are detected, the session is validated live via `Test-TeraBoxBackendSession`.
+- **DPAPI Persistence & Virtual Drive Bridge:** Once verified, credentials are encrypted via Windows DPAPI (`terabox-session.xml`) with restricted NTFS ACLs (CurrentUser and SYSTEM only) and passed to child processes via dynamic environment variables (`RCLONE_CONFIG_TERABOX_COOKIE`).
+
