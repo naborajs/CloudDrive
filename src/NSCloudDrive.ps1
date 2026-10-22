@@ -20,6 +20,9 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
 $script:Settings = Get-NSCloudDriveSettings
+if (-not $PSBoundParameters.ContainsKey('Minimized') -and $script:Settings.StartMinimized) {
+    $Minimized = [switch]::Present
+}
 $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings.CacheDirectory } else { 'D:\CloudCache' }
 $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
@@ -101,11 +104,41 @@ $headerDock = [System.Windows.Controls.DockPanel]::new()
 $headerDock.Margin = [System.Windows.Thickness]::new(0, 0, 0, 18)
 $outer.Children.Add($headerDock) | Out-Null
 
-# Right side: Header actions (Settings, Diagnostics)
+# Right side: Header actions (Add Disk, Settings, Diagnostics)
 $headerActions = [System.Windows.Controls.StackPanel]::new()
 $headerActions.Orientation = 'Horizontal'
 [System.Windows.Controls.DockPanel]::SetDock($headerActions, 'Right')
 $headerDock.Children.Add($headerActions) | Out-Null
+
+$addDiskBtn = [System.Windows.Controls.Button]::new()
+$addDiskBtn.Content = '+ Add Cloud Disk'
+$addDiskBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$addDiskBtn.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$addDiskBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$addDiskBtn.Foreground = [System.Windows.Media.Brushes]::White
+$addDiskBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$addDiskBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$addDiskBtn.Add_Click({
+    Show-AddCloudDiskModal -Owner $window -OnProviderSelected {
+        param($selected)
+        if ($selected -eq 'gdrive') {
+            $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+            if (-not $gdStatus.IsMounted) {
+                $gdConnectBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+            } else {
+                [System.Diagnostics.Process]::Start('explorer.exe', $gdStatus.DriveRoot) | Out-Null
+            }
+        } elseif ($selected -eq 'terabox') {
+            $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+            if (-not $tbStatus.IsMounted) {
+                $tbConnectBtn.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+            } else {
+                [System.Diagnostics.Process]::Start('explorer.exe', $tbStatus.DriveRoot) | Out-Null
+            }
+        }
+    }
+})
+$headerActions.Children.Add($addDiskBtn) | Out-Null
 
 $settingsBtn = [System.Windows.Controls.Button]::new()
 $settingsBtn.Content = '⚙ Settings'
@@ -587,7 +620,10 @@ $gdConnectBtn.Add_Click({
                         $gdAccountText.Text = "Mounting virtual drive ($($script:GDriveLetter):)..."
                         try {
                             $envVars = Get-GoogleDriveRcloneEnvironment
-                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                            $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
+                            if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
+                                [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                            }
                         } catch {
                             $gdErrorText.Text = "Connected, but could not mount $($script:GDriveLetter): $($_.Exception.Message)"
                             $gdErrorText.Visibility = 'Visible'
@@ -665,7 +701,10 @@ $tbConnectBtn.Add_Click({
             if ($verifiedRclone -and (Test-WinFspInstalled)) {
                 try {
                     $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                    $mRes = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
+                    if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
+                        [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                    }
                 } catch {
                     $tbErrorText.Text = "Connected, but could not mount $($script:TeraBoxLetter): $($_.Exception.Message)"
                     $tbErrorText.Visibility = 'Visible'
