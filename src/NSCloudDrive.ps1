@@ -342,7 +342,7 @@ $addDiskBtn.Add_Click({
             $created = Connect-NewCloudAccount -Owner $window -ProviderId 'terabox'
             if ($created) {
                 try {
-                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                    $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $created.Id
                     $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
                     if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
                         [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
@@ -1112,7 +1112,7 @@ function Update-AllUIState {
                             $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $currAcc.Id -RemoteName 'gdrive'
                             Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
                         } elseif ($currAcc.ProviderId -eq 'terabox') {
-                            $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                            $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $currAcc.Id
                             Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
                         }
                     } catch { }
@@ -1242,8 +1242,15 @@ $gdActionBtn.Add_Click({
     $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($gdStatus.IsMounted) {
         # Disconnect
-        Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
-        Update-AllUIState
+        $gdStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
+        $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+        $gdActionBtn.IsEnabled = $false
+        try {
+            Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
+        } finally {
+            $gdActionBtn.IsEnabled = $true
+            Update-AllUIState
+        }
         return
     }
 
@@ -1352,8 +1359,15 @@ $tbActionBtn.Add_Click({
     $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($tbStatus.IsMounted) {
         # Disconnect
-        Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
-        Update-AllUIState
+        $tbStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
+        $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+        $tbActionBtn.IsEnabled = $false
+        try {
+            Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
+        } finally {
+            $tbActionBtn.IsEnabled = $true
+            Update-AllUIState
+        }
         return
     }
 
@@ -1613,7 +1627,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $acc.Id -RemoteName 'gdrive'
                                 Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
                             } elseif ($acc.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
-                                $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                                $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $acc.Id
                                 Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
                             }
                         } catch { }
