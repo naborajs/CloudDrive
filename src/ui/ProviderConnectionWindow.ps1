@@ -20,6 +20,32 @@ function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#
     return $block
 }
 
+function New-LogoImageControl([string]$FileName, [int]$Width = 36, [int]$Height = 36) {
+    $img = [System.Windows.Controls.Image]::new()
+    $img.Width = $Width
+    $img.Height = $Height
+    $img.Stretch = [System.Windows.Media.Stretch]::Uniform
+    $candidates = @(
+        (Join-Path $PSScriptRoot "..\..\assets\logos\$FileName"),
+        (Join-Path $PSScriptRoot "..\assets\logos\$FileName"),
+        (Join-Path (Get-Location).Path "assets\logos\$FileName")
+    )
+    foreach ($cand in $candidates) {
+        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+            try {
+                $bi = [System.Windows.Media.Imaging.BitmapImage]::new()
+                $bi.BeginInit()
+                $bi.UriSource = [System.Uri]::new((Resolve-Path $cand).Path, [System.UriKind]::Absolute)
+                $bi.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                $bi.EndInit()
+                $img.Source = $bi
+                break
+            } catch { }
+        }
+    }
+    return $img
+}
+
 function Show-GoogleClientConfigModal([System.Windows.Window]$Owner = $null) {
     $cfgWin = [System.Windows.Window]::new()
     $cfgWin.Title = 'Google Drive OAuth Setup'
@@ -124,29 +150,31 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $settings = Get-NSCloudDriveSettings
 
     $setWin = [System.Windows.Window]::new()
-    $setWin.Title = 'Settings & Preferences - NS Cloud Drive'
+    $setWin.Title = 'Options - NS Cloud Drive'
     $setWin.Width = 520
-    $setWin.Height = 490
+    $setWin.Height = 520
     $setWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $setWin.Owner = $Owner }
-    $setWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
+    $setWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18191C')
     $setWin.ResizeMode = 'NoResize'
+    $setWin.FontFamily = 'Segoe UI'
 
     $dock = [System.Windows.Controls.DockPanel]::new()
     $dock.Margin = [System.Windows.Thickness]::new(20)
     $setWin.Content = $dock
 
-    $hdr = New-UIElement-Label 'Settings & Local Cache' 18 '#0F172A' $true
+    $hdr = New-UIElement-Label '⚙ Options & Preferences' 18 '#F2F3F5' $true
     [System.Windows.Controls.DockPanel]::SetDock($hdr, 'Top')
     $hdr.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
     $dock.Children.Add($hdr) | Out-Null
 
     $closeBtn = [System.Windows.Controls.Button]::new()
     $closeBtn.Content = 'Done'
-    $closeBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
+    $closeBtn.Padding = [System.Windows.Thickness]::new(20, 8, 20, 8)
     $closeBtn.HorizontalAlignment = 'Right'
     $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
     $closeBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $closeBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
     $closeBtn.BorderThickness = [System.Windows.Thickness]::new(0)
     [System.Windows.Controls.DockPanel]::SetDock($closeBtn, 'Bottom')
     $closeBtn.Add_Click({ $setWin.Close() })
@@ -157,8 +185,8 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
 
     # Startup & Background Group
     $bgCard = [System.Windows.Controls.Border]::new()
-    $bgCard.Background = [System.Windows.Media.Brushes]::White
-    $bgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $bgCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $bgCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
     $bgCard.BorderThickness = [System.Windows.Thickness]::new(1)
     $bgCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
     $bgCard.Padding = [System.Windows.Thickness]::new(14)
@@ -166,10 +194,11 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $bgStack = [System.Windows.Controls.StackPanel]::new()
     $bgCard.Child = $bgStack
 
-    $bgStack.Children.Add((New-UIElement-Label 'Windows Integration & Background' 14 '#1E293B' $true)) | Out-Null
+    $bgStack.Children.Add((New-UIElement-Label 'General Options' 14 '#F2F3F5' $true)) | Out-Null
 
     $chkStartup = [System.Windows.Controls.CheckBox]::new()
-    $chkStartup.Content = 'Start NS Cloud Drive with Windows (User logon)'
+    $chkStartup.Content = 'Run NS Cloud Drive at login'
+    $chkStartup.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkStartup.IsChecked = (Test-WindowsStartupEnabled)
     $chkStartup.Margin = [System.Windows.Thickness]::new(0, 10, 0, 8)
     $chkStartup.Add_Click({
@@ -183,6 +212,7 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
 
     $chkAutoMount = [System.Windows.Controls.CheckBox]::new()
     $chkAutoMount.Content = 'Automatically mount connected drives on startup'
+    $chkAutoMount.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkAutoMount.IsChecked = $settings.AutoMountDrives
     $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $chkAutoMount.Add_Click({
@@ -193,7 +223,8 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $bgStack.Children.Add($chkAutoMount) | Out-Null
 
     $chkTray = [System.Windows.Controls.CheckBox]::new()
-    $chkTray.Content = 'Minimize to System Tray when closing the window'
+    $chkTray.Content = 'Minimize to tray area'
+    $chkTray.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkTray.IsChecked = $settings.MinimizeToTrayOnClose
     $chkTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $chkTray.Add_Click({
@@ -205,6 +236,7 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
 
     $chkStartMin = [System.Windows.Controls.CheckBox]::new()
     $chkStartMin.Content = 'Start Minimized'
+    $chkStartMin.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkStartMin.IsChecked = $settings.StartMinimized
     $chkStartMin.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $chkStartMin.Add_Click({
@@ -216,6 +248,7 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
 
     $chkOpenExp = [System.Windows.Controls.CheckBox]::new()
     $chkOpenExp.Content = 'Open File Explorer when a drive has connected'
+    $chkOpenExp.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkOpenExp.IsChecked = $settings.OpenExplorerOnMount
     $chkOpenExp.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
     $chkOpenExp.Add_Click({
@@ -228,33 +261,57 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
 
     # Cache Group
     $cacheCard = [System.Windows.Controls.Border]::new()
-    $cacheCard.Background = [System.Windows.Media.Brushes]::White
-    $cacheCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $cacheCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $cacheCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
     $cacheCard.BorderThickness = [System.Windows.Thickness]::new(1)
     $cacheCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
     $cacheCard.Padding = [System.Windows.Thickness]::new(14)
     $cacheStack = [System.Windows.Controls.StackPanel]::new()
     $cacheCard.Child = $cacheStack
 
-    $cacheStack.Children.Add((New-UIElement-Label 'Local Cache Folder' 14 '#1E293B' $true)) | Out-Null
+    $cacheStack.Children.Add((New-UIElement-Label 'Local Disk Cache' 14 '#F2F3F5' $true)) | Out-Null
 
     $cacheDir = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
     $cStats = Get-CacheUsageStatistics -CacheDirectory $cacheDir
-    $cacheInfo = New-UIElement-Label "Directory: $cacheDir`nUsage: $($cStats.UsedFormatted) / $($cStats.TargetMaxFormatted) limit ($($cStats.VolumeFreeFormatted) free on volume)" 12 '#64748B'
+    $cacheInfo = New-UIElement-Label "Directory: $cacheDir`nUsage: $($cStats.UsedFormatted) / $($cStats.TargetMaxFormatted) soft limit ($($cStats.VolumeFreeFormatted) free on volume)" 12 '#949BA4'
     $cacheInfo.Margin = [System.Windows.Thickness]::new(0, 6, 0, 10)
     $cacheStack.Children.Add($cacheInfo) | Out-Null
 
+    $cacheBtns = [System.Windows.Controls.StackPanel]::new()
+    $cacheBtns.Orientation = 'Horizontal'
+
     $openCacheBtn = [System.Windows.Controls.Button]::new()
-    $openCacheBtn.Content = 'Open Cache Folder in Explorer'
+    $openCacheBtn.Content = 'Open Cache Folder'
     $openCacheBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
-    $openCacheBtn.HorizontalAlignment = 'Left'
+    $openCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $openCacheBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $openCacheBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $openCacheBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
     $openCacheBtn.Add_Click({
         if (-not (Test-Path -LiteralPath $cacheDir)) {
             New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
         }
         [System.Diagnostics.Process]::Start('explorer.exe', $cacheDir) | Out-Null
     })
-    $cacheStack.Children.Add($openCacheBtn) | Out-Null
+    $cacheBtns.Children.Add($openCacheBtn) | Out-Null
+
+    $cleanCacheBtn = [System.Windows.Controls.Button]::new()
+    $cleanCacheBtn.Content = 'Clean Cache'
+    $cleanCacheBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $cleanCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $cleanCacheBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $cleanCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    $cleanCacheBtn.Add_Click({
+        try {
+            if (Test-Path -LiteralPath $cacheDir) {
+                Get-ChildItem -Path $cacheDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+            [System.Windows.MessageBox]::Show('Cache cleaned successfully.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } catch { }
+    })
+    $cacheBtns.Children.Add($cleanCacheBtn) | Out-Null
+
+    $cacheStack.Children.Add($cacheBtns) | Out-Null
     $stack.Children.Add($cacheCard) | Out-Null
 
     [void]$setWin.ShowDialog()
@@ -264,10 +321,10 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $addWin = [System.Windows.Window]::new()
     $addWin.Title = 'Add Cloud Disk'
     $addWin.Width = 520
-    $addWin.Height = 380
+    $addWin.Height = 360
     $addWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $addWin.Owner = $Owner }
-    $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F8FAFC')
+    $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18191C')
     $addWin.ResizeMode = 'NoResize'
     $addWin.FontFamily = 'Segoe UI'
 
@@ -279,9 +336,9 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $headerStack = [System.Windows.Controls.StackPanel]::new()
     [System.Windows.Controls.DockPanel]::SetDock($headerStack, 'Top')
     $headerStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
-    $title = New-UIElement-Label 'Add Cloud Disk' 18 '#0F172A' $true
+    $title = New-UIElement-Label 'Add Cloud Disk' 18 '#F2F3F5' $true
     $headerStack.Children.Add($title) | Out-Null
-    $subtitle = New-UIElement-Label 'Select a cloud storage service to connect and mount as a Windows drive.' 12 '#64748B'
+    $subtitle = New-UIElement-Label 'Select a supported cloud storage provider to mount as a Windows drive.' 12 '#949BA4'
     $subtitle.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
     $headerStack.Children.Add($subtitle) | Out-Null
     $dock.Children.Add($headerStack) | Out-Null
@@ -291,10 +348,10 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $cancelBtn.Content = 'Cancel'
     $cancelBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
     $cancelBtn.HorizontalAlignment = 'Right'
-    $cancelBtn.Background = [System.Windows.Media.Brushes]::White
-    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1')
+    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
     $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
-    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     [System.Windows.Controls.DockPanel]::SetDock($cancelBtn, 'Bottom')
     $cancelBtn.Add_Click({ $addWin.Close() })
     $dock.Children.Add($cancelBtn) | Out-Null
@@ -307,8 +364,8 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
 
     # Provider 1: Google Drive
     $gdBorder = [System.Windows.Controls.Border]::new()
-    $gdBorder.Background = [System.Windows.Media.Brushes]::White
-    $gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $gdBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
     $gdBorder.BorderThickness = [System.Windows.Thickness]::new(1)
     $gdBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
     $gdBorder.Padding = [System.Windows.Thickness]::new(14)
@@ -332,18 +389,13 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $gdLeft.Orientation = 'Horizontal'
     $gdDock.Children.Add($gdLeft) | Out-Null
 
-    $gdMark = [System.Windows.Controls.Border]::new()
-    $gdMark.Width = 36; $gdMark.Height = 36; $gdMark.CornerRadius = [System.Windows.CornerRadius]::new(8)
-    $gdMark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
-    $gdMarkText = New-UIElement-Label 'GD' 13 '#FFFFFF' $true
-    $gdMarkText.HorizontalAlignment = 'Center'; $gdMarkText.VerticalAlignment = 'Center'
-    $gdMark.Child = $gdMarkText
-    $gdMark.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
-    $gdLeft.Children.Add($gdMark) | Out-Null
+    $gdLogoImg = New-LogoImageControl 'googledrive.png' 38 38
+    $gdLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $gdLeft.Children.Add($gdLogoImg) | Out-Null
 
     $gdText = [System.Windows.Controls.StackPanel]::new()
-    $gdText.Children.Add((New-UIElement-Label 'Google Drive' 15 '#0F172A' $true)) | Out-Null
-    $gdText.Children.Add((New-UIElement-Label 'Personal & Workspace cloud storage via OAuth 2.0' 12 '#64748B')) | Out-Null
+    $gdText.Children.Add((New-UIElement-Label 'Google Drive' 15 '#F2F3F5' $true)) | Out-Null
+    $gdText.Children.Add((New-UIElement-Label 'Personal & Workspace cloud storage via Google OAuth 2.0' 12 '#949BA4')) | Out-Null
     $gdLeft.Children.Add($gdText) | Out-Null
 
     $SelectGD = {
@@ -357,8 +409,8 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
 
     # Provider 2: TeraBox
     $tbBorder = [System.Windows.Controls.Border]::new()
-    $tbBorder.Background = [System.Windows.Media.Brushes]::White
-    $tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
+    $tbBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
     $tbBorder.BorderThickness = [System.Windows.Thickness]::new(1)
     $tbBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
     $tbBorder.Padding = [System.Windows.Thickness]::new(14)
@@ -382,18 +434,13 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $tbLeft.Orientation = 'Horizontal'
     $tbDock.Children.Add($tbLeft) | Out-Null
 
-    $tbMark = [System.Windows.Controls.Border]::new()
-    $tbMark.Width = 36; $tbMark.Height = 36; $tbMark.CornerRadius = [System.Windows.CornerRadius]::new(8)
-    $tbMark.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
-    $tbMarkText = New-UIElement-Label 'TB' 13 '#FFFFFF' $true
-    $tbMarkText.HorizontalAlignment = 'Center'; $tbMarkText.VerticalAlignment = 'Center'
-    $tbMark.Child = $tbMarkText
-    $tbMark.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
-    $tbLeft.Children.Add($tbMark) | Out-Null
+    $tbLogoImg = New-LogoImageControl 'terabox.png' 38 38
+    $tbLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $tbLeft.Children.Add($tbLogoImg) | Out-Null
 
     $tbText = [System.Windows.Controls.StackPanel]::new()
-    $tbText.Children.Add((New-UIElement-Label 'TeraBox' 15 '#0F172A' $true)) | Out-Null
-    $tbText.Children.Add((New-UIElement-Label 'Cloud storage via isolated embedded browser sign-in' 12 '#64748B')) | Out-Null
+    $tbText.Children.Add((New-UIElement-Label 'TeraBox' 15 '#F2F3F5' $true)) | Out-Null
+    $tbText.Children.Add((New-UIElement-Label '1 TB cloud storage with high-speed media streaming' 12 '#949BA4')) | Out-Null
     $tbLeft.Children.Add($tbText) | Out-Null
 
     $SelectTB = {
@@ -422,7 +469,7 @@ function Show-CloudAccountSetupModal(
     $setupWin.Height = 360
     $setupWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $setupWin.Owner = $Owner }
-    $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+    $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18191C')
     $setupWin.ResizeMode = 'NoResize'
     $setupWin.FontFamily = 'Segoe UI'
 
@@ -431,24 +478,27 @@ function Show-CloudAccountSetupModal(
     $setupWin.Content = $stack
 
     # Header
-    $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 '#0F172A' $true
+    $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 '#F2F3F5' $true
     $stack.Children.Add($title) | Out-Null
 
-    $sub = New-UIElement-Label 'Configure the display name and Windows virtual drive letter.' 12 '#64748B'
+    $sub = New-UIElement-Label 'Configure the display name and Windows virtual drive letter.' 12 '#949BA4'
     $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 16)
     $stack.Children.Add($sub) | Out-Null
 
     # Account Name field
-    $lbl1 = New-UIElement-Label 'Disk / Account Name' 12 '#334155' $true
+    $lbl1 = New-UIElement-Label 'Disk / Account Name' 12 '#DBDEE1' $true
     $stack.Children.Add($lbl1) | Out-Null
 
     $txtName = [System.Windows.Controls.TextBox]::new()
     $txtName.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
     $txtName.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
+    $txtName.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $txtName.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $txtName.Foreground = [System.Windows.Media.Brushes]::White
     $defaultName = if ($InitialAccount -and $InitialAccount.ContainsKey('DisplayName')) {
         [string]$InitialAccount.DisplayName
     } elseif ($ProviderId -eq 'terabox') {
-        'TeraBox Storage'
+        'TeraBox'
     } else {
         'Google Drive'
     }
@@ -456,7 +506,7 @@ function Show-CloudAccountSetupModal(
     $stack.Children.Add($txtName) | Out-Null
 
     # Drive Letter field
-    $lbl2 = New-UIElement-Label 'Windows Drive Letter' 12 '#334155' $true
+    $lbl2 = New-UIElement-Label 'Windows Drive Letter' 12 '#DBDEE1' $true
     $stack.Children.Add($lbl2) | Out-Null
 
     $cmbLetter = [System.Windows.Controls.ComboBox]::new()
@@ -502,6 +552,7 @@ function Show-CloudAccountSetupModal(
     # Auto-mount CheckBox
     $chkAutoMount = [System.Windows.Controls.CheckBox]::new()
     $chkAutoMount.Content = 'Automatically mount this drive on startup'
+    $chkAutoMount.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
     $chkAutoMount.IsChecked = if ($InitialAccount -and $InitialAccount.ContainsKey('AutoMount') -and $null -ne $InitialAccount.AutoMount) {
         [bool]$InitialAccount.AutoMount
@@ -533,6 +584,10 @@ function Show-CloudAccountSetupModal(
     $cancelBtn = [System.Windows.Controls.Button]::new()
     $cancelBtn.Content = 'Cancel'
     $cancelBtn.Padding = [System.Windows.Thickness]::new(12, 7, 12, 7)
+    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
+    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
     $cancelBtn.Add_Click({ $setupWin.Close() })
     $btnStack.Children.Add($cancelBtn) | Out-Null
 
