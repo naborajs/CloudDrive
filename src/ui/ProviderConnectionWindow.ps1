@@ -655,7 +655,8 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
         return (Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'gdrive' -InitialAccount $initData)
 
     } elseif ($ProviderId -eq 'terabox') {
-        $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $Owner
+        $accId = "terabox_" + [DateTime]::UtcNow.Ticks.ToString()
+        $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $Owner -AccountId $accId
         if (-not $loginRes.Success) {
             if (-not $loginRes.Cancelled) {
                 [System.Windows.MessageBox]::Show("TeraBox sign-in failed: $($loginRes.Error)", 'TeraBox', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
@@ -663,7 +664,6 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
             return $null
         }
 
-        $accId = "terabox_" + [DateTime]::UtcNow.Ticks.ToString()
         $nextLetter = Get-NextAvailableDriveLetter 'T'
         $initData = @{
             Id = $accId
