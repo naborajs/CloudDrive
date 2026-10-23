@@ -25,6 +25,8 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot 'services\SettingsManager.ps1')
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
+. (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
+. (Join-Path $PSScriptRoot 'services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
@@ -439,6 +441,22 @@ $addDiskBtn.Add_Click({
     }
 })
 $leftToolbar.Children.Add($addDiskBtn) | Out-Null
+
+$transferDiskBtn = [System.Windows.Controls.Button]::new()
+$transferDiskBtn.Content = [string][char]0x21C4 + ' Transfer Files'
+$transferDiskBtn.Padding = [System.Windows.Thickness]::new(14, 8, 14, 8)
+$transferDiskBtn.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+$transferDiskBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$transferDiskBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$transferDiskBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$transferDiskBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$transferDiskBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$transferDiskBtn.FontSize = 13
+$transferDiskBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$transferDiskBtn.Add_Click({
+    Show-CloudTransferModal -Owner $window -Theme $script:Settings.Theme
+})
+$leftToolbar.Children.Add($transferDiskBtn) | Out-Null
 
 # --- Main Scroll Container (Constrained width to satisfy regression test requirements) ---
 $mainScroll = [System.Windows.Controls.ScrollViewer]::new()
@@ -927,9 +945,48 @@ $cacheCard.Child = $cacheStack
 $cacheTitle = New-Label 'Cache Management' 15 $script:Palette.TextPrimary $true
 $cacheStack.Children.Add($cacheTitle) | Out-Null
 
+$cachePathRow = [System.Windows.Controls.DockPanel]::new()
+$cachePathRow.Margin = [System.Windows.Thickness]::new(0, 8, 0, 4)
+$cacheStack.Children.Add($cachePathRow) | Out-Null
+
+$browseCacheBtn = [System.Windows.Controls.Button]::new()
+$browseCacheBtn.Content = 'Browse...'
+$browseCacheBtn.Padding = [System.Windows.Thickness]::new(10, 2, 10, 2)
+$browseCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$browseCacheBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$browseCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$browseCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+[System.Windows.Controls.DockPanel]::SetDock($browseCacheBtn, 'Right')
+$cachePathRow.Children.Add($browseCacheBtn) | Out-Null
+
 $cachePathLabel = New-Label ('Cache Folder: ' + $script:CacheDirectory) 12 $script:Palette.TextSecondary
-$cachePathLabel.Margin = [System.Windows.Thickness]::new(0, 8, 0, 4)
-$cacheStack.Children.Add($cachePathLabel) | Out-Null
+$cachePathRow.Children.Add($cachePathLabel) | Out-Null
+
+$browseCacheBtn.Add_Click({
+    $dlg = [System.Windows.Forms.FolderBrowserDialog]::new()
+    $dlg.Description = 'Select Cache Storage Directory (Dedicated non-OS drive recommended)'
+    $dlg.SelectedPath = $script:CacheDirectory
+    $dlg.ShowNewFolderButton = $true
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) {
+        $check = Test-CacheDirectorySafety -Path $dlg.SelectedPath
+        if (-not $check.IsValid) {
+            [System.Windows.MessageBox]::Show(($check.Issues -join "`n"), 'Invalid Cache Path', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            return
+        }
+        if ($check.Warnings.Count -gt 0) {
+            $msg = ($check.Warnings -join "`n`n") + "`n`nDo you want to use this directory?"
+            $c = [System.Windows.MessageBox]::Show($msg, 'Cache Path Notice', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+            if ($c -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+        }
+        $script:CacheDirectory = $dlg.SelectedPath
+        $script:Settings.CacheDirectory = $dlg.SelectedPath
+        Set-NSCloudDriveSettings $script:Settings
+        $cachePathLabel.Text = 'Cache Folder: ' + $script:CacheDirectory
+        Update-CacheUsageDisplay
+    }
+})
 
 $cacheQuotaRow = [System.Windows.Controls.StackPanel]::new()
 $cacheQuotaRow.Orientation = 'Horizontal'
@@ -977,13 +1034,17 @@ $cleanCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $cleanCacheBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $cleanCacheBtn.Add_Click({
     try {
-        if (Test-Path -LiteralPath $script:CacheDirectory) {
-            Get-ChildItem -LiteralPath $script:CacheDirectory -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        $res = Invoke-SafeCacheCleanup -CacheDirectory $script:CacheDirectory -Force
+        $mbCleaned = [Math]::Round($res.CleanedBytes / 1MB, 1)
+        if ($res.SkippedInUseCount -gt 0) {
+            $cacheUsageLabel.Text = "Cleaned $mbCleaned MB ($($res.CleanedFiles) files). $($res.SkippedInUseCount) files protected in-use by active mounts."
+            $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#60A5FA')
+        } else {
+            $cacheUsageLabel.Text = "Cache cleared successfully ($mbCleaned MB reclaimed)."
+            $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
         }
-        $cacheUsageLabel.Text = 'Cache cleared successfully.'
-        $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
     } catch {
-        $cacheUsageLabel.Text = 'Could not clear all cache files.'
+        $cacheUsageLabel.Text = "Could not clear all cache files: $($_.Exception.Message)"
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
     }
 })
@@ -1306,6 +1367,11 @@ function Apply-UITheme([string]$ThemeName) {
     $refreshBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
 
     $addDiskBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
+    if ($transferDiskBtn) {
+        $transferDiskBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        $transferDiskBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+        $transferDiskBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
 
     # Google Drive Card
     $gdCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
@@ -1363,7 +1429,7 @@ function Apply-UITheme([string]$ThemeName) {
     $cacheQuotaLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     $diagDescLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
 
-    foreach ($btn in @($cleanCacheBtn, $openCacheBtn, $showDiagBtn, $trimMemBtn)) {
+    foreach ($btn in @($cleanCacheBtn, $openCacheBtn, $showDiagBtn, $trimMemBtn, $browseCacheBtn)) {
         $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
         $btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
         $btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
@@ -1417,19 +1483,26 @@ function Show-DisksView {
     Update-NavActiveState
 }
 
+function Update-CacheUsageDisplay {
+    try {
+        $st = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
+        $mbTotal = [Math]::Round($st.TotalSizeBytes / 1MB, 1)
+        $mbInUse = [Math]::Round($st.InUseBytes / 1MB, 1)
+        $gbFree = [Math]::Round($st.DriveFreeBytes / 1GB, 1)
+        $osNotice = if ($st.IsSystemDrive) { " (OS Drive Warning)" } else { "" }
+        $cacheUsageLabel.Text = "Total: $mbTotal MB ($($st.TotalFileCount) files) â€¢ In-Use: $mbInUse MB ($($st.InUseCount) locked) â€¢ Free on $($st.DriveLetter): $gbFree GB$osNotice"
+        $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    } catch { }
+}
+
 function Show-OptionsView {
-    $script:CurrentView = 'Options'
+    $script:CurrentView = "Options"
     $disksView.Visibility = [System.Windows.Visibility]::Collapsed
     $optionsView.Visibility = [System.Windows.Visibility]::Visible
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     Update-NavActiveState
 
-    try {
-        $cUsage = Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory
-        $mbUsed = [Math]::Round($cUsage.CacheSizeBytes / 1MB, 1)
-        $gbFree = [Math]::Round($cUsage.FreeSpaceBytes / 1GB, 1)
-        $cacheUsageLabel.Text = "Current Usage: $mbUsed MB   •   Drive Free: $gbFree GB"
-    } catch { }
+    Update-CacheUsageDisplay
 }
 
 function Show-HelpView {
@@ -2224,6 +2297,8 @@ $timer.Start()
 if ($MyInvocation.InvocationName -ne '.') {
     # Initial UI population
     Update-AllUIState
+
+    try { Invoke-StartupCacheRecovery -CacheDirectory $script:CacheDirectory | Out-Null } catch { }
 
     # --- Auto-Mount on Startup ---
     if ($script:Settings.AutoMountDrives) {
