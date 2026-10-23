@@ -59,6 +59,8 @@ $script:StartupAutoMountTimer = $null
 $script:StartupAutoMountError = $null
 $script:ReconnectWorker = $null
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
+$script:StartupAutoMountProgress = [hashtable]::Synchronized(@{ Stage = 'Waiting for startup dispatcher'; ProviderId = ''; DriveLetter = ''; StartedAt = $null })
+$script:LastStartupAutoMountLogKey = ''
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
@@ -1718,10 +1720,44 @@ function Complete-AvailableStartupWorkers {
     }
 }
 
+function Write-StartupAutoMountProgressLog {
+    $progress = $script:StartupAutoMountProgress
+    if (-not $progress -or -not $progress.Stage) { return }
+    $providerId = if ($progress.ProviderId -in @('gdrive', 'terabox')) { [string]$progress.ProviderId } else { '' }
+    $driveLetter = if ([string]$progress.DriveLetter -match '^[A-Za-z]$') { ([string]$progress.DriveLetter).ToUpperInvariant() } else { '' }
+    $key = "$($progress.Stage)|$providerId|$driveLetter"
+    if ($key -eq $script:LastStartupAutoMountLogKey) { return }
+    $script:LastStartupAutoMountLogKey = $key
+    if ($script:Settings.DiagnosticLogging -eq 'Off') { return }
+
+    $elapsedMilliseconds = 0
+    if ($progress.StartedAt) {
+        $elapsedMilliseconds = [Math]::Max(0, [int64]([DateTime]::UtcNow - [DateTime]$progress.StartedAt).TotalMilliseconds)
+    }
+    $entry = [ordered]@{
+        timestampUtc = [DateTime]::UtcNow.ToString('o')
+        event = 'startup_restore_stage'
+        stage = [string]$progress.Stage
+        providerId = $providerId
+        driveLetter = $driveLetter
+        elapsedMilliseconds = $elapsedMilliseconds
+    }
+    try {
+        $logDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        if (-not (Test-Path -LiteralPath $logDirectory)) { New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null }
+        $logPath = Join-Path $logDirectory 'startup-restore.jsonl'
+        if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 1MB) {
+            Move-Item -LiteralPath $logPath -Destination ($logPath + '.1') -Force
+        }
+        Add-Content -LiteralPath $logPath -Value (($entry | ConvertTo-Json -Compress) + [Environment]::NewLine) -Encoding UTF8
+    } catch { }
+}
+
 function Update-AllUIState {
     if ($script:IsConnecting) { return }
 
     Complete-AvailableStartupWorkers
+    Write-StartupAutoMountProgressLog
     if (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and
         -not $script:ProviderStatusWorker -and
         ([DateTime]::UtcNow - $script:LastProviderStatusCheck).TotalSeconds -ge 120) {
@@ -1742,9 +1778,13 @@ function Update-AllUIState {
     }
     $restoreInProgress = [bool]($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)
     $restoreStateLabel = 'Preparing saved drives...'
-    if ($script:StartupAutoMountWorker -and $script:StartupAutoMountWorker.StartedAt) {
-        $restoreElapsed = [DateTime]::UtcNow - [DateTime]$script:StartupAutoMountWorker.StartedAt
-        $restoreStateLabel = 'Restoring saved drives... (' + [int][Math]::Floor($restoreElapsed.TotalMinutes) + ':' + $restoreElapsed.Seconds.ToString('00') + ')'
+    if ($restoreInProgress) {
+        $restoreStartedAt = if ($script:StartupAutoMountProgress.StartedAt) { [DateTime]$script:StartupAutoMountProgress.StartedAt } elseif ($script:StartupAutoMountWorker) { [DateTime]$script:StartupAutoMountWorker.StartedAt } else { [DateTime]::UtcNow }
+        $restoreElapsed = [DateTime]::UtcNow - $restoreStartedAt
+        $elapsedMinutes = [int][Math]::Floor($restoreElapsed.TotalMinutes)
+        $elapsedText = $elapsedMinutes.ToString() + ':' + $restoreElapsed.Seconds.ToString('00')
+        $restoreStage = if ($script:StartupAutoMountProgress.Stage) { [string]$script:StartupAutoMountProgress.Stage } else { 'Preparing saved drives' }
+        $restoreStateLabel = if ($restoreElapsed.TotalSeconds -ge 60) { "Taking longer than expected - $restoreStage ($elapsedText)" } elseif ($restoreElapsed.TotalSeconds -ge 30) { "Still working - $restoreStage ($elapsedText)" } else { "$restoreStage ($elapsedText)" }
     }
     $checkingState = if ($restoreInProgress) { 'Mounting' } else { 'Checking' }
     $checkingResult = [ordered]@{
@@ -1842,7 +1882,7 @@ function Update-AllUIState {
         $gdQuotaText.Visibility = 'Collapsed'
 
         if ($gdState -eq 'Mounting') {
-            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive...')
+            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $restoreStateLabel)
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } elseif ($gdState -eq 'Checking') {
             $gdStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
@@ -1945,7 +1985,7 @@ function Update-AllUIState {
         $tbQuotaText.Visibility = 'Collapsed'
 
         if ($tbState -eq 'Mounting') {
-            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive...')
+            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $restoreStateLabel)
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } elseif ($tbState -eq 'Checking') {
             $tbStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
@@ -2690,8 +2730,12 @@ function Invoke-StartupAutoMount {
     if ($script:StartupAutoMountWorker) { return }
 
     $cacheDirectory = $script:CacheDirectory
-    $script:StartupAutoMountWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $cacheDirectory) -ScriptBlock {
-        param([string]$sourceRoot, [string]$cacheDirectory)
+    $script:StartupAutoMountProgress.Stage = 'Loading saved account settings'
+    $script:StartupAutoMountProgress.ProviderId = ''
+    $script:StartupAutoMountProgress.DriveLetter = ''
+    $script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow
+    $script:StartupAutoMountWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $cacheDirectory, $script:StartupAutoMountProgress) -ScriptBlock {
+        param([string]$sourceRoot, [string]$cacheDirectory, [hashtable]$progress)
         $ErrorActionPreference = 'Stop'
         . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
         . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
@@ -2701,12 +2745,17 @@ function Invoke-StartupAutoMount {
         $settings = Get-NSCloudDriveSettings
         if (-not $settings.AutoMountDrives) { return }
         $results = [System.Collections.Generic.List[object]]::new()
+        $progress.Stage = 'Loading saved accounts'
         $accounts = @(Get-CloudAccounts)
+        $progress.Stage = 'Checking saved mount state'
 
         if ($accounts.Count -gt 0) {
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
                 try {
+                    $progress.ProviderId = [string]$account.ProviderId
+                    $progress.DriveLetter = [string]$account.DriveLetter
+                    $progress.Stage = "Checking existing $($account.DriveLetter): mount"
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.ProcessRunning) {
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null })
@@ -2714,13 +2763,17 @@ function Invoke-StartupAutoMount {
                     }
 
                     if ($account.ProviderId -eq 'gdrive') {
+                        $progress.Stage = 'Validating Google Drive session'
                         $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
+                        $progress.Stage = "Starting $($account.DriveLetter): Google Drive mount (up to 90s)"
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                        $progress.Stage = 'Validating TeraBox session'
                         $environment = Get-TeraBoxRcloneEnvironment -AccountId $account.Id
+                        $progress.Stage = "Starting $($account.DriveLetter): TeraBox mount (up to 90s)"
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -2737,10 +2790,14 @@ function Invoke-StartupAutoMount {
         } else {
             # Fallback for legacy single-provider settings.
             try {
+                $progress.ProviderId = 'gdrive'
+                $progress.DriveLetter = [string](Get-PreferredDriveLetter 'gdrive')
+                $progress.Stage = 'Validating Google Drive session'
                 $googleCheck = Test-GoogleDriveBackendSession
                 $googleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
                 if ($googleCheck.IsValid -and -not $googleStatus.ProcessRunning) {
                     $environment = Get-GoogleDriveRcloneEnvironment
+                    $progress.Stage = "Starting $($progress.DriveLetter): Google Drive mount (up to 90s)"
                     Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
                         -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
                         -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -2751,10 +2808,14 @@ function Invoke-StartupAutoMount {
             }
 
             try {
+                $progress.ProviderId = 'terabox'
+                $progress.DriveLetter = [string](Get-PreferredDriveLetter 'terabox')
+                $progress.Stage = 'Validating TeraBox session'
                 $teraBoxCheck = Test-TeraBoxBackendSession
                 $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
                 if ($teraBoxCheck.IsValid -and (Get-VerifiedRclonePath) -and -not $teraBoxStatus.ProcessRunning) {
                     $environment = Get-TeraBoxRcloneEnvironment
+                    $progress.Stage = "Starting $($progress.DriveLetter): TeraBox mount (up to 90s)"
                     Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
                         -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
                         -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -2765,6 +2826,7 @@ function Invoke-StartupAutoMount {
             }
         }
 
+        $progress.Stage = 'Recovery checks complete'
         return $results.ToArray()
     }
 }
