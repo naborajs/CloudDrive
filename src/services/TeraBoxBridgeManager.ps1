@@ -7,6 +7,9 @@ Add-Type -AssemblyName System.Security
 $script:BridgeEntropy = [System.Text.Encoding]::UTF8.GetBytes('CloudPlayX.v1.secret')
 $script:DefaultBridgePort = 19191
 $script:RunningBridgeProcess = $null
+# Per-account bridge process handles keyed by the safe account id. The legacy
+# single $script:RunningBridgeProcess handle is kept for backward compatibility.
+$script:RunningBridgeProcesses = @{}
 
 function Get-TeraBoxBridgePort([string]$AccountId = '') {
     if ([string]::IsNullOrWhiteSpace($AccountId) -or $AccountId -eq 'terabox') { return $script:DefaultBridgePort }
@@ -229,13 +232,17 @@ function Start-TeraBoxBridge {
 
     # Check if already healthy with existing password
     if ($existingPw -and (Test-TeraBoxBridgeHealth -Port $Port -BridgePassword $existingPw -TimeoutSec 1)) {
+        $runningHandle = $null
+        if ($script:RunningBridgeProcesses.ContainsKey($AccountId) -and $script:RunningBridgeProcesses[$AccountId] -and (-not $script:RunningBridgeProcesses[$AccountId].HasExited)) {
+            $runningHandle = $script:RunningBridgeProcesses[$AccountId]
+        }
         return [ordered]@{
             Success = $true
             Port = $Port
             Url = "http://127.0.0.1:$Port/"
             User = 'cpx'
             Password = $existingPw
-            ProcessId = if ($script:RunningBridgeProcess -and -not $script:RunningBridgeProcess.HasExited) { $script:RunningBridgeProcess.Id } else { $null }
+            ProcessId = if ($runningHandle) { $runningHandle.Id } else { $null }
         }
     }
 
@@ -257,6 +264,7 @@ function Start-TeraBoxBridge {
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     $script:RunningBridgeProcess = $proc
+    $script:RunningBridgeProcesses[$AccountId] = $proc
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $ready = $false
@@ -310,15 +318,27 @@ function Stop-TeraBoxBridge {
         }
     } catch { }
 
-    # Terminate only a bridge whose command line names this account's isolated
-    # home directory. Never stop every TeraBox bridge on the machine.
+    # Terminate only a bridge whose --home argument resolves exactly to this
+    # account's isolated home directory. The legacy home is a prefix of every
+    # per-account home, so a substring match would also terminate unrelated
+    # account bridges; match the quoted argument value itself instead.
     try {
+        $expectedHome = [System.IO.Path]::GetFullPath($homeDir).TrimEnd('\')
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'cpx.exe'" -ErrorAction SilentlyContinue
         foreach ($p in $procs) {
-            if ($p.CommandLine -and $p.CommandLine.Contains('terabox-bridge') -and $p.CommandLine.IndexOf($homeDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
-                if ($script:RunningBridgeProcess -and $script:RunningBridgeProcess.Id -eq [int]$p.ProcessId) { $script:RunningBridgeProcess = $null }
+            if (-not $p.CommandLine -or -not $p.CommandLine.Contains('terabox-bridge')) { continue }
+            $homeArgMatch = [regex]::Match($p.CommandLine, '--home\s+"([^"]+)"|--home\s+([^\s"]+)')
+            $procHome = if ($homeArgMatch.Success) {
+                $value = if ($homeArgMatch.Groups[1].Success -and $homeArgMatch.Groups[1].Value) { $homeArgMatch.Groups[1].Value } else { $homeArgMatch.Groups[2].Value }
+                try { [System.IO.Path]::GetFullPath($value).TrimEnd('\') } catch { '' }
+            } else { '' }
+            if ([string]::IsNullOrEmpty($procHome)) { continue }
+            if (-not [string]::Equals($procHome, $expectedHome, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+            if ($script:RunningBridgeProcesses.ContainsKey($AccountId) -and $script:RunningBridgeProcesses[$AccountId] -and $script:RunningBridgeProcesses[$AccountId].Id -eq [int]$p.ProcessId) {
+                $script:RunningBridgeProcesses.Remove($AccountId)
             }
+            if ($script:RunningBridgeProcess -and $script:RunningBridgeProcess.Id -eq [int]$p.ProcessId) { $script:RunningBridgeProcess = $null }
         }
     } catch { }
 
