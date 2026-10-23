@@ -8,6 +8,8 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\services\CloudTransferManager.ps1')
+. (Join-Path $PSScriptRoot '..\services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'EmbeddedBrowserWindow.ps1')
 
 function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#172033', [bool]$Bold = $false) {
@@ -1201,6 +1203,612 @@ function Show-ProviderConnectionWindow(
             & $UpdateState 'Disconnected' 'No account connected.'
         }
     }
+
+    [void]$win.ShowDialog()
+}
+
+# ==============================================================================
+# CLOUD-TO-CLOUD TRANSFER MODAL
+# ==============================================================================
+
+function Get-AvailableTransferAccounts {
+    $list = @()
+    try {
+        $accs = Get-CloudAccounts
+        if ($accs) {
+            foreach ($a in $accs) {
+                if ($a.Id -notlike 'test_*' -and $a.AccountEmail -notin @('personal@gmail.com', 'work@company.com', 'terabox_user')) {
+                    $list += $a
+                }
+            }
+        }
+    } catch { }
+
+    $hasGd = $list | Where-Object { $_.ProviderId -eq 'gdrive' }
+    if (-not $hasGd) {
+        $gdCheck = Test-GoogleDriveBackendSession
+        if ($gdCheck.IsValid) {
+            $list += @{
+                Id = 'gdrive_primary'
+                ProviderId = 'gdrive'
+                DisplayName = 'Google Drive'
+                DriveLetter = (Get-PreferredDriveLetter 'gdrive')
+                AccountEmail = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'EmailAddress' '' } else { '' }
+            }
+        }
+    }
+
+    $hasTb = $list | Where-Object { $_.ProviderId -eq 'terabox' }
+    if (-not $hasTb) {
+        $tbCheck = Test-TeraBoxBackendSession
+        if ($tbCheck.IsValid) {
+            $list += @{
+                Id = 'terabox_primary'
+                ProviderId = 'terabox'
+                DisplayName = 'TeraBox'
+                DriveLetter = (Get-PreferredDriveLetter 'terabox')
+                AccountEmail = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' '' } else { '' }
+            }
+        }
+    }
+
+    return $list
+}
+
+function Show-CloudTransferModal(
+    [System.Windows.Window]$Owner = $null,
+    [string]$Theme = '',
+    [hashtable]$InitialSourceAccount = $null,
+    [hashtable]$InitialDestinationAccount = $null
+) {
+    $p = Get-ModalThemePalette $Theme
+
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'NS Cloud Drive - Cloud-to-Cloud Transfer'
+    $win.Width = 840
+    $win.Height = 660
+    $win.MinWidth = 760
+    $win.MinHeight = 540
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.FontFamily = 'Segoe UI'
+
+    $rootDock = [System.Windows.Controls.DockPanel]::new()
+    $rootDock.Margin = [System.Windows.Thickness]::new(20)
+    $win.Content = $rootDock
+
+    # Header
+    $hdrStack = [System.Windows.Controls.StackPanel]::new()
+    $hdrStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    [System.Windows.Controls.DockPanel]::SetDock($hdrStack, 'Top')
+    $rootDock.Children.Add($hdrStack) | Out-Null
+
+    $hTitle = New-UIElement-Label 'Cloud-to-Cloud Transfer' 20 $p.TextPrimary $true
+    $hSub = New-UIElement-Label 'Direct streaming relay between cloud providers. Files stream in bounded memory chunks without caching full files on your OS drive.' 11 $p.TextMuted
+    $hdrStack.Children.Add($hTitle) | Out-Null
+    $hdrStack.Children.Add($hSub) | Out-Null
+
+    # Bottom Button Bar
+    $btnBar = [System.Windows.Controls.DockPanel]::new()
+    $btnBar.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnBar, 'Bottom')
+    $rootDock.Children.Add($btnBar) | Out-Null
+
+    $leftActions = [System.Windows.Controls.StackPanel]::new()
+    $leftActions.Orientation = 'Horizontal'
+    [System.Windows.Controls.DockPanel]::SetDock($leftActions, 'Left')
+    $btnBar.Children.Add($leftActions) | Out-Null
+
+    $pauseBtn = [System.Windows.Controls.Button]::new()
+    $pauseBtn.Content = 'Pause'
+    $pauseBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+    $pauseBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $pauseBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $pauseBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $pauseBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $pauseBtn.IsEnabled = $false
+    $pauseBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $leftActions.Children.Add($pauseBtn) | Out-Null
+
+    $cancelBtn = [System.Windows.Controls.Button]::new()
+    $cancelBtn.Content = 'Cancel Transfer'
+    $cancelBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DC2626')
+    $cancelBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $cancelBtn.IsEnabled = $false
+    $cancelBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $leftActions.Children.Add($cancelBtn) | Out-Null
+
+    $rightActions = [System.Windows.Controls.StackPanel]::new()
+    $rightActions.Orientation = 'Horizontal'
+    $rightActions.HorizontalAlignment = 'Right'
+    $btnBar.Children.Add($rightActions) | Out-Null
+
+    $closeBtn = [System.Windows.Controls.Button]::new()
+    $closeBtn.Content = 'Close'
+    $closeBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $closeBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $closeBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $closeBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $closeBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $closeBtn.Add_Click({ $win.Close() })
+    $rightActions.Children.Add($closeBtn) | Out-Null
+
+    $startBtn = [System.Windows.Controls.Button]::new()
+    $startBtn.Content = 'Start Transfer'
+    $startBtn.Padding = [System.Windows.Thickness]::new(20, 6, 20, 6)
+    $startBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
+    $startBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $startBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $startBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $startBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $rightActions.Children.Add($startBtn) | Out-Null
+
+    # Bottom-docked Transfer Progress & Statistics Panel
+    $statsCard = [System.Windows.Controls.Border]::new()
+    $statsCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $statsCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $statsCard.BorderThickness = [System.Windows.Thickness]::new(1)
+    $statsCard.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $statsCard.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+    $statsCard.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($statsCard, 'Bottom')
+    $rootDock.Children.Add($statsCard) | Out-Null
+
+    $statsStack = [System.Windows.Controls.StackPanel]::new()
+    $statsCard.Child = $statsStack
+
+    $stTopRow = [System.Windows.Controls.DockPanel]::new()
+    $statsStack.Children.Add($stTopRow) | Out-Null
+
+    $stTitle = New-UIElement-Label 'Live Transfer Metrics' 12 $p.TextPrimary $true
+    [System.Windows.Controls.DockPanel]::SetDock($stTitle, 'Left')
+    $stTopRow.Children.Add($stTitle) | Out-Null
+
+    $statusBadge = New-UIElement-Label 'Ready to transfer' 11 $p.TextMuted $true
+    $statusBadge.HorizontalAlignment = 'Right'
+    $stTopRow.Children.Add($statusBadge) | Out-Null
+
+    $progressBar = [System.Windows.Controls.ProgressBar]::new()
+    $progressBar.Height = 8
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = 100
+    $progressBar.Value = 0
+    $progressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
+    $progressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $progressBar.BorderThickness = [System.Windows.Thickness]::new(0)
+    $progressBar.Margin = [System.Windows.Thickness]::new(0, 6, 0, 6)
+    $statsStack.Children.Add($progressBar) | Out-Null
+
+    $metricsRow = [System.Windows.Controls.DockPanel]::new()
+    $statsStack.Children.Add($metricsRow) | Out-Null
+
+    $bytesText = New-UIElement-Label '0 B transferred' 11 $p.TextMuted
+    [System.Windows.Controls.DockPanel]::SetDock($bytesText, 'Left')
+    $metricsRow.Children.Add($bytesText) | Out-Null
+
+    $speedEtaText = New-UIElement-Label 'Speed: 0 B/s • ETA: --' 11 $p.TextPrimary $true
+    $speedEtaText.HorizontalAlignment = 'Right'
+    $metricsRow.Children.Add($speedEtaText) | Out-Null
+
+    $logMsgText = New-UIElement-Label '' 10 '#F87171'
+    $logMsgText.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
+    $logMsgText.Visibility = 'Collapsed'
+    $statsStack.Children.Add($logMsgText) | Out-Null
+
+    # Center Grid: 2 Columns (Source on Left, Destination on Right)
+    $centerGrid = [System.Windows.Controls.Grid]::new()
+    $cCol0 = [System.Windows.Controls.ColumnDefinition]::new(); $cCol0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $cColSep = [System.Windows.Controls.ColumnDefinition]::new(); $cColSep.Width = [System.Windows.GridLength]::new(14)
+    $cCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $cCol1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $centerGrid.ColumnDefinitions.Add($cCol0)
+    $centerGrid.ColumnDefinitions.Add($cColSep)
+    $centerGrid.ColumnDefinitions.Add($cCol1)
+    $rootDock.Children.Add($centerGrid) | Out-Null
+
+    # --- SOURCE COLUMN ---
+    $srcBorder = [System.Windows.Controls.Border]::new()
+    $srcBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $srcBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $srcBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $srcBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $srcBorder.Padding = [System.Windows.Thickness]::new(12)
+    [System.Windows.Controls.Grid]::SetColumn($srcBorder, 0)
+    $centerGrid.Children.Add($srcBorder) | Out-Null
+
+    $srcStack = [System.Windows.Controls.DockPanel]::new()
+    $srcBorder.Child = $srcStack
+
+    $srcTop = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($srcTop, 'Top')
+    $srcStack.Children.Add($srcTop) | Out-Null
+
+    $srcTitle = New-UIElement-Label 'SOURCE' 11 '#3B82F6' $true
+    $srcTop.Children.Add($srcTitle) | Out-Null
+
+    $srcCombo = [System.Windows.Controls.ComboBox]::new()
+    $srcCombo.Height = 28
+    $srcCombo.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+    $srcTop.Children.Add($srcCombo) | Out-Null
+
+    $srcNavRow = [System.Windows.Controls.DockPanel]::new()
+    $srcNavRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+    $srcTop.Children.Add($srcNavRow) | Out-Null
+
+    $srcUpBtn = [System.Windows.Controls.Button]::new()
+    $srcUpBtn.Content = [string][char]0x2191 + ' Up'
+    $srcUpBtn.Padding = [System.Windows.Thickness]::new(8, 2, 8, 2)
+    $srcUpBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $srcUpBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $srcUpBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $srcUpBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.DockPanel]::SetDock($srcUpBtn, 'Right')
+    $srcNavRow.Children.Add($srcUpBtn) | Out-Null
+
+    $srcPathLbl = New-UIElement-Label 'Folder: /' 11 $p.TextMuted
+    $srcPathLbl.VerticalAlignment = 'Center'
+    $srcNavRow.Children.Add($srcPathLbl) | Out-Null
+
+    $srcSelectedLbl = New-UIElement-Label 'Select a file or folder below' 11 $p.TextPrimary $true
+    $srcSelectedLbl.Margin = [System.Windows.Thickness]::new(0, 6, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($srcSelectedLbl, 'Bottom')
+    $srcStack.Children.Add($srcSelectedLbl) | Out-Null
+
+    $srcList = [System.Windows.Controls.ListBox]::new()
+    $srcList.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $srcList.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $srcList.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $srcStack.Children.Add($srcList) | Out-Null
+
+    # --- DESTINATION COLUMN ---
+    $dstBorder = [System.Windows.Controls.Border]::new()
+    $dstBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $dstBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $dstBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $dstBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $dstBorder.Padding = [System.Windows.Thickness]::new(12)
+    [System.Windows.Controls.Grid]::SetColumn($dstBorder, 2)
+    $centerGrid.Children.Add($dstBorder) | Out-Null
+
+    $dstStack = [System.Windows.Controls.DockPanel]::new()
+    $dstBorder.Child = $dstStack
+
+    $dstTop = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($dstTop, 'Top')
+    $dstStack.Children.Add($dstTop) | Out-Null
+
+    $dstTitle = New-UIElement-Label 'DESTINATION' 11 '#22C55E' $true
+    $dstTop.Children.Add($dstTitle) | Out-Null
+
+    $dstCombo = [System.Windows.Controls.ComboBox]::new()
+    $dstCombo.Height = 28
+    $dstCombo.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+    $dstTop.Children.Add($dstCombo) | Out-Null
+
+    $dstNavRow = [System.Windows.Controls.DockPanel]::new()
+    $dstNavRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+    $dstTop.Children.Add($dstNavRow) | Out-Null
+
+    $dstUpBtn = [System.Windows.Controls.Button]::new()
+    $dstUpBtn.Content = [string][char]0x2191 + ' Up'
+    $dstUpBtn.Padding = [System.Windows.Thickness]::new(8, 2, 8, 2)
+    $dstUpBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $dstUpBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $dstUpBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $dstUpBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.DockPanel]::SetDock($dstUpBtn, 'Right')
+    $dstNavRow.Children.Add($dstUpBtn) | Out-Null
+
+    $dstPathLbl = New-UIElement-Label 'Target Folder: /' 11 $p.TextMuted
+    $dstPathLbl.VerticalAlignment = 'Center'
+    $dstNavRow.Children.Add($dstPathLbl) | Out-Null
+
+    $dstSelectedLbl = New-UIElement-Label 'Files will be saved into /' 11 $p.TextPrimary $true
+    $dstSelectedLbl.Margin = [System.Windows.Thickness]::new(0, 6, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($dstSelectedLbl, 'Bottom')
+    $dstStack.Children.Add($dstSelectedLbl) | Out-Null
+
+    $dstList = [System.Windows.Controls.ListBox]::new()
+    $dstList.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $dstList.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $dstList.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $dstStack.Children.Add($dstList) | Out-Null
+
+    # State variables
+    $script:SrcCurrentPath = ''
+    $script:DstCurrentPath = ''
+    $script:SelectedSourceItem = $null
+    $script:ActiveTransferJobId = $null
+
+    $availableAccounts = Get-AvailableTransferAccounts
+    if (-not $availableAccounts -or $availableAccounts.Count -eq 0) {
+        $srcSelectedLbl.Text = 'No active cloud accounts available. Connect Google Drive or TeraBox first.'
+        $srcSelectedLbl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+        $startBtn.IsEnabled = $false
+    } else {
+        foreach ($acc in $availableAccounts) {
+            $tagText = "$($acc.DisplayName) ($($acc.ProviderId))"
+            [void]$srcCombo.Items.Add($tagText)
+            [void]$dstCombo.Items.Add($tagText)
+        }
+
+        # Default source: Google Drive, destination: TeraBox (or vice versa)
+        $srcCombo.SelectedIndex = 0
+        if ($availableAccounts.Count -gt 1) {
+            $srcCombo.SelectedIndex = 0
+            $dstCombo.SelectedIndex = 1
+        } else {
+            $dstCombo.SelectedIndex = 0
+        }
+    }
+
+    # Helper: Refresh Source File List
+    $refreshSource = {
+        $srcList.Items.Clear()
+        if ($srcCombo.SelectedIndex -lt 0 -or $srcCombo.SelectedIndex -ge $availableAccounts.Count) { return }
+        $acc = $availableAccounts[$srcCombo.SelectedIndex]
+        $srcPathLbl.Text = "Folder: /" + $script:SrcCurrentPath
+
+        try {
+            $items = Get-CloudDirectoryContents -Account $acc -Path $script:SrcCurrentPath
+            if ($items) {
+                foreach ($item in $items) {
+                    $prefix = if ($item.IsDir) { "[Folder] " } else { "[File] " }
+                    $szStr = if ($item.IsDir) { "" } else { " (" + (Format-TransferSpeed $item.Size).Replace('/s','') + ")" }
+                    $txt = "$prefix$($item.Name)$szStr"
+                    $lItem = [System.Windows.Controls.ListBoxItem]::new()
+                    $lItem.Content = $txt
+                    $lItem.Tag = $item
+                    $lItem.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+                    $srcList.Items.Add($lItem) | Out-Null
+                }
+            }
+        } catch {
+            $errItem = [System.Windows.Controls.ListBoxItem]::new()
+            $errItem.Content = "Could not list directory: $($_.Exception.Message)"
+            $errItem.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+            $srcList.Items.Add($errItem) | Out-Null
+        }
+    }
+
+    # Helper: Refresh Destination Folder List
+    $refreshDest = {
+        $dstList.Items.Clear()
+        if ($dstCombo.SelectedIndex -lt 0 -or $dstCombo.SelectedIndex -ge $availableAccounts.Count) { return }
+        $acc = $availableAccounts[$dstCombo.SelectedIndex]
+        $dstPathLbl.Text = "Target Folder: /" + $script:DstCurrentPath
+        $dstSelectedLbl.Text = "Files will be saved into /" + $script:DstCurrentPath
+
+        try {
+            $items = Get-CloudDirectoryContents -Account $acc -Path $script:DstCurrentPath
+            if ($items) {
+                foreach ($item in $items) {
+                    if ($item.IsDir) {
+                        $lItem = [System.Windows.Controls.ListBoxItem]::new()
+                        $lItem.Content = "[Folder] " + $item.Name
+                        $lItem.Tag = $item
+                        $lItem.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+                        $dstList.Items.Add($lItem) | Out-Null
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    $srcCombo.Add_SelectionChanged({
+        $script:SrcCurrentPath = ''
+        $script:SelectedSourceItem = $null
+        & $refreshSource
+    })
+
+    $dstCombo.Add_SelectionChanged({
+        $script:DstCurrentPath = ''
+        & $refreshDest
+    })
+
+    $srcUpBtn.Add_Click({
+        if ($script:SrcCurrentPath) {
+            $parts = $script:SrcCurrentPath.Split('/')
+            if ($parts.Length -gt 1) {
+                $script:SrcCurrentPath = ($parts[0..($parts.Length - 2)] -join '/')
+            } else {
+                $script:SrcCurrentPath = ''
+            }
+            $script:SelectedSourceItem = $null
+            & $refreshSource
+        }
+    })
+
+    $dstUpBtn.Add_Click({
+        if ($script:DstCurrentPath) {
+            $parts = $script:DstCurrentPath.Split('/')
+            if ($parts.Length -gt 1) {
+                $script:DstCurrentPath = ($parts[0..($parts.Length - 2)] -join '/')
+            } else {
+                $script:DstCurrentPath = ''
+            }
+            & $refreshDest
+        }
+    })
+
+    # Source selection handling
+    $srcList.Add_SelectionChanged({
+        if ($srcList.SelectedItem) {
+            $item = $srcList.SelectedItem.Tag
+            if ($item) {
+                $script:SelectedSourceItem = $item
+                if ($item.IsDir) {
+                    $srcSelectedLbl.Text = "Selected Folder: $($item.Name) (double-click to enter)"
+                } else {
+                    $srcSelectedLbl.Text = "Selected File: $($item.Name) (" + (Format-TransferSpeed $item.Size).Replace('/s','') + ")"
+                }
+            }
+        }
+    })
+
+    # Double click folder to drill down
+    $srcList.Add_MouseDoubleClick({
+        if ($srcList.SelectedItem) {
+            $item = $srcList.SelectedItem.Tag
+            if ($item -and $item.IsDir) {
+                $script:SrcCurrentPath = if ($script:SrcCurrentPath) { "$($script:SrcCurrentPath)/$($item.Name)" } else { $item.Name }
+                $script:SelectedSourceItem = $null
+                & $refreshSource
+            }
+        }
+    })
+
+    $dstList.Add_MouseDoubleClick({
+        if ($dstList.SelectedItem) {
+            $item = $dstList.SelectedItem.Tag
+            if ($item -and $item.IsDir) {
+                $script:DstCurrentPath = if ($script:DstCurrentPath) { "$($script:DstCurrentPath)/$($item.Name)" } else { $item.Name }
+                & $refreshDest
+            }
+        }
+    })
+
+    # Live Transfer Polling Timer
+    $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $pollTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $pollTimer.Add_Tick({
+        if ($script:ActiveTransferJobId) {
+            $st = Get-CloudTransferStatus -JobId $script:ActiveTransferJobId
+            if ($st) {
+                if ($st.Percentage -ge 0) {
+                    $progressBar.IsIndeterminate = $false
+                    $progressBar.Value = $st.Percentage
+                } else {
+                    $progressBar.IsIndeterminate = $true
+                }
+
+                $bytesFmt = (Format-TransferSpeed $st.BytesTransferred).Replace('/s', '')
+                $totFmt = if ($st.TotalBytes -gt 0) { (Format-TransferSpeed $st.TotalBytes).Replace('/s', '') } else { 'Unknown size' }
+                $bytesText.Text = "$bytesFmt of $totFmt transferred ($($st.Percentage)%)"
+                $speedEtaText.Text = "Speed: $($st.SpeedFormatted) • ETA: $($st.EtaFormatted)"
+
+                if ($st.Status -eq 'Running') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Streaming Relay...')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
+                    $pauseBtn.Content = 'Pause'
+                    $pauseBtn.IsEnabled = $true
+                    $cancelBtn.IsEnabled = $true
+                    $startBtn.IsEnabled = $false
+                } elseif ($st.Status -eq 'Paused') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Paused')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+                    $pauseBtn.Content = 'Resume'
+                    $pauseBtn.IsEnabled = $true
+                } elseif ($st.Status -eq 'Completed') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Completed Successfully')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
+                    $progressBar.IsIndeterminate = $false
+                    $progressBar.Value = 100
+                    $pauseBtn.IsEnabled = $false
+                    $cancelBtn.IsEnabled = $false
+                    $startBtn.IsEnabled = $true
+                    $script:ActiveTransferJobId = $null
+                    $pollTimer.Stop()
+                    & $refreshDest
+                } elseif ($st.Status -eq 'Failed') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Failed')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+                    $logMsgText.Text = "Error: $($st.LastError)"
+                    $logMsgText.Visibility = 'Visible'
+                    $pauseBtn.IsEnabled = $false
+                    $cancelBtn.IsEnabled = $false
+                    $startBtn.IsEnabled = $true
+                    $script:ActiveTransferJobId = $null
+                    $pollTimer.Stop()
+                } elseif ($st.Status -eq 'Cancelled') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Cancelled')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+                    $pauseBtn.IsEnabled = $false
+                    $cancelBtn.IsEnabled = $false
+                    $startBtn.IsEnabled = $true
+                    $script:ActiveTransferJobId = $null
+                    $pollTimer.Stop()
+                }
+            }
+        }
+    })
+
+    # Action: Start Transfer
+    $startBtn.Add_Click({
+        if ($srcCombo.SelectedIndex -lt 0 -or $dstCombo.SelectedIndex -lt 0) {
+            [System.Windows.MessageBox]::Show('Please select source and destination accounts.', 'Transfer Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $srcAcc = $availableAccounts[$srcCombo.SelectedIndex]
+        $dstAcc = $availableAccounts[$dstCombo.SelectedIndex]
+
+        if ($srcAcc.Id -eq $dstAcc.Id -and $script:SrcCurrentPath -eq $script:DstCurrentPath) {
+            [System.Windows.MessageBox]::Show('Source and destination cannot be identical in the same directory.', 'Transfer Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        # Path to transfer: specific selected item or current folder
+        $srcTarget = if ($script:SelectedSourceItem) {
+            if ($script:SrcCurrentPath) { "$($script:SrcCurrentPath)/$($script:SelectedSourceItem.Name)" } else { $script:SelectedSourceItem.Name }
+        } else {
+            $script:SrcCurrentPath
+        }
+
+        $logMsgText.Visibility = 'Collapsed'
+        $statusBadge.Text = 'Initializing streaming transfer...'
+        $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
+
+        try {
+            $job = Start-CloudTransfer -SourceAccount $srcAcc -SourcePath $srcTarget -DestinationAccount $dstAcc -DestinationPath $script:DstCurrentPath -ConflictAction 'Skip'
+            $script:ActiveTransferJobId = $job.JobId
+            $pollTimer.Start()
+            $startBtn.IsEnabled = $false
+            $pauseBtn.IsEnabled = $true
+            $cancelBtn.IsEnabled = $true
+        } catch {
+            $statusBadge.Text = ([string][char]0x25CF + ' Start Failed')
+            $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+            $logMsgText.Text = "Error starting transfer: $($_.Exception.Message)"
+            $logMsgText.Visibility = 'Visible'
+        }
+    })
+
+    $pauseBtn.Add_Click({
+        if ($script:ActiveTransferJobId) {
+            if ($pauseBtn.Content -eq 'Pause') {
+                Suspend-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
+            } else {
+                Resume-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
+            }
+        }
+    })
+
+    $cancelBtn.Add_Click({
+        if ($script:ActiveTransferJobId) {
+            Stop-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
+        }
+    })
+
+    $win.Add_Closing({
+        param($sender, $eventArgs)
+        if ($script:ActiveTransferJobId) {
+            $c = [System.Windows.MessageBox]::Show('A cloud transfer is currently running. Do you want to cancel the transfer and exit?', 'Cancel Transfer', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+            if ($c -eq [System.Windows.MessageBoxResult]::Yes) {
+                Stop-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
+                $pollTimer.Stop()
+            } else {
+                $eventArgs.Cancel = $true
+            }
+        }
+    })
+
+    # Initial population of file lists
+    & $refreshSource
+    & $refreshDest
 
     [void]$win.ShowDialog()
 }
