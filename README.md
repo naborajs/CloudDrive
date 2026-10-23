@@ -6,6 +6,7 @@
 
 ## Product direction
 
+- **Air Live Drive-Inspired Desktop UI**: Clean, modern dark-themed user interface featuring a narrow navigation sidebar (`Disks`, `Options`, `Help`), composite 3D hard-drive icons with provider emblem badges, direct `Connect` / `Disconnect` buttons, drive letter combo (`in [ G: v ]`), quick action buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), storage progress bars with "X free of Y" capacity indicators, and an embedded `Options` view with Cache Management.
 - **File Explorer is the Primary Interface**: Open folders, inspect files, copy, paste, and stream on-demand directly in Windows Explorer without needing to use a custom file-transfer UI.
 - **Separate Native-Looking Drives**: Each connected provider mounts to its own distinct Windows drive letter with an intuitive volume label (e.g. `Google Drive (G:)` and `TeraBox (T:)`), independent mount lifecycles, and automatic drive letter conflict resolution.
 - **Real Cloud Capacity Reporting**: Live display of provider storage quota (used space, total space, percentage used, remaining space) and distinct local cache disk usage.
