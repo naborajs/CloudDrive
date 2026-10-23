@@ -1720,7 +1720,7 @@ function Update-AllUIState {
                 if ($aCombo.SelectedItem) {
                     $sel = $aCombo.SelectedItem.ToString().TrimEnd(':')
                     $currAcc.DriveLetter = $sel
-                    Set-CloudAccount -Account $currAcc | Out-Null
+                    Update-CloudAccount -Account $currAcc | Out-Null
                 }
             })
             $aActionRow.Children.Add($aCombo) | Out-Null
