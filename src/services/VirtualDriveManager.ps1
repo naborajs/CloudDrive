@@ -335,6 +335,14 @@ function Build-RcloneMountArguments(
         '--log-level', 'ERROR'
     )
 
+    # Google Drive operations can leave WinFsp request threads waiting on remote
+    # metadata or reads. Keep additional dispatcher capacity available so those
+    # waits do not also starve unrelated Explorer metadata requests. This is
+    # Google Drive-specific; TeraBox retains its current WinFsp defaults.
+    if ($RemoteName -match '(?i)(^|[^a-z0-9])(?:gdrive|google)(?:$|[^a-z0-9])') {
+        $args += @('--fuse-flag', '--ThreadCount=64')
+    }
+
     if (-not [string]::IsNullOrEmpty($ConfigPath)) {
         $args += @('--config', $ConfigPath)
     }
