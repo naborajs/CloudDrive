@@ -334,8 +334,9 @@ function Build-RcloneMountArguments(
         '--vfs-cache-max-age', '24h',
         '--vfs-cache-poll-interval', '1m',
         '--vfs-write-back', '5s',
-        '--dir-cache-time', '5m',
-        '--attr-timeout', '1s',
+        '--dir-cache-time', '15m',
+        '--attr-timeout', '5s',
+        '--links',
         '--ask-password=false',
         '--log-level', 'ERROR'
     )
@@ -364,7 +365,7 @@ function Start-VirtualDriveMount(
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [hashtable]$EnvironmentVariables = @{},
     [switch]$ReadOnly = $false,
-    [int]$TimeoutSeconds = 35
+    [int]$TimeoutSeconds = 90
 ) {
     if (-not (Test-WinFspInstalled)) {
         throw 'WinFsp is not installed or running. Cannot mount virtual drive.'
