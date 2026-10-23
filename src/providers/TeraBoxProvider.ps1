@@ -368,19 +368,36 @@ function Invoke-TeraBoxHttp(
     }
 }
 
+$script:TeraBoxSessionCache = @{}
+
 function Test-TeraBoxBackendSession(
     [hashtable]$SessionOverride = $null,
     [object]$Window = $null,
-    [string]$AccountId = ''
+    [string]$AccountId = '',
+    [switch]$Force = $false
 ) {
+    $cacheKey = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'default' }
+    if ((-not $Force) -and (-not $SessionOverride) -and $script:TeraBoxSessionCache.ContainsKey($cacheKey)) {
+        $cached = $script:TeraBoxSessionCache[$cacheKey]
+        if ($cached -and $cached.CheckedAt -and (([DateTime]::UtcNow - $cached.CheckedAt).TotalSeconds -lt 120)) {
+            return $cached.Result
+        }
+    }
+
+    $SetCacheAndReturn = {
+        param($val)
+        $script:TeraBoxSessionCache[$cacheKey] = [ordered]@{ CheckedAt = [DateTime]::UtcNow; Result = $val }
+        return $val
+    }
+
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     if (-not $session) {
-        return [ordered]@{
+        return (& $SetCacheAndReturn ([ordered]@{
             IsValid = $false
             State = 'Disconnected'
             Error = 'No local TeraBox session or credentials found. Please sign in.'
             UserInfo = $null
-        }
+        }))
     }
 
     try {
@@ -462,7 +479,7 @@ function Test-TeraBoxBackendSession(
                 'TeraBox User'
             }
 
-            return [ordered]@{
+            return (& $SetCacheAndReturn ([ordered]@{
                 IsValid = $true
                 State = 'Connected'
                 Error = $null
@@ -477,7 +494,7 @@ function Test-TeraBoxBackendSession(
                     QuotaTotalBytes = $quotaTotal
                     QuotaUsedBytes = $quotaUsed
                 }
-            }
+            }))
         } else {
             $errCode = if ($null -ne $errno) { [int]$errno } else { -1 }
             $errDetail = switch ($errCode) {
@@ -495,21 +512,21 @@ function Test-TeraBoxBackendSession(
                 }
             }
 
-            return [ordered]@{
+            return (& $SetCacheAndReturn ([ordered]@{
                 IsValid = $false
                 State = 'AuthenticationExpired'
                 Error = $errDetail
                 UserInfo = $null
-            }
+            }))
         }
     } catch {
         $sanitizedError = Format-SanitizedDiagnosticMessage $_.Exception.Message
-        return [ordered]@{
+        return (& $SetCacheAndReturn ([ordered]@{
             IsValid = $false
             State = 'Error'
             Error = "Backend validation request failed: $sanitizedError"
             UserInfo = $null
-        }
+        }))
     }
 }
 
