@@ -62,6 +62,10 @@ $script:ReconnectWorkerAccountId = ''
 $script:ReconnectWorkerProgress = $null
 $script:AccountMountStates = @{}
 $script:PendingManualMountAccountIds = [System.Collections.Generic.Queue[string]]::new()
+# Legacy (no saved account) provider-card mounts run off the UI thread. One
+# worker per provider prevents duplicate mounts; states drive the status pill.
+$script:LegacyMountWorkers = @{}
+$script:LegacyMountStates = @{}
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
 $script:StartupAutoMountProgress = [hashtable]::Synchronized(@{ Stage = 'Waiting for startup dispatcher'; ProviderId = ''; DriveLetter = ''; StartedAt = $null })
 $script:LastStartupAutoMountLogKey = ''
@@ -1601,6 +1605,16 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
             return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $mountState }
         }
     }
+    if ([string]::IsNullOrWhiteSpace($AccountId)) {
+        $providerKey = ([string]$ProviderId).ToLowerInvariant()
+        if ($script:LegacyMountStates.ContainsKey($providerKey)) {
+            $legacyState = $script:LegacyMountStates[$providerKey]
+            if ($legacyState -and $legacyState.State -in @('Mounting', 'Error', 'AuthRequired')) {
+                $letter = if ($DriveLetter) { $DriveLetter } else { [string]$legacyState.DriveLetter }
+                return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $legacyState }
+            }
+        }
+    }
     $snapshot = $script:ProviderStatusSnapshot
     if ($snapshot) {
         if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $snapshot.PSObject.Properties['AccountStatuses'] -and $snapshot.AccountStatuses -and $snapshot.AccountStatuses.ContainsKey($AccountId)) {
@@ -1748,6 +1762,8 @@ function Complete-AvailableStartupWorkers {
         $script:LastProviderStatusCheck = [DateTime]::MinValue
     }
 
+    Complete-AvailableLegacyMountWorkers
+
     if (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $script:PendingManualMountAccountIds.Count -gt 0) {
         $nextAccountId = $script:PendingManualMountAccountIds.Dequeue()
         Invoke-AutoReconnectWatchdog -AccountId $nextAccountId
@@ -1879,6 +1895,23 @@ function Update-AllUIState {
             $gdLetterCombo.IsEnabled = $false
             $gdExplorerBtn.IsEnabled = $true
             $gdUploadBtn.IsEnabled = $true
+        } elseif ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Mounting') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' ' + [string]$gdStatus.MountState.Stage)
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.Content = 'Mounting...'
+            $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.IsEnabled = $false
+            $gdLetterCombo.IsEnabled = $false
+            $gdExplorerBtn.IsEnabled = $false
+            $gdUploadBtn.IsEnabled = $false
+        } elseif ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Error') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' ' + [string]$gdStatus.MountState.Error)
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Danger)
+            $gdActionBtn.Content = 'Retry'
+            $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+            $gdLetterCombo.IsEnabled = $true
+            $gdExplorerBtn.IsEnabled = $false
+            $gdUploadBtn.IsEnabled = $false
         } else {
             $gdStatusText.Text = ([string][char]0x25CF + ' Ready to connect')
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillConnected)
@@ -1982,6 +2015,23 @@ function Update-AllUIState {
             $tbLetterCombo.IsEnabled = $false
             $tbExplorerBtn.IsEnabled = $true
             $tbUploadBtn.IsEnabled = $true
+        } elseif ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Mounting') {
+            $tbStatusText.Text = ([string][char]0x25CF + ' ' + [string]$tbStatus.MountState.Stage)
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.Content = 'Mounting...'
+            $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.IsEnabled = $false
+            $tbLetterCombo.IsEnabled = $false
+            $tbExplorerBtn.IsEnabled = $false
+            $tbUploadBtn.IsEnabled = $false
+        } elseif ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Error') {
+            $tbStatusText.Text = ([string][char]0x25CF + ' ' + [string]$tbStatus.MountState.Error)
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Danger)
+            $tbActionBtn.Content = 'Retry'
+            $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+            $tbLetterCombo.IsEnabled = $true
+            $tbExplorerBtn.IsEnabled = $false
+            $tbUploadBtn.IsEnabled = $false
         } else {
             $tbStatusText.Text = ([string][char]0x25CF + ' Ready to connect')
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillConnected)
@@ -2036,8 +2086,8 @@ function Update-AllUIState {
         $tbUploadBtn.IsEnabled = $false
     }
 
-    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $gdCheck.State -ne 'Checking')
-    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheck.State -ne 'Checking')
+    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $gdCheck.State -ne 'Checking' -and -not (Test-LegacyMountBusy 'gdrive'))
+    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheck.State -ne 'Checking' -and -not (Test-LegacyMountBusy 'terabox'))
 
     # 3. Dynamic Multi-Account Cards
     $accountsStack.Children.Clear()
@@ -2148,12 +2198,20 @@ function Update-AllUIState {
             $aCombo.SelectedItem = "$($currAcc.DriveLetter):"
             $aCombo.Add_SelectionChanged({
                 if ($aCombo.SelectedItem) {
+                    $mountState = if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id)) { $script:AccountMountStates[[string]$currAcc.Id] } else { $null }
+                    if ($mountState -and $mountState.State -eq 'Mounting') {
+                        $aCombo.SelectedItem = "$([string]$currAcc.DriveLetter):"
+                        return
+                    }
                     $sel = $aCombo.SelectedItem.ToString().TrimEnd(':')
                     $previousLetter = [string]$currAcc.DriveLetter
                     if ($sel -eq $previousLetter) { return }
                     $updatedAccount = @{} + $currAcc
                     $updatedAccount.DriveLetter = $sel
                     try {
+                        # Persist first: if another account owns that letter the
+                        # save is rejected, the combo reverts, and the card keeps
+                        # its previous letter everywhere.
                         Update-CloudAccount -Account $updatedAccount | Out-Null
                         $currAcc.DriveLetter = $sel
                     } catch {
@@ -2286,11 +2344,9 @@ $gdActionBtn.Add_Click({
         $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         $gdActionBtn.IsEnabled = $false
         try {
-            $envVars = Get-GoogleDriveRcloneEnvironment
-            $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-            if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                Start-ExplorerWindow $mRes.DriveRoot
-            }
+            # Mounting runs in a background runspace; the window stays responsive
+            # while rclone/WinFsp take up to 90 seconds to surface the drive.
+            [void](Start-LegacyMountWorker -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -DisplayName 'Google Drive')
         } catch {
             $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
             $gdErrorText.Visibility = 'Visible'
@@ -2319,11 +2375,7 @@ $gdActionBtn.Add_Click({
                 if (Test-WinFspInstalled) {
                     $gdAccountText.Text = 'Mounting virtual drive (' + $script:GDriveLetter + ':)...'
                     try {
-                        $envVars = Get-GoogleDriveRcloneEnvironment
-                        $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-                        if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                            Start-ExplorerWindow $mRes.DriveRoot
-                        }
+                        [void](Start-LegacyMountWorker -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -DisplayName 'Google Drive')
                     } catch {
                         $gdErrorText.Text = 'Connected, but could not mount ' + $script:GDriveLetter + ': ' + $_.Exception.Message
                         $gdErrorText.Visibility = 'Visible'
@@ -2416,11 +2468,9 @@ $tbActionBtn.Add_Click({
         $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         $tbActionBtn.IsEnabled = $false
         try {
-            $tbEnvVars = Get-TeraBoxRcloneEnvironment
-            $mRes = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
-            if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                Start-ExplorerWindow $mRes.DriveRoot
-            }
+            # Mounting runs in a background runspace; the window stays responsive
+            # while rclone/WinFsp take up to 90 seconds to surface the drive.
+            [void](Start-LegacyMountWorker -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -DisplayName 'TeraBox')
         } catch {
             $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
             $tbErrorText.Visibility = 'Visible'
@@ -2444,11 +2494,7 @@ $tbActionBtn.Add_Click({
             $verifiedRclone = Get-VerifiedRclonePath
             if ($verifiedRclone -and (Test-WinFspInstalled)) {
                 try {
-                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                    $mRes = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
-                    if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                        Start-ExplorerWindow $mRes.DriveRoot
-                    }
+                    [void](Start-LegacyMountWorker -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -DisplayName 'TeraBox')
                 } catch {
                     $tbErrorText.Text = 'Connected, but could not mount ' + $script:TeraBoxLetter + ': ' + $_.Exception.Message
                     $tbErrorText.Visibility = 'Visible'
@@ -2616,6 +2662,123 @@ $window.Add_StateChanged({
 })
 
 # ==============================================================================
+# LEGACY PROVIDER-CARD MOUNT WORKERS
+# ==============================================================================
+# The provider cards at the top of the Disks view connect credentials stored in
+# the legacy (account-less) token files. Their mounts used to run inline in the
+# WPF click handler and could freeze the window for up to 90 seconds. These
+# helpers dispatch each legacy mount to the same cancellable background runspace
+# machinery used for saved accounts, keyed per provider so a duplicate click can
+# never start a second rclone mount for the same drive.
+function Test-LegacyMountBusy([string]$ProviderId) {
+    $providerKey = ([string]$ProviderId).ToLowerInvariant()
+    if ($script:LegacyMountWorkers.ContainsKey($providerKey) -and $script:LegacyMountWorkers[$providerKey]) { return $true }
+    if ($script:LegacyMountStates.ContainsKey($providerKey) -and $script:LegacyMountStates[$providerKey] -and $script:LegacyMountStates[$providerKey].State -eq 'Mounting') { return $true }
+    return $false
+}
+
+function Start-LegacyMountWorker {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProviderId,
+        [Parameter(Mandatory = $true)][string]$DriveLetter,
+        [string]$DisplayName = ''
+    )
+    $providerKey = $ProviderId.ToLowerInvariant()
+    if (Test-LegacyMountBusy $providerKey) { return $false }
+
+    $cleanLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $progress = [hashtable]::Synchronized(@{ Stage = 'Starting mount worker'; DriveLetter = $cleanLetter; Error = $null; StartedAt = [DateTime]::UtcNow })
+    $script:LegacyMountStates[$providerKey] = [ordered]@{
+        State = 'Mounting'; Stage = 'Starting mount worker'; Error = $null
+        DriveLetter = $cleanLetter; StartedAt = [DateTime]::UtcNow; UpdatedAt = [DateTime]::UtcNow
+    }
+    try {
+        $script:LegacyMountWorkers[$providerKey] = Start-NSBackgroundOperation -ArgumentList @(
+            $PSScriptRoot, $script:CacheDirectory, $providerKey, $cleanLetter, $DisplayName, $progress
+        ) -ScriptBlock {
+            param([string]$sourceRoot, [string]$cacheDirectory, [string]$providerKey, [string]$driveLetter, [string]$displayName, [hashtable]$progress)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+            . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+            . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+
+            if ($providerKey -eq 'gdrive') {
+                $progress.Stage = 'Validating Google Drive credentials'
+                $check = Test-GoogleDriveBackendSession
+                if (-not $check.IsValid) {
+                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($check.State -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = $check.Error; DriveLetter = $driveLetter }
+                }
+                $progress.Stage = "Starting and verifying ${driveLetter}: mount"
+                $environment = Get-GoogleDriveRcloneEnvironment
+                Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $driveLetter `
+                    -VolumeLabel $(if ($displayName) { $displayName } else { 'Google Drive' }) `
+                    -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+            } elseif ($providerKey -eq 'terabox') {
+                $progress.Stage = 'Validating TeraBox session'
+                $check = Test-TeraBoxBackendSession
+                if (-not $check.IsValid) {
+                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($check.State -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = $check.Error; DriveLetter = $driveLetter }
+                }
+                $progress.Stage = "Starting and verifying ${driveLetter}: mount"
+                $environment = Get-TeraBoxRcloneEnvironment
+                Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $driveLetter `
+                    -VolumeLabel $(if ($displayName) { $displayName } else { 'TeraBox' }) `
+                    -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+            } else {
+                return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = 'Error'; Error = "Unknown provider '$providerKey'."; DriveLetter = $driveLetter }
+            }
+
+            return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = 'Mounted'; Error = $null; DriveLetter = $driveLetter }
+        }
+        return $true
+    } catch {
+        $script:LegacyMountStates[$providerKey] = [ordered]@{
+            State = 'Error'; Stage = 'Could not start mount worker'
+            Error = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+            DriveLetter = $cleanLetter; StartedAt = $null; UpdatedAt = [DateTime]::UtcNow
+        }
+        return $false
+    }
+}
+
+function Complete-AvailableLegacyMountWorkers {
+    foreach ($providerKey in @($script:LegacyMountWorkers.Keys)) {
+        $operation = $script:LegacyMountWorkers[$providerKey]
+        if (-not $operation -or -not (Test-NSBackgroundOperationCompleted $operation)) { continue }
+        $script:LegacyMountWorkers.Remove($providerKey)
+        $previous = if ($script:LegacyMountStates.ContainsKey($providerKey)) { $script:LegacyMountStates[$providerKey] } else { $null }
+        $final = [ordered]@{
+            State = 'Error'; Stage = 'Mount worker stopped'
+            Error = 'The mount worker stopped unexpectedly.'
+            DriveLetter = if ($previous) { [string]$previous.DriveLetter } else { '' }
+            StartedAt = $null; UpdatedAt = [DateTime]::UtcNow
+        }
+        try {
+            $completed = Complete-NSBackgroundOperation $operation
+            $result = if ($completed.Output.Count -gt 0) { $completed.Output[-1] } else { $null }
+            if ($result -and $result.WorkerKey) {
+                $final = [ordered]@{
+                    State = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Mounted' } else { [string]$result.State }
+                    Stage = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Filesystem verified' } else { 'Mount attempt finished' }
+                    Error = if ($result.Error) { [string]$result.Error } else { $null }
+                    DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { $final.DriveLetter }
+                    StartedAt = $null; UpdatedAt = [DateTime]::UtcNow
+                }
+            } elseif ($completed.HadErrors -and $completed.Errors.Count -gt 0) {
+                $final.Error = Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message)
+            }
+        } catch { }
+        $script:LegacyMountStates[$providerKey] = $final
+        if ($final.State -eq 'Mounted') {
+            if ($script:Settings.OpenExplorerOnMount -and $final.DriveLetter) {
+                try { Start-ExplorerWindow ($final.DriveLetter + ':\') } catch { }
+            }
+        }
+    }
+}
+
+# ==============================================================================
 # AUTO-RECONNECT WATCHDOG
 # ==============================================================================
 # Invoked from the background DispatcherTimer.  When a configured account has
@@ -2632,6 +2795,10 @@ $window.Add_StateChanged({
 # in progress) or when AutoMountDrives is disabled in settings.
 function Invoke-AutoReconnectWatchdog {
     param([string]$AccountId = '')
+    # A legacy provider card is already mounting with this backend; a second
+    # rclone mount for the same drive would fail with a letter conflict. Until
+    # it finishes, new requests wait instead of racing the running mount.
+    if (Test-LegacyMountBusy 'gdrive' -or Test-LegacyMountBusy 'terabox') { return }
     if ($script:IsConnecting -or ([string]::IsNullOrWhiteSpace($AccountId) -and -not $script:Settings.AutoMountDrives)) { return }
     if ($script:ReconnectWorker -or $script:StartupAutoMountWorker -or $script:StartupAutoMountPending) {
         if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
