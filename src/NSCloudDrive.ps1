@@ -348,6 +348,16 @@ $gdConnectedActions.Visibility = 'Collapsed'
 [System.Windows.Controls.DockPanel]::SetDock($gdConnectedActions, 'Left')
 $gdActionsDock.Children.Add($gdConnectedActions) | Out-Null
 
+$gdMountBtn = [System.Windows.Controls.Button]::new()
+$gdMountBtn.Content = 'Mount'
+$gdMountBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+$gdMountBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F9D58')
+$gdMountBtn.Foreground = [System.Windows.Media.Brushes]::White
+$gdMountBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$gdMountBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$gdMountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$gdConnectedActions.Children.Add($gdMountBtn) | Out-Null
+
 $gdExplorerBtn = [System.Windows.Controls.Button]::new()
 $gdExplorerBtn.Content = 'Open in Explorer'
 $gdExplorerBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
@@ -358,6 +368,27 @@ $gdExplorerBtn.Foreground = [System.Windows.Media.Brushes]::White
 $gdExplorerBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
 $gdExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $gdConnectedActions.Children.Add($gdExplorerBtn) | Out-Null
+
+$gdUploadBtn = [System.Windows.Controls.Button]::new()
+$gdUploadBtn.Content = 'Upload'
+$gdUploadBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+$gdUploadBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+$gdUploadBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+$gdUploadBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$gdUploadBtn.Foreground = [System.Windows.Media.Brushes]::White
+$gdUploadBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$gdUploadBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$gdConnectedActions.Children.Add($gdUploadBtn) | Out-Null
+
+$gdUnmountBtn = [System.Windows.Controls.Button]::new()
+$gdUnmountBtn.Content = 'Unmount'
+$gdUnmountBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+$gdUnmountBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+$gdUnmountBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+$gdUnmountBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$gdUnmountBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
+$gdUnmountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$gdConnectedActions.Children.Add($gdUnmountBtn) | Out-Null
 
 $gdDisconnectBtn = [System.Windows.Controls.Button]::new()
 $gdDisconnectBtn.Content = 'Disconnect'
@@ -483,6 +514,16 @@ $tbConnectedActions.Visibility = 'Collapsed'
 [System.Windows.Controls.DockPanel]::SetDock($tbConnectedActions, 'Left')
 $tbActionsDock.Children.Add($tbConnectedActions) | Out-Null
 
+$tbMountBtn = [System.Windows.Controls.Button]::new()
+$tbMountBtn.Content = 'Mount'
+$tbMountBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+$tbMountBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$tbMountBtn.Foreground = [System.Windows.Media.Brushes]::White
+$tbMountBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$tbMountBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$tbMountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$tbConnectedActions.Children.Add($tbMountBtn) | Out-Null
+
 $tbExplorerBtn = [System.Windows.Controls.Button]::new()
 $tbExplorerBtn.Content = 'Open in Explorer'
 $tbExplorerBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
@@ -493,6 +534,27 @@ $tbExplorerBtn.Foreground = [System.Windows.Media.Brushes]::White
 $tbExplorerBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
 $tbExplorerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $tbConnectedActions.Children.Add($tbExplorerBtn) | Out-Null
+
+$tbUploadBtn = [System.Windows.Controls.Button]::new()
+$tbUploadBtn.Content = 'Upload'
+$tbUploadBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+$tbUploadBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+$tbUploadBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+$tbUploadBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$tbUploadBtn.Foreground = [System.Windows.Media.Brushes]::White
+$tbUploadBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$tbUploadBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$tbConnectedActions.Children.Add($tbUploadBtn) | Out-Null
+
+$tbUnmountBtn = [System.Windows.Controls.Button]::new()
+$tbUnmountBtn.Content = 'Unmount'
+$tbUnmountBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+$tbUnmountBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+$tbUnmountBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+$tbUnmountBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$tbUnmountBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
+$tbUnmountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$tbConnectedActions.Children.Add($tbUnmountBtn) | Out-Null
 
 $tbDisconnectBtn = [System.Windows.Controls.Button]::new()
 $tbDisconnectBtn.Content = 'Disconnect'
@@ -538,13 +600,23 @@ function Update-AllUIState {
         }
 
         if ($gdStatus.IsMounted) {
-            $gdStatusPillText.Text = "● Connected ($($gdStatus.DriveLetter):)"
+            $gdStatusPillText.Text = "● Mounted ($($gdStatus.DriveLetter):)"
             $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
             $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1E3A2F')
+            $gdMountBtn.Visibility = 'Collapsed'
+            $gdExplorerBtn.Visibility = 'Visible'
+            $gdUploadBtn.Visibility = 'Visible'
+            $gdUnmountBtn.Visibility = 'Visible'
+            $gdDisconnectBtn.Visibility = 'Visible'
         } else {
-            $gdStatusPillText.Text = "● Authorized"
+            $gdStatusPillText.Text = "● Ready to Mount"
             $gdStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#60A5FA')
             $gdStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1E293B')
+            $gdMountBtn.Visibility = 'Visible'
+            $gdExplorerBtn.Visibility = 'Collapsed'
+            $gdUploadBtn.Visibility = 'Collapsed'
+            $gdUnmountBtn.Visibility = 'Collapsed'
+            $gdDisconnectBtn.Visibility = 'Visible'
         }
 
         $gdConnectBtn.Visibility = 'Collapsed'
@@ -569,6 +641,11 @@ function Update-AllUIState {
 
         $gdConnectBtn.Visibility = 'Visible'
         $gdConnectedActions.Visibility = 'Collapsed'
+        $gdMountBtn.Visibility = 'Collapsed'
+        $gdExplorerBtn.Visibility = 'Collapsed'
+        $gdUploadBtn.Visibility = 'Collapsed'
+        $gdUnmountBtn.Visibility = 'Collapsed'
+        $gdDisconnectBtn.Visibility = 'Collapsed'
         $gdLetterCombo.IsEnabled = $true
     }
 
@@ -602,13 +679,23 @@ function Update-AllUIState {
         }
 
         if ($tbStatus.IsMounted) {
-            $tbStatusPillText.Text = "● Connected ($($tbStatus.DriveLetter):)"
+            $tbStatusPillText.Text = "● Mounted ($($tbStatus.DriveLetter):)"
             $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
             $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1E3A2F')
+            $tbMountBtn.Visibility = 'Collapsed'
+            $tbExplorerBtn.Visibility = 'Visible'
+            $tbUploadBtn.Visibility = 'Visible'
+            $tbUnmountBtn.Visibility = 'Visible'
+            $tbDisconnectBtn.Visibility = 'Visible'
         } else {
-            $tbStatusPillText.Text = "● Authorized"
+            $tbStatusPillText.Text = "● Ready to Mount"
             $tbStatusPillText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#60A5FA')
             $tbStatusPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1E293B')
+            $tbMountBtn.Visibility = 'Visible'
+            $tbExplorerBtn.Visibility = 'Collapsed'
+            $tbUploadBtn.Visibility = 'Collapsed'
+            $tbUnmountBtn.Visibility = 'Collapsed'
+            $tbDisconnectBtn.Visibility = 'Visible'
         }
 
         $tbConnectBtn.Visibility = 'Collapsed'
@@ -633,12 +720,28 @@ function Update-AllUIState {
 
         $tbConnectBtn.Visibility = 'Visible'
         $tbConnectedActions.Visibility = 'Collapsed'
+        $tbMountBtn.Visibility = 'Collapsed'
+        $tbExplorerBtn.Visibility = 'Collapsed'
+        $tbUploadBtn.Visibility = 'Collapsed'
+        $tbUnmountBtn.Visibility = 'Collapsed'
+        $tbDisconnectBtn.Visibility = 'Collapsed'
         $tbLetterCombo.IsEnabled = $true
     }
 
     # 3. Dynamic Multi-Account Cards
     $accountsStack.Children.Clear()
-    $allAccounts = Get-CloudAccounts
+    $allAccounts = @()
+    try {
+        $rawAccs = Get-CloudAccounts
+        if ($rawAccs) {
+            foreach ($acc in $rawAccs) {
+                if ($acc.Id -notlike 'test_*' -and $acc.AccountEmail -notin @('personal@gmail.com', 'work@company.com', 'terabox_user')) {
+                    $allAccounts += $acc
+                }
+            }
+        }
+    } catch { }
+
     if ($allAccounts -and $allAccounts.Count -gt 0) {
         $secLabel = New-Label 'ADDITIONAL CONNECTED DRIVES' 11 '#949BA4' $true
         $secLabel.Margin = [System.Windows.Thickness]::new(2, 6, 0, 8)
@@ -667,9 +770,9 @@ function Update-AllUIState {
             [System.Windows.Controls.DockPanel]::SetDock($aPill, 'Right')
             $aStatus = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
 
-            $pillText = if ($aStatus.IsMounted) { "● Connected ($($aStatus.DriveLetter):)" } else { "● Disconnected" }
-            $pillColor = if ($aStatus.IsMounted) { '#4ADE80' } else { '#949BA4' }
-            $pillBg = if ($aStatus.IsMounted) { '#1E3A2F' } else { '#383A40' }
+            $pillText = if ($aStatus.IsMounted) { "● Mounted ($($aStatus.DriveLetter):)" } else { "● Ready to Mount" }
+            $pillColor = if ($aStatus.IsMounted) { '#4ADE80' } else { '#60A5FA' }
+            $pillBg = if ($aStatus.IsMounted) { '#1E3A2F' } else { '#1E293B' }
             $aPill.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($pillBg)
             $aPillText = New-Label $pillText 12 $pillColor $true
             $aPill.Child = $aPillText
@@ -721,25 +824,41 @@ function Update-AllUIState {
                 $openBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
                 $openBtn.BorderThickness = [System.Windows.Thickness]::new(1)
                 $openBtn.Foreground = [System.Windows.Media.Brushes]::White
+                $openBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
                 $openBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
                 $openBtn.Add_Click({
                     [System.Diagnostics.Process]::Start('explorer.exe', "$($currAcc.DriveLetter):\") | Out-Null
                 })
                 $aActions.Children.Add($openBtn) | Out-Null
 
-                $discBtn = [System.Windows.Controls.Button]::new()
-                $discBtn.Content = 'Disconnect'
-                $discBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
-                $discBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-                $discBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
-                $discBtn.BorderThickness = [System.Windows.Thickness]::new(1)
-                $discBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
-                $discBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
-                $discBtn.Add_Click({
+                $uploadBtn = [System.Windows.Controls.Button]::new()
+                $uploadBtn.Content = 'Upload'
+                $uploadBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+                $uploadBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+                $uploadBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+                $uploadBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+                $uploadBtn.Foreground = [System.Windows.Media.Brushes]::White
+                $uploadBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+                $uploadBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+                $uploadBtn.Add_Click({
+                    Show-UploadDialog -DriveLetter $currAcc.DriveLetter -ParentWindow $window
+                })
+                $aActions.Children.Add($uploadBtn) | Out-Null
+
+                $unmountBtn = [System.Windows.Controls.Button]::new()
+                $unmountBtn.Content = 'Unmount'
+                $unmountBtn.Padding = [System.Windows.Thickness]::new(14, 7, 14, 7)
+                $unmountBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+                $unmountBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4E5058')
+                $unmountBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+                $unmountBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
+                $unmountBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+                $unmountBtn.Add_Click({
                     Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
                     Update-AllUIState
                 })
-                $aActions.Children.Add($discBtn) | Out-Null
+                $aActions.Children.Add($unmountBtn) | Out-Null
+
             } else {
                 $connBtn = [System.Windows.Controls.Button]::new()
                 $connBtn.Content = 'Mount Drive'
@@ -786,6 +905,46 @@ function Update-AllUIState {
 
 # --- Action Event Handlers ---
 
+function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentWindow) {
+    $cleanLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $driveRoot = "$cleanLetter`:\"
+    if (-not (Test-Path -LiteralPath $driveRoot)) {
+        [System.Windows.MessageBox]::Show("Drive $driveRoot is not mounted or accessible. Please mount the drive first.", 'Upload to Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return
+    }
+
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+    $dlg.Title = "Select File(s) to Upload to $cleanLetter`:"
+    $dlg.Multiselect = $true
+    $dlg.CheckFileExists = $true
+
+    $res = $dlg.ShowDialog($ParentWindow)
+    if ($res -eq $true -and $dlg.FileNames.Length -gt 0) {
+        $uploaded = 0
+        $failed = 0
+        $errMsgs = @()
+
+        foreach ($srcFile in $dlg.FileNames) {
+            try {
+                $fName = [System.IO.Path]::GetFileName($srcFile)
+                $destPath = Join-Path $driveRoot $fName
+                [System.IO.File]::Copy($srcFile, $destPath, $true)
+                $uploaded++
+            } catch {
+                $failed++
+                $errMsgs += "$([System.IO.Path]::GetFileName($srcFile)): $($_.Exception.Message)"
+            }
+        }
+
+        if ($failed -eq 0) {
+            [System.Windows.MessageBox]::Show("Successfully uploaded $uploaded file(s) to $cleanLetter`: ($driveRoot).", 'Upload Complete', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            $msg = "Uploaded: $uploaded`nFailed: $failed`n`nDetails:`n" + ($errMsgs -join "`n")
+            [System.Windows.MessageBox]::Show($msg, 'Upload Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        }
+    }
+}
+
 # GOOGLE DRIVE: Connect Action
 $gdConnectBtn.Add_Click({
     $script:IsConnecting = $true
@@ -796,60 +955,34 @@ $gdConnectBtn.Add_Click({
     $gdConnectBtn.IsEnabled = $false
 
     try {
-        $oauthCfg = Get-GoogleOAuthConfig
-        if (-not $oauthCfg.IsConfigured) {
-            $cfgRes = Show-GoogleClientConfigModal -Owner $window
-            if (-not $cfgRes.Success) {
-                $gdErrorText.Text = 'Google OAuth Client ID is required to connect.'
-                $gdErrorText.Visibility = 'Visible'
-                return
-            }
-            $oauthCfg = Get-GoogleOAuthConfig
-        }
-
-        $state = New-OAuthState
-        $verifier = New-PkceVerifier
-        $challenge = New-PkceChallenge $verifier
-
-        $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
-        $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthCfg.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge
         $gdAccountText.Text = 'Awaiting Google sign-in approval in browser...'
-        [System.Diagnostics.Process]::Start($authUrl) | Out-Null
+        $authRes = Invoke-GoogleDriveAuthorization -TimeoutSeconds 120 -CancelCheck { -not $window.IsVisible }
+        if ($authRes.Success) {
+            $gdAccountText.Text = 'Verifying Google Drive account access...'
+            $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens
+            if ($verify.IsValid) {
+                Save-GoogleDriveTokens -TokenData $authRes.Tokens
 
-        $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { -not $window.IsVisible }
-        if ($waitResult.Success) {
-            $gdAccountText.Text = 'Validating authorization code...'
-            $tokenResult = Exchange-GoogleAuthCode -ClientId $oauthCfg.ClientId -ClientSecret $oauthCfg.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
-            if ($tokenResult.Success) {
-                $gdAccountText.Text = 'Verifying Google Drive account access...'
-                $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
-                if ($verify.IsValid) {
-                    Save-GoogleDriveTokens -TokenData $tokenResult.Tokens
-
-                    # Direct Auto-Mount
-                    if (Test-WinFspInstalled) {
-                        $gdAccountText.Text = "Mounting virtual drive ($($script:GDriveLetter):)..."
-                        try {
-                            $envVars = Get-GoogleDriveRcloneEnvironment
-                            $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-                            if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                                [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
-                            }
-                        } catch {
-                            $gdErrorText.Text = "Connected, but could not mount $($script:GDriveLetter): $($_.Exception.Message)"
-                            $gdErrorText.Visibility = 'Visible'
+                # Direct Auto-Mount
+                if (Test-WinFspInstalled) {
+                    $gdAccountText.Text = "Mounting virtual drive ($($script:GDriveLetter):)..."
+                    try {
+                        $envVars = Get-GoogleDriveRcloneEnvironment
+                        $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
+                        if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
+                            [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
                         }
+                    } catch {
+                        $gdErrorText.Text = "Connected, but could not mount $($script:GDriveLetter): $($_.Exception.Message)"
+                        $gdErrorText.Visibility = 'Visible'
                     }
-                } else {
-                    $gdErrorText.Text = "Validation failed: $($verify.Error)"
-                    $gdErrorText.Visibility = 'Visible'
                 }
             } else {
-                $gdErrorText.Text = "Authorization failed: $($tokenResult.Error)"
+                $gdErrorText.Text = "Validation failed: $($verify.Error)"
                 $gdErrorText.Visibility = 'Visible'
             }
         } else {
-            $gdErrorText.Text = "Authorization cancelled: $($waitResult.Error)"
+            $gdErrorText.Text = "Sign-in cancelled or failed: $($authRes.Error)"
             $gdErrorText.Visibility = 'Visible'
         }
     } catch {
@@ -862,25 +995,38 @@ $gdConnectBtn.Add_Click({
     }
 })
 
+# GOOGLE DRIVE: Mount Action
+$gdMountBtn.Add_Click({
+    try {
+        $envVars = Get-GoogleDriveRcloneEnvironment
+        $res = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
+        if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
+            [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+        }
+    } catch {
+        $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
+        $gdErrorText.Visibility = 'Visible'
+    }
+    Update-AllUIState
+})
+
 # GOOGLE DRIVE: Explorer Action
 $gdExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($status.IsMounted) {
         [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
-    } else {
-        # Mount first if not mounted
-        try {
-            $envVars = Get-GoogleDriveRcloneEnvironment
-            $res = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-            if ($res.Success) {
-                [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
-            }
-        } catch {
-            $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
-            $gdErrorText.Visibility = 'Visible'
-        }
-        Update-AllUIState
     }
+})
+
+# GOOGLE DRIVE: Upload Action
+$gdUploadBtn.Add_Click({
+    Show-UploadDialog -DriveLetter $script:GDriveLetter -ParentWindow $window
+})
+
+# GOOGLE DRIVE: Unmount Action
+$gdUnmountBtn.Add_Click({
+    Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
+    Update-AllUIState
 })
 
 # GOOGLE DRIVE: Disconnect Action
@@ -903,7 +1049,6 @@ $tbConnectBtn.Add_Click({
     try {
         $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $window -OnLoginSucceeded {
             param($res)
-            # Verified login completed in embedded browser
         }
 
         if ($loginRes.Success) {
@@ -935,25 +1080,38 @@ $tbConnectBtn.Add_Click({
     }
 })
 
+# TERABOX: Mount Action
+$tbMountBtn.Add_Click({
+    try {
+        $tbEnvVars = Get-TeraBoxRcloneEnvironment
+        $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
+        if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
+            [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+        }
+    } catch {
+        $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
+        $tbErrorText.Visibility = 'Visible'
+    }
+    Update-AllUIState
+})
+
 # TERABOX: Explorer Action
 $tbExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($status.IsMounted) {
         [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
-    } else {
-        # Mount first if not mounted
-        try {
-            $tbEnvVars = Get-TeraBoxRcloneEnvironment
-            $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
-            if ($res.Success) {
-                [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
-            }
-        } catch {
-            $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
-            $tbErrorText.Visibility = 'Visible'
-        }
-        Update-AllUIState
     }
+})
+
+# TERABOX: Upload Action
+$tbUploadBtn.Add_Click({
+    Show-UploadDialog -DriveLetter $script:TeraBoxLetter -ParentWindow $window
+})
+
+# TERABOX: Unmount Action
+$tbUnmountBtn.Add_Click({
+    Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
+    Update-AllUIState
 })
 
 # TERABOX: Disconnect Action
