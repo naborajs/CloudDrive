@@ -576,42 +576,16 @@ function Show-CloudAccountSetupModal(
 
 function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
     if ($ProviderId -eq 'gdrive') {
-        $oauthConfig = Get-GoogleOAuthConfig
-        if (-not $oauthConfig.IsConfigured) {
-            $cfgRes = Show-GoogleClientConfigModal -Owner $Owner
-            $oauthConfig = Get-GoogleOAuthConfig
-            if (-not $oauthConfig.IsConfigured) {
-                return $null
-            }
-        }
-
-        # Run OAuth flow
-        $state = New-OAuthState
-        $verifier = New-PkceVerifier
-        $challenge = New-PkceChallenge -Verifier $verifier
-        $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
-        $authUrl = Build-GoogleAuthorizationUrl -ClientId $oauthConfig.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge -Prompt 'select_account consent'
-
-        [System.Diagnostics.Process]::Start($authUrl) | Out-Null
-        $loopbackRes = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx
-
-        if (-not $loopbackRes.Success) {
-            [System.Windows.MessageBox]::Show("Sign-in cancelled or timed out: $($loopbackRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        $accId = "gdrive_" + [DateTime]::UtcNow.Ticks.ToString()
+        $authRes = Invoke-GoogleDriveAuthorization -AccountId $accId
+        if (-not $authRes.Success) {
+            [System.Windows.MessageBox]::Show("Google Drive sign-in: $($authRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
             return $null
         }
 
-        $tokenRes = Exchange-GoogleAuthCode -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -Code $loopbackRes.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
-        if (-not $tokenRes.Success) {
-            [System.Windows.MessageBox]::Show("Authentication failed: $($tokenRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
-            return $null
-        }
-
-        $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenRes.Tokens
+        $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens -AccountId $accId
         $userEmail = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'EmailAddress' '') } else { '' }
         $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' $userEmail) } else { $userEmail }
-
-        $accId = "gdrive_" + [DateTime]::UtcNow.Ticks.ToString()
-        Save-GoogleDriveTokens -TokenData $tokenRes.Tokens -AccountId $accId
 
         $nextLetter = Get-NextAvailableDriveLetter 'G'
         $initData = @{
@@ -943,46 +917,40 @@ function Show-ProviderConnectionWindow(
         $signInBtn.HorizontalAlignment = 'Left'
         $signInBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
         $signInBtn.Add_Click({
-            $currentOauth = Get-GoogleOAuthConfig
-            if (-not $currentOauth.IsConfigured) {
-                $cfgRes = Show-GoogleClientConfigModal -Owner $win
-                if (-not $cfgRes.Success) { return }
-                $currentOauth = Get-GoogleOAuthConfig
-            }
-
-            & $UpdateState 'OpeningSignIn' 'Starting authorization...'
-            $state = New-OAuthState
-            $verifier = New-PkceVerifier
-            $challenge = New-PkceChallenge $verifier
+            & $UpdateState 'OpeningSignIn' 'Starting Google authorization in browser...'
             try {
-                $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state
-                $authUrl = Build-GoogleAuthorizationUrl -ClientId $currentOauth.ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge
-                & $UpdateState 'AwaitingUserAuth' 'Awaiting approval in Google browser sign-in...'
-                [System.Diagnostics.Process]::Start($authUrl) | Out-Null
-
-                $waitResult = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck { -not $win.IsVisible }
-                if ($waitResult.Success) {
-                    $tokenResult = Exchange-GoogleAuthCode -ClientId $currentOauth.ClientId -ClientSecret $currentOauth.ClientSecret -Code $waitResult.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier
-                    if ($tokenResult.Success) {
-                        Save-GoogleDriveTokens -TokenData $tokenResult.Tokens
-                        $verify = Test-GoogleDriveBackendSession -TokensOverride $tokenResult.Tokens
-                        if ($verify.IsValid) {
-                            $uDisp = if ($verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' (Get-SafeProperty $verify.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
-                            & $UpdateState 'Connected' "Connected as $uDisp"
-                        } else {
-                            & $UpdateState $verify.State $verify.Error
-                        }
+                $authRes = Invoke-GoogleDriveAuthorization -TimeoutSeconds 120 -CancelCheck { -not $win.IsVisible }
+                if ($authRes.Success) {
+                    Save-GoogleDriveTokens -TokenData $authRes.Tokens
+                    $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens
+                    if ($verify.IsValid) {
+                        $uDisp = if ($verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' (Get-SafeProperty $verify.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
+                        & $UpdateState 'Connected' "Connected as $uDisp"
                     } else {
-                        & $UpdateState 'Error' $tokenResult.Error
+                        & $UpdateState $verify.State $verify.Error
                     }
                 } else {
-                    & $UpdateState 'Error' $waitResult.Error
+                    & $UpdateState 'Disconnected' $authRes.Error
                 }
             } catch {
                 & $UpdateState 'Error' (Format-SanitizedDiagnosticMessage $_.Exception.Message)
             }
         })
         $actionStack.Children.Add($signInBtn) | Out-Null
+
+        $advBtn = [System.Windows.Controls.Button]::new()
+        $advBtn.Content = 'Advanced: Custom Client ID'
+        $advBtn.Padding = [System.Windows.Thickness]::new(8, 4, 8, 4)
+        $advBtn.Background = [System.Windows.Media.Brushes]::Transparent
+        $advBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#64748B')
+        $advBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+        $advBtn.FontSize = 11
+        $advBtn.HorizontalAlignment = 'Left'
+        $advBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+        $advBtn.Add_Click({
+            [void](Show-GoogleClientConfigModal -Owner $win)
+        })
+        $actionStack.Children.Add($advBtn) | Out-Null
     }
 
     # Action row: Test & Disconnect
