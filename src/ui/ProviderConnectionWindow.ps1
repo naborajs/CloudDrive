@@ -317,14 +317,70 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     [void]$setWin.ShowDialog()
 }
 
-function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptblock]$OnProviderSelected = $null) {
+function Get-ModalThemePalette([string]$ThemeName = '') {
+    $t = if (-not [string]::IsNullOrEmpty($ThemeName)) {
+        Resolve-AppTheme $ThemeName
+    } else {
+        try { Resolve-AppTheme (Get-NSCloudDriveSettings).Theme } catch { 'PureBlack' }
+    }
+
+    if ($t -eq 'PureWhite') {
+        return @{
+            Background = '#FFFFFF'
+            Border = '#E5E7EB'
+            CardBg = '#F9FAFB'
+            CardBorder = '#E5E7EB'
+            TextPrimary = '#111827'
+            TextMuted = '#6B7280'
+            InputBg = '#FFFFFF'
+            InputBorder = '#D1D5DB'
+            InputText = '#111827'
+            CancelBg = '#F3F4F6'
+            CancelBorder = '#E5E7EB'
+            CancelText = '#374151'
+        }
+    } elseif ($t -eq 'Translucent') {
+        return @{
+            Background = '#181B22'
+            Border = '#2D3342'
+            CardBg = '#222734'
+            CardBorder = '#363E50'
+            TextPrimary = '#FFFFFF'
+            TextMuted = '#94A3B8'
+            InputBg = '#1C202B'
+            InputBorder = '#363E50'
+            InputText = '#FFFFFF'
+            CancelBg = '#2B3142'
+            CancelBorder = '#363E50'
+            CancelText = '#DBDEE1'
+        }
+    } else {
+        return @{
+            Background = '#000000'
+            Border = '#222222'
+            CardBg = '#121212'
+            CardBorder = '#262626'
+            TextPrimary = '#FFFFFF'
+            TextMuted = '#A0A0A0'
+            InputBg = '#161616'
+            InputBorder = '#2E2E2E'
+            InputText = '#FFFFFF'
+            CancelBg = '#1E1E1E'
+            CancelBorder = '#2E2E2E'
+            CancelText = '#D4D4D4'
+        }
+    }
+}
+
+function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptblock]$OnProviderSelected = $null, [string]$Theme = '') {
+    $p = Get-ModalThemePalette $Theme
     $addWin = [System.Windows.Window]::new()
     $addWin.Title = 'Add Cloud Disk'
     $addWin.Width = 520
     $addWin.Height = 360
     $addWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $addWin.Owner = $Owner }
-    $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18191C')
+    $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
     $addWin.ResizeMode = 'NoResize'
     $addWin.FontFamily = 'Segoe UI'
 
@@ -336,9 +392,9 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $headerStack = [System.Windows.Controls.StackPanel]::new()
     [System.Windows.Controls.DockPanel]::SetDock($headerStack, 'Top')
     $headerStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
-    $title = New-UIElement-Label 'Add Cloud Disk' 18 '#F2F3F5' $true
+    $title = New-UIElement-Label 'Add Cloud Disk' 18 $p.TextPrimary $true
     $headerStack.Children.Add($title) | Out-Null
-    $subtitle = New-UIElement-Label 'Select a supported cloud storage provider to mount as a Windows drive.' 12 '#949BA4'
+    $subtitle = New-UIElement-Label 'Select a supported cloud storage provider to mount as a Windows drive.' 12 $p.TextMuted
     $subtitle.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
     $headerStack.Children.Add($subtitle) | Out-Null
     $dock.Children.Add($headerStack) | Out-Null
@@ -348,10 +404,10 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $cancelBtn.Content = 'Cancel'
     $cancelBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
     $cancelBtn.HorizontalAlignment = 'Right'
-    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
     $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
-    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
+    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
     [System.Windows.Controls.DockPanel]::SetDock($cancelBtn, 'Bottom')
     $cancelBtn.Add_Click({ $addWin.Close() })
     $dock.Children.Add($cancelBtn) | Out-Null
@@ -364,8 +420,8 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
 
     # Provider 1: Google Drive
     $gdBorder = [System.Windows.Controls.Border]::new()
-    $gdBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-    $gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $gdBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $gdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
     $gdBorder.BorderThickness = [System.Windows.Thickness]::new(1)
     $gdBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
     $gdBorder.Padding = [System.Windows.Thickness]::new(14)
@@ -394,9 +450,54 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $gdLeft.Children.Add($gdLogoImg) | Out-Null
 
     $gdText = [System.Windows.Controls.StackPanel]::new()
-    $gdText.Children.Add((New-UIElement-Label 'Google Drive' 15 '#F2F3F5' $true)) | Out-Null
-    $gdText.Children.Add((New-UIElement-Label 'Personal & Workspace cloud storage via Google OAuth 2.0' 12 '#949BA4')) | Out-Null
+    $gdText.Children.Add((New-UIElement-Label 'Google Drive' 15 $p.TextPrimary $true)) | Out-Null
+    $gdText.Children.Add((New-UIElement-Label 'Personal & Workspace cloud storage via Google OAuth 2.0' 12 $p.TextMuted)) | Out-Null
     $gdLeft.Children.Add($gdText) | Out-Null
+
+    $SelectGD = {
+        $script:SelectedProvider = 'gdrive'
+        $addWin.Close()
+        if ($OnProviderSelected) { & $OnProviderSelected 'gdrive' }
+    }
+    $gdBtn.Add_Click($SelectGD)
+    $gdBorder.Add_MouseLeftButtonDown($SelectGD)
+    $listStack.Children.Add($gdBorder) | Out-Null
+
+    # Provider 2: TeraBox
+    $tbBorder = [System.Windows.Controls.Border]::new()
+    $tbBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $tbBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $tbBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $tbBorder.Padding = [System.Windows.Thickness]::new(14)
+    $tbBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $tbBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $tbDock = [System.Windows.Controls.DockPanel]::new()
+    $tbBorder.Child = $tbDock
+
+    $tbBtn = [System.Windows.Controls.Button]::new()
+    $tbBtn.Content = 'Select'
+    $tbBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $tbBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+    $tbBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $tbBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $tbBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($tbBtn, 'Right')
+    $tbDock.Children.Add($tbBtn) | Out-Null
+
+    $tbLeft = [System.Windows.Controls.StackPanel]::new()
+    $tbLeft.Orientation = 'Horizontal'
+    $tbDock.Children.Add($tbLeft) | Out-Null
+
+    $tbLogoImg = New-LogoImageControl 'terabox.png' 38 38
+    $tbLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $tbLeft.Children.Add($tbLogoImg) | Out-Null
+
+    $tbText = [System.Windows.Controls.StackPanel]::new()
+    $tbText.Children.Add((New-UIElement-Label 'TeraBox' 15 $p.TextPrimary $true)) | Out-Null
+    $tbText.Children.Add((New-UIElement-Label '1024 GB free cloud storage via WebDAV loopback bridge' 12 $p.TextMuted)) | Out-Null
+    $tbLeft.Children.Add($tbText) | Out-Null
 
     $SelectGD = {
         $script:SelectedProvider = 'gdrive'
@@ -459,17 +560,19 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
 function Show-CloudAccountSetupModal(
     [System.Windows.Window]$Owner = $null,
     [string]$ProviderId = 'gdrive',
-    [hashtable]$InitialAccount = $null
+    [hashtable]$InitialAccount = $null,
+    [string]$Theme = ''
 ) {
+    $p = Get-ModalThemePalette $Theme
     $setupWin = [System.Windows.Window]::new()
     $isEdit = ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and $InitialAccount.Id)
     $provName = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
     $setupWin.Title = if ($isEdit) { "Configure $provName Account" } else { "Add $provName Disk" }
-    $setupWin.Width = 460
-    $setupWin.Height = 360
+    $setupWin.Width = 470
+    $setupWin.Height = 440
     $setupWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $setupWin.Owner = $Owner }
-    $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#18191C')
+    $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
     $setupWin.ResizeMode = 'NoResize'
     $setupWin.FontFamily = 'Segoe UI'
 
@@ -478,23 +581,23 @@ function Show-CloudAccountSetupModal(
     $setupWin.Content = $stack
 
     # Header
-    $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 '#F2F3F5' $true
+    $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 $p.TextPrimary $true
     $stack.Children.Add($title) | Out-Null
 
-    $sub = New-UIElement-Label 'Configure the display name and Windows virtual drive letter.' 12 '#949BA4'
+    $sub = New-UIElement-Label 'Configure account display name, drive letter, and mounting options.' 12 $p.TextMuted
     $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 16)
     $stack.Children.Add($sub) | Out-Null
 
     # Account Name field
-    $lbl1 = New-UIElement-Label 'Disk / Account Name' 12 '#DBDEE1' $true
+    $lbl1 = New-UIElement-Label 'Disk / Account Name' 12 $p.TextPrimary $true
     $stack.Children.Add($lbl1) | Out-Null
 
     $txtName = [System.Windows.Controls.TextBox]::new()
     $txtName.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
     $txtName.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
-    $txtName.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-    $txtName.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
-    $txtName.Foreground = [System.Windows.Media.Brushes]::White
+    $txtName.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $txtName.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $txtName.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputText)
     $defaultName = if ($InitialAccount -and $InitialAccount.ContainsKey('DisplayName')) {
         [string]$InitialAccount.DisplayName
     } elseif ($ProviderId -eq 'terabox') {
@@ -506,7 +609,7 @@ function Show-CloudAccountSetupModal(
     $stack.Children.Add($txtName) | Out-Null
 
     # Drive Letter field
-    $lbl2 = New-UIElement-Label 'Windows Drive Letter' 12 '#DBDEE1' $true
+    $lbl2 = New-UIElement-Label 'Windows Drive Letter' 12 $p.TextPrimary $true
     $stack.Children.Add($lbl2) | Out-Null
 
     $cmbLetter = [System.Windows.Controls.ComboBox]::new()
@@ -549,17 +652,39 @@ function Show-CloudAccountSetupModal(
     }
     $stack.Children.Add($cmbLetter) | Out-Null
 
-    # Auto-mount CheckBox
+    # CheckBoxes
     $chkAutoMount = [System.Windows.Controls.CheckBox]::new()
     $chkAutoMount.Content = 'Automatically mount this drive on startup'
-    $chkAutoMount.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
-    $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
+    $chkAutoMount.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $chkAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
     $chkAutoMount.IsChecked = if ($InitialAccount -and $InitialAccount.ContainsKey('AutoMount') -and $null -ne $InitialAccount.AutoMount) {
         [bool]$InitialAccount.AutoMount
     } else {
         $true
     }
     $stack.Children.Add($chkAutoMount) | Out-Null
+
+    $chkOpenExplorer = [System.Windows.Controls.CheckBox]::new()
+    $chkOpenExplorer.Content = 'Open Windows File Explorer automatically after mounting'
+    $chkOpenExplorer.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $chkOpenExplorer.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $chkOpenExplorer.IsChecked = if ($InitialAccount -and $InitialAccount.ContainsKey('OpenExplorerOnMount') -and $null -ne $InitialAccount.OpenExplorerOnMount) {
+        [bool]$InitialAccount.OpenExplorerOnMount
+    } else {
+        $true
+    }
+    $stack.Children.Add($chkOpenExplorer) | Out-Null
+
+    $chkReadOnly = [System.Windows.Controls.CheckBox]::new()
+    $chkReadOnly.Content = 'Mount as read-only disk (protect cloud files against modifications)'
+    $chkReadOnly.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+    $chkReadOnly.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
+    $chkReadOnly.IsChecked = if ($InitialAccount -and $InitialAccount.ContainsKey('ReadOnly') -and $null -ne $InitialAccount.ReadOnly) {
+        [bool]$InitialAccount.ReadOnly
+    } else {
+        $false
+    }
+    $stack.Children.Add($chkReadOnly) | Out-Null
 
     # Buttons
     $btnDock = [System.Windows.Controls.DockPanel]::new()
@@ -584,10 +709,10 @@ function Show-CloudAccountSetupModal(
     $cancelBtn = [System.Windows.Controls.Button]::new()
     $cancelBtn.Content = 'Cancel'
     $cancelBtn.Padding = [System.Windows.Thickness]::new(12, 7, 12, 7)
-    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
+    $cancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $cancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
     $cancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
-    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DBDEE1')
+    $cancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
     $cancelBtn.Add_Click({ $setupWin.Close() })
     $btnStack.Children.Add($cancelBtn) | Out-Null
 
@@ -617,10 +742,17 @@ function Show-CloudAccountSetupModal(
             AccountEmail = if ($InitialAccount -and $InitialAccount.ContainsKey('AccountEmail')) { [string]$InitialAccount.AccountEmail } else { '' }
             DriveLetter = $letter
             AutoMount = [bool]$chkAutoMount.IsChecked
-            Created = [DateTime]::UtcNow.ToString('o')
+            OpenExplorerOnMount = [bool]$chkOpenExplorer.IsChecked
+            ReadOnly = [bool]$chkReadOnly.IsChecked
+            CustomIcon = if ($InitialAccount -and $InitialAccount.ContainsKey('CustomIcon')) { [string]$InitialAccount.CustomIcon } else { $null }
+            Created = if ($isEdit -and $InitialAccount.ContainsKey('Created')) { [string]$InitialAccount.Created } else { [DateTime]::UtcNow.ToString('o') }
         }
 
-        Add-CloudAccount $accObj | Out-Null
+        if ($isEdit) {
+            Update-CloudAccount $accObj | Out-Null
+        } else {
+            Add-CloudAccount $accObj | Out-Null
+        }
         $script:SavedAccountResult = $accObj
         $setupWin.Close()
     })
