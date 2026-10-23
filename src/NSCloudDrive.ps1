@@ -1427,6 +1427,12 @@ function Apply-UITheme([string]$ThemeName) {
         $btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
 
+    # Provider drive selectors and cache quota use the same input palette in every theme.
+    foreach ($combo in @($gdLetterCombo, $tbLetterCombo, $cacheQuotaCombo)) {
+        $combo.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+        $combo.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+        $combo.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
     # Options View
     $optTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     $optSubtitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
@@ -1541,6 +1547,43 @@ $navDisksItem.Button.Add_Click({ Show-DisksView })
 $navOptionsItem.Button.Add_Click({ Show-OptionsView })
 $navHelpItem.Button.Add_Click({ Show-HelpView })
 $backToDisksBtn.Add_Click({ Show-DisksView })
+
+# Use a theme-aware button template so disabled controls keep their themed surface
+# instead of reverting to the Windows default white/gray face.
+$buttonStyleXaml = @'
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="Button">
+  <Setter Property="SnapsToDevicePixels" Value="True" />
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="Button">
+        <Border x:Name="Chrome"
+                Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="6"
+                Padding="{TemplateBinding Padding}">
+          <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                            RecognizesAccessKey="True" />
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True">
+            <Setter TargetName="Chrome" Property="Opacity" Value="0.92" />
+          </Trigger>
+          <Trigger Property="IsPressed" Value="True">
+            <Setter TargetName="Chrome" Property="Opacity" Value="0.78" />
+          </Trigger>
+          <Trigger Property="IsEnabled" Value="False">
+            <Setter TargetName="Chrome" Property="Opacity" Value="0.55" />
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+'@
+$buttonStyle = [System.Windows.Markup.XamlReader]::Parse($buttonStyleXaml)
+$window.Resources.Add([System.Windows.Controls.Button], $buttonStyle)
 
 # Apply active theme immediately
 Apply-UITheme $script:Settings.Theme
