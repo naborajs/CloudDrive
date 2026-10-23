@@ -204,6 +204,35 @@ function Get-CloudDirectoryContents {
         [string]$Path = ''
     )
 
+    $providerId = if ($Account.ContainsKey('ProviderId')) { $Account.ProviderId } else { 'gdrive' }
+    $accountId = if ($Account.ContainsKey('Id')) { $Account.Id } else { '' }
+
+    # Fast-path: If the drive is already mounted locally in Windows Explorer, read directly from the mount
+    try {
+        $mountStatus = Get-VirtualDriveStatus -AccountId $accountId -ProviderId $providerId
+        if ($mountStatus -and $mountStatus.IsMounted -and (Test-Path -LiteralPath $mountStatus.DriveRoot)) {
+            $cleanPath = Normalize-CloudPath -Path $Path
+            $localDir = if ($cleanPath) { Join-Path $mountStatus.DriveRoot ($cleanPath.Replace('/', '\')) } else { $mountStatus.DriveRoot }
+            if (Test-Path -LiteralPath $localDir) {
+                $items = @()
+                $children = Get-ChildItem -LiteralPath $localDir -ErrorAction SilentlyContinue
+                foreach ($child in $children) {
+                    $isDir = $child.PSIsContainer
+                    $relPath = if ($cleanPath) { "$cleanPath/$($child.Name)" } else { $child.Name }
+                    $items += [ordered]@{
+                        Name = $child.Name
+                        Path = $relPath
+                        IsDir = [bool]$isDir
+                        Size = if ($isDir) { 0L } else { [int64]$child.Length }
+                        MimeType = ''
+                        ModTime = $child.LastWriteTime.ToString('o')
+                    }
+                }
+                return $items
+            }
+        }
+    } catch { }
+
     $rclonePath = Find-RcloneBinary
     if (-not $rclonePath -or -not (Test-Path -LiteralPath $rclonePath -PathType Leaf)) {
         throw "rclone binary not found."
@@ -229,9 +258,24 @@ function Get-CloudDirectoryContents {
     }
 
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit(15000) | Out-Null
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.WaitForExit(100)) {
+        if ($sw.ElapsedMilliseconds -gt 15000) {
+            try { $proc.Kill() } catch { }
+            throw "Timed out waiting for directory listing of '$cleanPath'."
+        }
+        try {
+            if ([System.Windows.Application]::Current) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+            }
+        } catch { }
+    }
+    $proc.WaitForExit()
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
 
     if ($proc.ExitCode -ne 0) {
         $sanitizedErr = Format-SanitizedDiagnosticMessage $stderr
