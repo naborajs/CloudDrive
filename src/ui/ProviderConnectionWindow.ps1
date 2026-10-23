@@ -522,7 +522,7 @@ function Show-CloudAccountSetupModal(
 ) {
     $p = Get-ModalThemePalette $Theme
     $setupWin = [System.Windows.Window]::new()
-    $isEdit = ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and $InitialAccount.Id)
+    $isEdit = ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and (Test-CloudAccountPersisted -AccountId ([string]$InitialAccount.Id)))
     $provName = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
     $setupWin.Title = if ($isEdit) { "Configure $provName Account" } else { "Add $provName Disk" }
     $setupWin.Width = 470
@@ -689,7 +689,7 @@ function Show-CloudAccountSetupModal(
         $accId = if ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and $InitialAccount.Id) {
             [string]$InitialAccount.Id
         } else {
-            "${ProviderId}_" + [DateTime]::UtcNow.Ticks.ToString()
+            "${ProviderId}_" + [Guid]::NewGuid().ToString('N')
         }
 
         $accObj = [ordered]@{
@@ -705,13 +705,18 @@ function Show-CloudAccountSetupModal(
             Created = if ($isEdit -and $InitialAccount.ContainsKey('Created')) { [string]$InitialAccount.Created } else { [DateTime]::UtcNow.ToString('o') }
         }
 
-        if ($isEdit) {
-            Update-CloudAccount $accObj | Out-Null
-        } else {
-            Add-CloudAccount $accObj | Out-Null
+        try {
+            if ($isEdit) {
+                $saved = Update-CloudAccount $accObj
+            } else {
+                $saved = Add-CloudAccount $accObj
+            }
+            if (-not $saved) { throw 'The account save operation returned no saved record.' }
+            $script:SavedAccountResult = $saved
+            $setupWin.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show("Could not save this cloud account. $($_.Exception.Message)", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
         }
-        $script:SavedAccountResult = $accObj
-        $setupWin.Close()
     })
 
     [void]$setupWin.ShowDialog()
@@ -720,7 +725,7 @@ function Show-CloudAccountSetupModal(
 
 function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
     if ($ProviderId -eq 'gdrive') {
-        $accId = "gdrive_" + [DateTime]::UtcNow.Ticks.ToString()
+        $accId = "gdrive_" + [Guid]::NewGuid().ToString('N')
         $authRes = Invoke-GoogleDriveAuthorization -AccountId $accId
         if (-not $authRes.Success) {
             [System.Windows.MessageBox]::Show("Google Drive sign-in: $($authRes.Error)", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
@@ -729,7 +734,24 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
 
         $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens -AccountId $accId
         $userEmail = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'EmailAddress' '') } else { '' }
-        $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' $userEmail) } else { $userEmail }
+        $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' '') } else { '' }
+        if (-not $verify.IsValid -or (-not $userEmail -and (-not $userName -or $userName -eq 'Google Drive User'))) {
+            Remove-GoogleDriveSession -AccountId $accId
+            $reason = if ($verify.Error) { [string]$verify.Error } else { 'Google did not return a verifiable account identity.' }
+            [System.Windows.MessageBox]::Show("Google authorization succeeded, but the account identity could not be verified. No account was added. $reason", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return $null
+        }
+
+        if ($userEmail) {
+            $existing = Get-CloudAccounts
+            foreach ($account in $existing) {
+                if ($account.ProviderId -eq 'gdrive' -and $account.AccountEmail -and [string]::Equals([string]$account.AccountEmail, $userEmail, [StringComparison]::OrdinalIgnoreCase)) {
+                    Remove-GoogleDriveSession -AccountId $accId
+                    [System.Windows.MessageBox]::Show("This Google account is already saved as '$($account.DisplayName)' on $($account.DriveLetter):. The existing account was left unchanged.", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                    return $null
+                }
+            }
+        }
 
         $nextLetter = Get-NextAvailableDriveLetter 'G'
         $initData = @{
@@ -741,10 +763,12 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
             AutoMount = $true
         }
 
-        return (Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'gdrive' -InitialAccount $initData)
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'gdrive' -InitialAccount $initData
+        if (-not $saved) { Remove-GoogleDriveSession -AccountId $accId }
+        return $saved
 
     } elseif ($ProviderId -eq 'terabox') {
-        $accId = "terabox_" + [DateTime]::UtcNow.Ticks.ToString()
+        $accId = "terabox_" + [Guid]::NewGuid().ToString('N')
         $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $Owner -AccountId $accId
         if (-not $loginRes.Success) {
             if (-not $loginRes.Cancelled) {
@@ -758,12 +782,14 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
             Id = $accId
             ProviderId = 'terabox'
             DisplayName = if ($loginRes.UserName) { "TeraBox ($($loginRes.UserName))" } else { "TeraBox" }
-            AccountEmail = if ($loginRes.UserName) { $loginRes.UserName } else { 'TeraBox User' }
+            AccountEmail = if ($loginRes.UserName) { $loginRes.UserName } else { '' }
             DriveLetter = $nextLetter
             AutoMount = $true
         }
 
-        return (Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'terabox' -InitialAccount $initData)
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'terabox' -InitialAccount $initData
+        if (-not $saved) { Remove-TeraBoxSession -AccountId $accId }
+        return $saved
     }
 
     return $null
