@@ -1,117 +1,159 @@
 # NS Cloud Drive
 
-**NS Cloud Drive** is a Windows desktop-first project for accessing cloud files through native virtual drives in File Explorer, with on-demand reads, bounded local caching, and persistent background operation.
+**NS Cloud Drive** is a lightweight, high-performance Windows desktop application that mounts cloud storage accounts (Google Drive and TeraBox) directly into Windows File Explorer as native virtual drives, providing seamless browsing, streaming playback, uploads, cloud-to-cloud transfers, and minimal local resource usage.
 
-> **Development status:** Multi-provider architecture with native Google Drive (OAuth 2.0 PKCE, drive `G:`) and TeraBox feasibility integration (drive `T:`), verified WinFsp userspace filesystem mounts, and low-resource System Tray operation.
+![NS Cloud Drive](assets/logos/clouddrive.png)
 
-## Product direction
+## Core Capabilities
 
-- **Air Live Drive-Inspired Desktop UI**: Clean, modern dark-themed user interface featuring a narrow navigation sidebar (`Disks`, `Options`, `Help`), composite 3D hard-drive icons with provider emblem badges, direct `Connect` / `Disconnect` buttons, drive letter combo (`in [ G: v ]`), quick action buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), storage progress bars with "X free of Y" capacity indicators, and an embedded `Options` view with Cache Management.
-- **File Explorer is the Primary Interface**: Open folders, inspect files, copy, paste, and stream on-demand directly in Windows Explorer without needing to use a custom file-transfer UI.
-- **Separate Native-Looking Drives**: Each connected provider mounts to its own distinct Windows drive letter with an intuitive volume label (e.g. `Google Drive (G:)` and `TeraBox (T:)`), independent mount lifecycles, and automatic drive letter conflict resolution.
-- **Real Cloud Capacity Reporting**: Live display of provider storage quota (used space, total space, percentage used, remaining space) and distinct local cache disk usage.
-- **On-Demand VFS Caching**: 20 GiB soft-target LRU cache on fixed NTFS (`D:\CloudCache`) avoids full-drive pre-downloads and protects pending writes.
-- **Persistent Connections Across Restarts**: Per-user logon startup and automatic mount recovery in the user's interactive Windows session.
-- **Low RAM and CPU Consumption**: Background System Tray operation with throttled idle timers (~159 MB working set, 0.1% idle CPU).
+- **Native Windows File Explorer Integration**: Cloud drives mount as local fixed disks (`FixedDisk`), eliminating network redirector "red X" artifacts, UNC drive issues, or `FUSE-rclone` labels. Open, copy, paste, rename, and stream files directly in File Explorer.
+- **Air Live Drive-Inspired Desktop UI**: Clean, modern interface featuring a navigation sidebar (`Disks`, `Options`, `Help`), provider badge icons, direct `Connect` / `Disconnect` buttons, drive letter combo (`in [ G: v ]`), quick action buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), live storage capacity progress bars, and an embedded `Options` view.
+- **Three Supported Themes**:
+  - **Pure Black** (`#000000`): High-contrast OLED dark theme.
+  - **Translucent** (`#13161CE6`): Modern dark acrylic glass style.
+  - **Pure White** (`#F8FAFC`): Clean, crisp light theme with refined contrast.
+- **Cloud-to-Cloud Streaming Transfers**:
+  - Dedicated transfer dialog (`+ Transfer Files`) with dual cloud directory browsers.
+  - Streaming relay mode (`rclone copy` / `rclone move`) pipes data directly between cloud remotes in bounded memory chunks (4–8 MiB) without buffering full files on the local operating system drive.
+  - Supports transfers between Google Drive and TeraBox in both directions, and between multiple accounts of the same provider.
+  - Live throughput and ETA monitoring with Exponential Moving Average ($\alpha = 0.25$) speed smoothing.
+  - Pause and resume transfers via Win32 thread suspension (`NtSuspendProcess` / `NtResumeProcess`).
+- **Cache Management & OS Drive Protection**:
+  - In-use file lock protection (`Test-FileInUse`) guarantees active streaming files, open handles, and pending uploads are never evicted.
+  - Configurable cache location (default: `D:\CloudCache`) with OS drive safety warnings if configured on `%SystemDrive%`.
+  - LRU size bounding (configurable quota: 10 GB, 20 GB, 50 GB, 100 GB, 200 GB) based on file access times.
+  - Automatic startup recovery of orphaned temporary chunks (`.partial`, `.rclone-tmp`, `*~`).
+- **Multi-Account Isolation**:
+  - Support for multiple concurrent accounts (e.g., Personal Google Drive `G:`, Work Google Drive `H:`, TeraBox `T:`).
+  - Dynamically allocated remote aliases (`gdrive_<id>`, `terabox_<id>`) and isolated DPAPI credential files.
+- **Low Memory & Background Efficiency**:
+  - Throttled UI refresh timers, minimal polling, and Win32 `EmptyWorkingSet` memory trimming reducing working set RAM to ~10 MB when minimized to the System Tray.
 
-## Cloud Account Connection and Virtual Drives
+---
 
-NS Cloud Drive supports connecting both **Google Drive** and **TeraBox** accounts through a dedicated desktop interface with explicit connection validation:
+## Architecture & Technology Stack
 
-- **Google Drive connection flow**:
-  1. Click **Add Cloud Disk** -> select **Google Drive**.
-  2. Click **Sign in with Google** to launch 1-click authorization via rclone's verified desktop client with full read-write scope (`drive`). No Google Cloud Project or client ID configuration is required for standard users. (Optional custom Google Cloud client ID/secret is also supported).
-  3. The authorization handler validates user identity via root Drive metadata (`/files/root`), applies rate-limit backoff, retrieves storage quota via API/rclone, and stores DPAPI-encrypted tokens.
-  4. Mounts to drive `G:` (or user preference) as **Google Drive** with read-write Explorer access.
-  5. Supports multiple simultaneous Google accounts (e.g. Personal `G:` and Work `H:`) with isolated token storage.
+```mermaid
+flowchart TD
+    UI["NS Cloud Drive Desktop UI\n(WPF / PowerShell STA / 3 Themes)"]
+    Settings["Settings & Multi-Account Registry\n(DPAPI + SettingsManager)"]
+    VFS["Virtual Drive Manager\n(rclone + WinFsp)"]
+    Bridge["TeraBox WebDAV Bridge\n(cpx.exe daemon)"]
+    Transfer["Cloud Transfer Manager\n(Streaming Relay)"]
+    Cache["Cache Manager\n(In-Use Lock + LRU Eviction)"]
+    GD["Google Drive API v3\n(OAuth 2.0 PKCE)"]
+    TB["TeraBox Web / Bridge\n(Session Cookie)"]
+    Explorer["Windows File Explorer\n(G:, T:, H: Native Fixed Disks)"]
 
-- **TeraBox connection flow**:
-  1. Click **Connect TeraBox** or **Add Cloud Disk** -> **TeraBox**.
-  2. The embedded Edge WebView2 authentication window opens.
-  3. Complete sign-in normally. NS Cloud Drive automatically extracts session parameters (`ndus`, `BDUSS`, `jsToken`, User-Agent, and regional API endpoints) without exposing credentials.
-  4. The session is validated against `/api/check/login` and stored in current-user DPAPI storage.
-  5. The local WebDAV bridge daemon (`cpx.exe terabox-bridge --port 19191`) is started with DPAPI-encrypted shared secret.
-  6. Mounts to drive `T:` (or user-chosen drive letter) in read-write mode with `--vfs-cache-mode full` and `--vfs-write-back 5s`. Files can be created, edited, copied, and streamed directly in Windows Explorer.
-
-- **Independent Multi-Drive Mounts**:
-  - Both providers and multiple accounts can be mounted simultaneously to separate drive letters.
-  - Active mounts are reconciled across application restarts via process inspection (`Find-ActiveMountProcess`).
-  - Clean unmount controls terminate rclone and WinFsp cleanly without deleting cached files.
-
-## Running the Automated Test Suite
-
-To run all automated regression tests across the state machine, provider adapters, virtual drive manager, settings manager, UI layout constraints, DPAPI credential helpers, and live provider validation:
-
-```powershell
-powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1
+    UI --> Settings
+    UI --> VFS
+    UI --> Transfer
+    UI --> Cache
+    VFS --> Explorer
+    VFS --> GD
+    VFS --> Bridge
+    Bridge --> TB
+    Transfer --> GD
+    Transfer --> Bridge
 ```
 
-All 11 test suites verify:
-- Connection state lifecycle, transitions, and secret sanitization across JSON, queries, and raw tokens (`Test-ConnectionState.ps1`).
-- TeraBox provider metadata, fail-closed handling, DPAPI persistence, regional host failover, and strict mode parsing (`Test-TeraBoxProvider.ps1`).
-- TeraBox WebDAV bridge discovery, DPAPI entropy key generation, and remote environment variables (`Test-TeraBoxBridgeManager.ps1`).
-- Google Drive provider metadata, PKCE verifiers, fail-closed handling, multi-account token isolation, and 1-click desktop authorization (`Test-GoogleDriveProvider.ps1`).
-- Virtual drive manager rclone binary discovery, WinFsp detection, drive availability, read-write mount arguments, active process reconciliation, and volume labeling (`Test-VirtualDriveManager.ps1`).
-- Settings manager defaults, custom persistence, drive preferences, placeholder account purging, and Windows user logon startup registry configuration (`Test-SettingsManager.ps1`).
-- Desktop UI regression: non-conflicting parameter names, explicit horizontal scrollbar constraints, single-instance mutex, and clean STA window initialization (`Test-DesktopUIRegression.ps1`).
-- Embedded WebView2 runtime detection, host verification, and non-blocking dispatcher pumps (`Test-EmbeddedBrowserWindow.ps1`).
-- End-to-end acceptance: multi-account token isolation, dynamic remotes, virtual drive status isolation, and Win32 `EmptyWorkingSet` memory trimming (`Test-EndToEndAcceptance.ps1`).
-- Write protection prevention, direct upload verification, and live provider account integrity (`Test-WriteAndUploadVerification.ps1`).
-- DPAPI config-encryption password storage, private ACLs, and plaintext absence (`Test-RcloneConfigPassword.ps1`).
+---
 
-## Resource & Performance Benchmark
+## Quick Start & Installation
 
-To measure and record real-world memory, CPU utilization, startup speed, and cache status:
+### Prerequisites
+1. **Windows 10 / 11** (64-bit).
+2. **WinFsp**: Windows File System Proxy (required for virtual drive mounting).
+3. **Microsoft Edge WebView2 Runtime** (installed by default on Windows 10/11).
+4. **rclone** (v1.65+): Located automatically in `%LOCALAPPDATA%\NSCloudDrive\tools\rclone\` or on system `PATH`.
+5. **cpx.exe**: TeraBox bridge daemon located in `%LOCALAPPDATA%\NSCloudDrive\tools\cpx\`.
 
-```powershell
-powershell.exe -NoProfile -File .\tests\Benchmark-ResourceUsage.ps1
-```
+### Launching NS Cloud Drive
 
-Empirical benchmarks measured on Windows 11 (AMD Ryzen 9 8940HX, 16 cores / 32 threads, 16 GB RAM):
-- **Cold Startup Time**: 1551 ms (~1.55 s)
-- **Idle Working Set RAM**: 159.23 MB
-- **Idle Private Memory**: 143.80 MB
-- **Idle CPU Utilization**: 0.10%
-- **Host VFS Cache**: `D:\CloudCache` on NTFS Fixed volume with 124 GiB free; 20.00 GiB soft target.
-
-## Launching the Application
-
-### Option 1 — Quick Launch (Double-Click or CMD)
-
-Double-click `NSCloudDrive.cmd` directly in Windows File Explorer, or run from Command Prompt:
-
+#### Option 1: Quick Launch (CMD or Double-Click)
+Double-click `NSCloudDrive.cmd` in the repository root, or run:
 ```cmd
 .\NSCloudDrive.cmd
 ```
 
-### Option 2 — PowerShell Terminal
-
-From the project root directory:
-
+#### Option 2: PowerShell Terminal
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
 ```
 
-Or from any folder using the full path:
+---
+
+## Cloud Account Setup Guide
+
+### Google Drive
+1. Click **Add Cloud Disk** -> select **Google Drive**.
+2. Click **Sign in with Google** to complete standard OAuth 2.0 desktop authorization in your browser.
+3. The authorization handler validates root Drive metadata, retrieves storage quota, and stores DPAPI-encrypted tokens.
+4. The account mounts automatically as `G:` (or your preferred drive letter) in read-write mode.
+
+### TeraBox
+1. Click **Add Cloud Disk** -> select **TeraBox**.
+2. The embedded Edge WebView2 sign-in dialog opens.
+3. Complete sign-in on the official TeraBox website. NS Cloud Drive captures the session securely and encrypts it with DPAPI.
+4. The local CPX WebDAV bridge daemon starts automatically on loopback (`127.0.0.1:19191`).
+5. The account mounts as `T:` (or your preferred drive letter) in read-write mode.
+
+---
+
+## Automated Test Suites
+
+NS Cloud Drive includes 15 automated test suites covering unit logic, security, multi-account isolation, caching, transfers, and regression:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "C:\Users\Naboraj_sarkar\Documents\Codex\CloudDrive\src\NSCloudDrive.ps1"
+powershell.exe -ExecutionPolicy Bypass -File .\tests\Run-AllTests.ps1
 ```
 
-Or start minimized to the System Tray:
+| Suite | Focus Area |
+| :--- | :--- |
+| `Test-ConnectionState.ps1` | State machine transitions, fail-closed handling, secret sanitization. |
+| `Test-TeraBoxProvider.ps1` | DPAPI session storage, regional API endpoints, strict mode parsing. |
+| `Test-TeraBoxBridgeManager.ps1` | WebDAV bridge daemon, DPAPI entropy key generation, remote environments. |
+| `Test-GoogleDriveProvider.ps1` | OAuth 2.0 PKCE S256 test vectors, token isolation, and dynamic remotes. |
+| `Test-VirtualDriveManager.ps1` | WinFsp detection, mount arguments, fixed disk mode, drive conflict fallback. |
+| `Test-SettingsManager.ps1` | Multi-account registry CRUD, settings serialization, startup tasks. |
+| `Test-DesktopUIRegression.ps1` | STA window construction, modal interfaces, layout width constraints. |
+| `Test-EmbeddedBrowserWindow.ps1` | WebView2 runtime detection, host verification, non-blocking dispatcher pumps. |
+| `Test-MultiAccountIsolation.ps1` | Concurrent multi-account isolation, remote naming, and truthful drive states. |
+| `Test-ThemesAndAccountCustomization.ps1`| 3-theme resolution, dynamic STA theme switching, diagnostic safety. |
+| `Test-CloudTransferManager.ps1` | Streaming relay transfer, speed smoothing, ETA math, path traversal defense, argument escaping. |
+| `Test-CacheManagement.ps1` | In-use file lock protection, LRU quota eviction, OS drive detection, startup recovery. |
+| `Test-EndToEndAcceptance.ps1` | Multi-account isolation, WebDAV environment, memory trimming (< 10 MB). |
+| `Test-WriteAndUploadVerification.ps1` | Read-write mount arguments, upload verification, live account integrity. |
+| `Test-RcloneConfigPassword.ps1` | DPAPI credential protection and private ACL enforcement. |
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1 -Minimized
-```
+---
 
-## Pinned backend build helper
+## Continuous Integration (CI)
 
-[`scripts/Build-PatchedRclone.ps1`](scripts/Build-PatchedRclone.ps1) builds a Windows x64 executable from the pinned `gulp79/rclone-extra` source tag and applies the repository's cookie-safety patch. It refuses to reuse an existing build folder and verifies the executable reports both `cmount` and the `terabox` provider.
+A GitHub Actions workflow is configured in `.github/workflows/ci.yml` running on `windows-latest`:
+- **PowerShell AST Syntax Validation**: Scans all repository `.ps1` and `.psm1` files for syntax or parser errors.
+- **Secret Scanning**: Verifies that no unredacted credentials, tokens, or private keys are committed.
+- **Automated Test Execution**: Executes the test suite runner across all unit and regression suites.
 
-```powershell
-powershell.exe -NoProfile -File .\scripts\Build-PatchedRclone.ps1
-```
+---
 
-## License
+## Security & Privacy Model
 
-License terms will be selected and documented before distributing application binaries or source derived from third-party projects.
+- **No Plaintext Secrets at Rest**: All OAuth tokens, refresh tokens, and cookies are encrypted with Windows DPAPI scoped to the current interactive user.
+- **Private NTFS ACLs**: Credential directories and files restrict access strictly to the current user SID and SYSTEM, with directory inheritance (`ContainerInherit | ObjectInherit`).
+- **Command Argument Escaping**: Child processes are launched using Win32-compliant argument escaping (`Format-SafeProcessArgument`) preventing CLI injection.
+- **Path Traversal Defense**: Cloud relative paths are normalized (`Normalize-CloudPath`) to strip control characters and resolve `..` and `.` segments safely.
+- **Multi-Pattern Diagnostic Sanitization**: All error messages and logs pass through `Format-SanitizedDiagnosticMessage` redacting tokens, cookies, auth headers, and keys.
+- **No Cloud File Deletion**: Automated tests and cache eviction operations never delete cloud files.
+
+See [docs/SECURITY-AND-LIMITATIONS.md](docs/SECURITY-AND-LIMITATIONS.md) for the complete Threat Model and operational limits.
+
+---
+
+## Performance & Resource Utilization
+
+Empirical measurements on Windows 11:
+- **Cold Application Startup**: ~1.5 seconds.
+- **Idle Memory Footprint**: ~10–15 MB working set when minimized (trimmed via Win32 `EmptyWorkingSet`).
+- **Idle CPU Usage**: < 0.2%.
+- **VFS Disk Cache**: Bounded to configured limit (default: 20 GB) on dedicated non-OS storage.
