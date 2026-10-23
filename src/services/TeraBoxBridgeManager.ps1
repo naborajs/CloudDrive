@@ -8,6 +8,17 @@ $script:BridgeEntropy = [System.Text.Encoding]::UTF8.GetBytes('CloudPlayX.v1.sec
 $script:DefaultBridgePort = 19191
 $script:RunningBridgeProcess = $null
 
+function Get-TeraBoxBridgePort([string]$AccountId = '') {
+    if ([string]::IsNullOrWhiteSpace($AccountId) -or $AccountId -eq 'terabox') { return $script:DefaultBridgePort }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($AccountId)) } finally { $sha.Dispose() }
+    $value = [BitConverter]::ToUInt32($digest, 0)
+    # Keep per-account listeners in a stable high unprivileged range, below
+    # Windows' usual dynamic client-port range. A collision is detected by the
+    # caller's authenticated health check without terminating the other service.
+    return 30000 + [int]($value % 10000)
+}
+
 function Find-CpxBinary {
     [CmdletBinding()]
     param()
@@ -191,9 +202,11 @@ function Start-TeraBoxBridge {
     param(
         [hashtable]$SessionOverride = $null,
         [string]$AccountId = '',
-        [int]$Port = 19191,
+        [int]$Port = 0,
         [int]$WaitTimeoutSec = 10
     )
+
+    if ($Port -le 0) { $Port = Get-TeraBoxBridgePort -AccountId $AccountId }
 
     $cpx = Find-CpxBinary
     if (-not $cpx) {
@@ -228,7 +241,7 @@ function Start-TeraBoxBridge {
 
     # If an unhealthy or unresponsive cpx bridge is running, terminate it before starting fresh
     try {
-        Stop-TeraBoxBridge -Port $Port -AccountId $AccountId
+        Stop-TeraBoxBridge -Port $Port -AccountId $AccountId -BridgePassword $existingPw
         Start-Sleep -Milliseconds 250
     } catch { }
 
@@ -277,35 +290,34 @@ function Stop-TeraBoxBridge {
     [CmdletBinding()]
     param(
         [string]$AccountId = '',
-        [int]$Port = 19191,
+        [int]$Port = 0,
         [string]$BridgePassword = $null
     )
 
-    # 1. Attempt graceful shutdown via POST /.cloudplayx/shutdown
+    if ($Port -le 0) { $Port = Get-TeraBoxBridgePort -AccountId $AccountId }
+    $homeDir = Get-TeraBoxBridgeHomeDirectory -AccountId $AccountId
+    if (-not $BridgePassword) { $BridgePassword = Get-TeraBoxBridgeExistingPassword -HomeDirectory $homeDir }
+
+    # Only send the shutdown request when this account's bridge credential is
+    # available. Unauthenticated shutdown requests could affect another local
+    # service bound to the same port.
     try {
-        $headers = @{}
         if ($BridgePassword) {
-            $auth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("cpx:$BridgePassword"))
-            $headers['Authorization'] = "Basic $auth"
-        }
+        $headers = @{}
+        $auth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("cpx:$BridgePassword"))
+        $headers['Authorization'] = "Basic $auth"
         [void](Invoke-WebRequest -Uri "http://127.0.0.1:$Port/.cloudplayx/shutdown" -Method Post -Headers $headers -TimeoutSec 2 -UseBasicParsing -ErrorAction SilentlyContinue)
+        }
     } catch { }
 
-    # 2. Terminate tracked process if still alive
-    if ($script:RunningBridgeProcess -and -not $script:RunningBridgeProcess.HasExited) {
-        try {
-            $script:RunningBridgeProcess.Kill()
-            [void]$script:RunningBridgeProcess.WaitForExit(2000)
-        } catch { }
-        $script:RunningBridgeProcess = $null
-    }
-
-    # 3. Clean up any orphaned cpx processes running terabox-bridge
+    # Terminate only a bridge whose command line names this account's isolated
+    # home directory. Never stop every TeraBox bridge on the machine.
     try {
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'cpx.exe'" -ErrorAction SilentlyContinue
         foreach ($p in $procs) {
-            if ($p.CommandLine -and $p.CommandLine.Contains('terabox-bridge')) {
+            if ($p.CommandLine -and $p.CommandLine.Contains('terabox-bridge') -and $p.CommandLine.IndexOf($homeDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+                if ($script:RunningBridgeProcess -and $script:RunningBridgeProcess.Id -eq [int]$p.ProcessId) { $script:RunningBridgeProcess = $null }
             }
         }
     } catch { }
