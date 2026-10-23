@@ -56,6 +56,7 @@ $script:LastProviderStatusCheck = [DateTime]::MinValue
 $script:StartupCacheRecoveryWorker = $null
 $script:StartupAutoMountWorker = $null
 $script:ReconnectWorker = $null
+$script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
@@ -1651,7 +1652,8 @@ function Update-AllUIState {
     if ($script:IsConnecting) { return }
 
     Complete-AvailableStartupWorkers
-    if (-not $script:ProviderStatusWorker -and
+    if (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and
+        -not $script:ProviderStatusWorker -and
         ([DateTime]::UtcNow - $script:LastProviderStatusCheck).TotalSeconds -ge 120) {
         try { Start-ProviderStatusRefreshWorker } catch { }
     }
@@ -2644,8 +2646,11 @@ $window.Add_Loaded({
         } catch { }
     }
     Invoke-MemoryTrim
-
-    try { Start-ProviderStatusRefreshWorker } catch { }
+    if ($script:Settings.AutoMountDrives) {
+        $script:StartupAutoMountPending = $true
+    } else {
+        try { Start-ProviderStatusRefreshWorker } catch { }
+    }
     try { Start-StartupCacheRecoveryWorker } catch { }
     Update-AllUIState
 
@@ -2655,6 +2660,7 @@ $window.Add_Loaded({
         $autoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
         $autoMountTimer.Add_Tick({
             $autoMountTimer.Stop()
+            $script:StartupAutoMountPending = $false
             Invoke-StartupAutoMount
         })
         $autoMountTimer.Start()
