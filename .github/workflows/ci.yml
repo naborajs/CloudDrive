@@ -1,0 +1,73 @@
+name: NS Cloud Drive CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-and-test:
+    name: Syntax, Secret Scan & Automated Tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: PowerShell Syntax & AST Parse Validation
+        shell: powershell
+        run: |
+          $errors = @()
+          $files = Get-ChildItem -Path . -Recurse -Include *.ps1, *.psm1 | Where-Object { $_.FullName -notmatch '\\(bin|obj|tools|\.gemini)\\' }
+          Write-Host "Validating PowerShell script syntax for $($files.Count) files..."
+          foreach ($f in $files) {
+              $tokens = $null
+              $parseErrors = $null
+              $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$parseErrors)
+              if ($parseErrors -and $parseErrors.Count -gt 0) {
+                  foreach ($err in $parseErrors) {
+                      $errors += "Parse error in $($f.FullName): $($err.Message) at line $($err.Extent.StartLineNumber)"
+                  }
+              }
+          }
+          if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+          }
+          Write-Host "All PowerShell scripts parsed cleanly with zero syntax errors."
+
+      - name: Secret Scanning & Leak Prevention
+        shell: powershell
+        run: |
+          Write-Host "Scanning production files for unredacted credentials, tokens, and keys..."
+          $prodFiles = git ls-files | Where-Object { $_ -notlike 'tests/*' -and $_ -notlike 'patches/*' }
+          $leaksFound = @()
+          $suspectPatterns = @(
+              'ya29\.[a-zA-Z0-9_\-]{20,}',
+              '1//[a-zA-Z0-9_\-]{20,}',
+              'ndus=[a-zA-Z0-9_\-]{20,}',
+              'BDUSS=[a-zA-Z0-9_\-]{20,}',
+              '-----BEGIN (?:RSA |EC )?PRIVATE KEY-----'
+          )
+          foreach ($f in $prodFiles) {
+              if ($f -match '\.(png|ico|dll|exe|bin|zip)$') { continue }
+              if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }
+              $text = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue
+              if (-not $text) { continue }
+              foreach ($pat in $suspectPatterns) {
+                  if ($text -match $pat) {
+                      $leaksFound += "Potential secret pattern '$pat' detected in $f"
+                  }
+              }
+          }
+          if ($leaksFound.Count -gt 0) {
+              $leaksFound | ForEach-Object { Write-Error $_ }
+              exit 1
+          }
+          Write-Host "Secret scan passed cleanly. Zero unredacted credentials found."
+
+      - name: Run Test Suites
+        shell: powershell
+        run: |
+          & .\tests\Run-AllTests.ps1
