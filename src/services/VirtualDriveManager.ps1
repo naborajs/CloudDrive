@@ -154,13 +154,13 @@ function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
 function Find-ActiveMountProcess([string]$DriveLetter = '') {
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return $null }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    $targetPattern = "$letter`:"
+    $targetPattern = "(?i)\bmount\b.*\s+[`"']?${letter}:\\?[`"']?(\s+|$)"
 
     try {
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue
         if ($procs) {
             foreach ($p in $procs) {
-                if ($p.CommandLine -and ($p.CommandLine -match "(?i)\bmount\b.*\b$targetPattern\\?\b")) {
+                if ($p.CommandLine -and ($p.CommandLine -match $targetPattern)) {
                     return [ordered]@{
                         ProcessId = [int]$p.ProcessId
                         CommandLine = [string]$p.CommandLine
