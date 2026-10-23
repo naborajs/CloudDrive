@@ -803,37 +803,78 @@ function Invoke-GoogleDriveApiWithRetry(
     }
 }
 
-function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [string]$AccountId = '') {
+$script:GoogleDriveSessionCache = @{}
+
+function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [string]$AccountId = '', [switch]$Force = $false) {
+    $cacheKey = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'default' }
+    if ((-not $Force) -and (-not $TokensOverride) -and $script:GoogleDriveSessionCache.ContainsKey($cacheKey)) {
+        $cached = $script:GoogleDriveSessionCache[$cacheKey]
+        if ($cached -and $cached.CheckedAt -and (([DateTime]::UtcNow - $cached.CheckedAt).TotalSeconds -lt 120)) {
+            return $cached.Result
+        }
+    }
+
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     if (-not $tokens -or -not $tokens.access_token) {
-        return [ordered]@{
+        $res = [ordered]@{
             IsValid = $false
             State = 'Disconnected'
             Error = 'No Google Drive tokens found. Please connect your account.'
             UserInfo = $null
         }
+        $script:GoogleDriveSessionCache[$cacheKey] = [ordered]@{ CheckedAt = [DateTime]::UtcNow; Result = $res }
+        return $res
     }
 
     # Step 1: Validate token and retrieve user identity via root file metadata
     $userDisplayName = $null
     $userEmail = $null
 
-    try {
-        $rootResp = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
-            param([string]$accessToken)
-            $headers = @{
-                'Authorization' = "Bearer $accessToken"
-                'Accept' = 'application/json'
+    # Fast-path: check if access token is expired based on obtained_at and expires_in
+    $isTokenExpired = $false
+    if ($tokens.obtained_at -and $tokens.expires_in) {
+        try {
+            $obtained = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
+            $expSec = [double]$tokens.expires_in
+            if (([DateTime]::UtcNow - $obtained).TotalSeconds -ge ($expSec - 60)) {
+                $isTokenExpired = $true
             }
-            $rootUrl = "$script:GoogleDriveApiEndpoint/files/root?fields=id,name,owners"
-            return (Invoke-RestMethod -Uri $rootUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop)
-        }
+        } catch { }
+    }
 
-        if ($rootResp -and $rootResp.PSObject.Properties['owners'] -and $rootResp.owners.Count -gt 0) {
-            $userDisplayName = [string]$rootResp.owners[0].displayName
-            $userEmail = [string]$rootResp.owners[0].emailAddress
-        }
-    } catch {
+    $hasCustomClient = $false
+    try {
+        $oCfg = Get-GoogleOAuthConfig
+        if ($oCfg -and $oCfg.ClientId) { $hasCustomClient = $true }
+    } catch { }
+
+    # Only attempt direct files/root HTTP query if token is not expired or custom client is configured
+    if (-not $isTokenExpired -or $hasCustomClient) {
+        try {
+            $rootResp = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
+                param([string]$accessToken)
+                $headers = @{
+                    'Authorization' = "Bearer $accessToken"
+                    'Accept' = 'application/json'
+                }
+                $rootUrl = "$script:GoogleDriveApiEndpoint/files/root?fields=id,name,owners"
+                return (Invoke-RestMethod -Uri $rootUrl -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop)
+            }
+
+            if ($rootResp -and $rootResp.PSObject.Properties['owners'] -and $rootResp.owners.Count -gt 0) {
+                $userDisplayName = [string]$rootResp.owners[0].displayName
+                $userEmail = [string]$rootResp.owners[0].emailAddress
+            }
+        } catch { }
+    }
+
+    $SetCacheAndReturn = {
+        param($val)
+        $script:GoogleDriveSessionCache[$cacheKey] = [ordered]@{ CheckedAt = [DateTime]::UtcNow; Result = $val }
+        return $val
+    }
+
+    if (-not $userDisplayName -and -not $userEmail) {
         # Check if rclone can validate the session and refresh if expired on shared rclone credentials
         $rclone = Find-GoogleRcloneBinary
         if ($rclone -and $tokens.refresh_token) {
@@ -853,7 +894,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 }
                 $proc = [System.Diagnostics.Process]::Start($psi)
                 $outJson = $proc.StandardOutput.ReadToEnd()
-                [void]$proc.WaitForExit(10000)
+                [void]$proc.WaitForExit(4000)
                 if ($proc.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($outJson))) {
                     $aboutObj = $outJson | ConvertFrom-Json
                     $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
@@ -866,7 +907,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                     $fallbackName = if ($acc -and $acc.DisplayName) { [string]$acc.DisplayName } else { 'Google Drive User' }
                     $fallbackEmail = if ($acc -and $acc.AccountEmail) { [string]$acc.AccountEmail } elseif ($acc -and $acc.Username -and $acc.Username -match '@') { [string]$acc.Username } else { '' }
 
-                    return [ordered]@{
+                    return (& $SetCacheAndReturn ([ordered]@{
                         IsValid = $true
                         State = 'Connected'
                         Error = $null
@@ -876,27 +917,38 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                             QuotaUsed = $quotaUsed
                             QuotaTotal = $quotaTotal
                         }
-                    }
+                    }))
                 }
             } catch { }
         }
 
-        $errDetails = Get-GoogleApiErrorDetails $_
-        $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
-        if ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errDetails.Code -eq 401) {
-            return [ordered]@{
-                IsValid = $false
-                State = 'AuthenticationExpired'
-                Error = 'Google Drive access token has expired or was revoked. Please reconnect your account.'
-                UserInfo = $null
-            }
+        # If we have a refresh token and rclone binary, session is valid via rclone token auto-renewal
+        if ($tokens.refresh_token -and $rclone) {
+            $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Find-CloudAccountById' -ErrorAction SilentlyContinue)) {
+                Find-CloudAccountById -Id $AccountId
+            } else { $null }
+            $fallbackName = if ($acc -and $acc.DisplayName) { [string]$acc.DisplayName } else { 'Google Drive User' }
+            $fallbackEmail = if ($acc -and $acc.AccountEmail) { [string]$acc.AccountEmail } else { '' }
+
+            return (& $SetCacheAndReturn ([ordered]@{
+                IsValid = $true
+                State = 'Connected'
+                Error = $null
+                UserInfo = [ordered]@{
+                    DisplayName = $fallbackName
+                    EmailAddress = $fallbackEmail
+                    QuotaUsed = 0L
+                    QuotaTotal = 0L
+                }
+            }))
         }
-        return [ordered]@{
+
+        return (& $SetCacheAndReturn ([ordered]@{
             IsValid = $false
-            State = 'Error'
-            Error = "Google Drive API verification failed: $($errDetails.ActionableError)"
+            State = 'AuthenticationExpired'
+            Error = 'Google Drive access token has expired or was revoked. Please reconnect your account.'
             UserInfo = $null
-        }
+        }))
     }
 
     # Step 2: Retrieve storage quota (via /about or rclone fallback)
@@ -940,7 +992,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 }
                 $p = [System.Diagnostics.Process]::Start($psi)
                 $out = $p.StandardOutput.ReadToEnd()
-                [void]$p.WaitForExit(5000)
+                [void]$p.WaitForExit(4000)
                 if ($p.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($out))) {
                     $json = $out | ConvertFrom-Json
                     if ($json.PSObject.Properties['used']) { $quotaUsed = [int64]$json.used }
@@ -950,7 +1002,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         } catch { }
     }
 
-    return [ordered]@{
+    return (& $SetCacheAndReturn ([ordered]@{
         IsValid = $true
         State = 'Connected'
         Error = $null
@@ -960,7 +1012,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             QuotaUsed = $quotaUsed
             QuotaTotal = $quotaTotal
         }
-    }
+    }))
 }
 
 function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
