@@ -197,10 +197,14 @@ function Get-VirtualDriveStatus(
             $matched = $accs | Where-Object { $_.Id -eq $AccountId } | Select-Object -First 1
             if ($matched -and $matched.DriveLetter) {
                 $letter = $matched.DriveLetter
-            } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
+            } elseif ($matched -and -not [string]::IsNullOrEmpty($ProviderId)) {
                 $letter = Get-PreferredDriveLetter $ProviderId
-            } else {
+            } elseif ($matched) {
                 $letter = $script:DefaultDriveLetter
+            } else {
+                # An unknown account must not inherit a provider's default letter;
+                # that can make an unrelated primary mount look like this account.
+                $letter = ''
             }
         } catch {
             $letter = $script:DefaultDriveLetter
@@ -232,7 +236,7 @@ function Get-VirtualDriveStatus(
             $processAlive = $true
             $procId = $p.Id
         }
-    } elseif ($script:MountProcess -and (-not $script:MountProcess.HasExited)) {
+    } elseif ([string]::IsNullOrEmpty($AccountId) -and $script:MountProcess -and (-not $script:MountProcess.HasExited)) {
         $processAlive = $true
         $procId = $script:MountProcess.Id
     }
