@@ -1,7 +1,20 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:SettingsDirectoryOverride = $null
+
+function Set-SettingsDirectoryOverride([string]$Path) {
+    $script:SettingsDirectoryOverride = $Path
+}
+
+function Reset-SettingsDirectoryOverride {
+    $script:SettingsDirectoryOverride = $null
+}
+
 function Get-NSCloudDriveSettingsDirectory {
+    if ($script:SettingsDirectoryOverride) {
+        return $script:SettingsDirectoryOverride
+    }
     return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config')
 }
 
@@ -201,6 +214,27 @@ function Remove-CloudAccount([string]$AccountId) {
         Set-NSCloudDriveSettings $settings
     }
     return $found
+}
+
+function Remove-SeededPlaceholderAccounts {
+    $settings = Get-NSCloudDriveSettings
+    $cleaned = @()
+    $changed = $false
+    if ($settings.Accounts) {
+        foreach ($a in $settings.Accounts) {
+            $isPlaceholder = ($a.Id -like 'test_*' -or $a.AccountEmail -in @('personal@gmail.com', 'work@company.com', 'terabox_user'))
+            if ($isPlaceholder) {
+                $changed = $true
+            } else {
+                $cleaned += $a
+            }
+        }
+    }
+    if ($changed) {
+        $settings.Accounts = $cleaned
+        Set-NSCloudDriveSettings $settings
+    }
+    return $cleaned
 }
 
 function Get-AllocatedDriveLetters {
