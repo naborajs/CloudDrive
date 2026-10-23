@@ -95,9 +95,14 @@ powershell -ExecutionPolicy Bypass -File tests/Run-AllTests.ps1
 
 The runtime reliability and startup issues reported on real Windows systems have been diagnosed, solved, and verified:
 1. **Startup Hang & UI Freeze:** Decoupled the initial WPF window rendering from the auto-mount sequence. The window appears in under 1 second. Fast-path token expiry checks and 120-second session caching were implemented in both `GoogleDriveProvider.ps1` and `TeraBoxProvider.ps1`, reducing UI timer update overhead from 38,000 ms to ~2 ms (19,000x faster).
-2. **Windows File Explorer Red X Overlays:** Cleared stale `HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##server#*` keys and normalized rclone mount targets to clean `X:` format, eliminating offline network share overlays.
+2. **Windows File Explorer Red X Overlays & Filesystem Name:** Cleared stale `HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##server#*` keys and normalized rclone mount targets to clean `X:` format, eliminating offline network share overlays. Configured WinFsp `--fuse-flag --FileSystemName=NTFS` so Windows File Explorer displays clean `FUSE-NTFS` volume format rather than raw `FUSE-rclone`.
 3. **TeraBox WebDAV Bridge Lifecycle:** Added daemon health detection and automatic port 19191 clearance to prevent zombie `cpx.exe` processes and authentication mismatches.
-4. **Truthful Account Identity & Mount State:** Added identity resolution from account records and ensured virtual drive status requires an active backing process.
+4. **Truthful Account Identity & Mount State:** Added identity resolution from account records and ensured virtual drive status requires an active backing process. Corrected command-line regex in `Find-ActiveMountProcess` to reliably match drive letters (`G:`, `T:`) across separate PowerShell sessions and restarts.
+5. **Add Cloud Disk Modal Crash Fix:** Eliminated duplicate child visual addition in `Show-AddCloudDiskModal` (`src/ui/ProviderConnectionWindow.ps1`) which threw `System.ArgumentException` on click, restoring full multi-account modal creation.
+6. **Rclone Mount Lifecycle & Pipe Deadlock Elimination:** Directed rclone output directly to disk-backed rotating log files (`%LOCALAPPDATA%\NSCloudDrive\logs\rclone-<mountKey>.log`), setting `RedirectStandardError = $false` on background daemons to completely eliminate anonymous pipe buffer overflows and `ERROR_BROKEN_PIPE` unexpected process cancellations.
+7. **Non-Blocking Cloud Transfer Browsing:** Updated `Get-CloudDirectoryContents` in `CloudTransferManager.ps1` with asynchronous stream readers (`ReadToEndAsync()`), background dispatcher pumping, and fast-path reading from already-mounted virtual filesystems, eliminating freezes in the `Transfer Files` modal.
+8. **STA DispatcherTimer Startup Auto-Mount:** Switched auto-mount execution from threadpool `Task.Run` (which lacks PowerShell runspaces) to a 500ms `DispatcherTimer` running inside the STA runspace, ensuring background drive reconnection executes seamlessly without blocking initial window rendering.
+9. **Cross-Drive File Explorer Copy Verified:** Successfully tested live end-to-end file copying and reading from Google Drive (`G:\`) across to TeraBox (`T:\`) in File Explorer with 100% data integrity verified.
 
 ---
 
