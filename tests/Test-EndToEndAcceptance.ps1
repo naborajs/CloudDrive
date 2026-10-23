@@ -16,6 +16,11 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 . (Join-Path $srcDir 'providers\TeraBoxProvider.ps1')
 . (Join-Path $srcDir 'services\VirtualDriveManager.ps1')
 
+# Isolate test settings in a temporary directory to never pollute production user config
+$testSettingsDir = Join-Path $env:TEMP ("NSCloudDrive_Test_" + [Guid]::NewGuid().ToString('N'))
+[void](New-Item -ItemType Directory -Path $testSettingsDir -Force)
+Set-SettingsDirectoryOverride $testSettingsDir
+
 # ------------------------------------------------------------------------------
 # Gate 1: Multi-Account Isolation and Collision Prevention
 # ------------------------------------------------------------------------------
@@ -125,6 +130,8 @@ try {
     Remove-CloudAccount -AccountId $testAcc3Id | Out-Null
     Remove-GoogleDriveSession -AccountId $testAcc1Id
     Remove-GoogleDriveSession -AccountId $testAcc2Id
+    Reset-SettingsDirectoryOverride
+    try { Remove-Item -LiteralPath $testSettingsDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 }
 
 # ------------------------------------------------------------------------------
