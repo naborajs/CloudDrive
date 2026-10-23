@@ -36,6 +36,21 @@ try {
         throw 'Saving a second account changed or lost the first account.'
     }
 
+    $duplicateLetterRejected = $false
+    try {
+        Add-CloudAccount @{ Id = 'gdrive_letter_collision'; ProviderId = 'gdrive'; DisplayName = 'Collision'; AccountEmail = 'collision@example.invalid'; DriveLetter = 'g:'; AutoMount = $true } | Out-Null
+    } catch { $duplicateLetterRejected = $_.Exception.Message -match 'already assigned' }
+    if (-not $duplicateLetterRejected) { throw 'Two saved accounts must not be assigned the same drive letter.' }
+
+    $letterChangeRejected = $false
+    try {
+        $secondPatch = @{ Id = $secondId; DisplayName = 'Work'; DriveLetter = 'G'; AutoMount = $true }
+        Update-CloudAccount $secondPatch | Out-Null
+    } catch { $letterChangeRejected = $_.Exception.Message -match 'already assigned' }
+    if (-not $letterChangeRejected -or (Get-CloudAccount $secondId).DriveLetter -ne 'H') {
+        throw 'A conflicting edit must be rejected without changing the saved account letter.'
+    }
+
     $uiSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ui\ProviderConnectionWindow.ps1') -Raw
     if ($uiSource -notmatch 'Test-CloudAccountPersisted' -or $uiSource -notmatch 'Add-CloudAccount \$accObj' -or $uiSource -notmatch 'Update-CloudAccount \$accObj') {
         throw 'Account dialog is not wired to distinguish unsaved drafts from persisted accounts.'
@@ -54,7 +69,7 @@ try {
         throw 'Concurrent restore and manual mount requests must be queued per account.'
     }
 
-    Write-Output '  [PASS] New drafts use Add; saved accounts use Edit; duplicate IDs are rejected; the second account preserves the first; mount validation runs asynchronously with per-account queueing.'
+    Write-Output '  [PASS] New drafts use Add; saved accounts use Edit; duplicate IDs and drive letters are rejected; account records stay independent; mount validation is queued off the UI thread.'
 } finally {
     $env:LOCALAPPDATA = $originalLocalAppData
     Reset-SettingsDirectoryOverride
