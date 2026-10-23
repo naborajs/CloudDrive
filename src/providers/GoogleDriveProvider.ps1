@@ -1121,15 +1121,54 @@ function Get-GoogleDriveRcloneEnvironment(
         throw 'No Google Drive tokens available to configure rclone environment.'
     }
 
+    # --- Proactive token refresh ---
+    # If the stored access token is expired (or will expire within 120 seconds) and we have a
+    # refresh_token plus a custom OAuth client configured, refresh it NOW rather than letting
+    # rclone attempt the refresh under rate-limit conditions.  This eliminates the 30-35 second
+    # startup delay caused by exponential-backoff retries against Google's shared client quota.
     $hasObtainedAt = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
-    $hasExpiresIn = ($tokens.PSObject.Properties['expires_in'] -and $tokens.expires_in)
+    $hasExpiresIn  = ($tokens.PSObject.Properties['expires_in']  -and $tokens.expires_in)
+    $hasRefresh    = ($tokens.PSObject.Properties['refresh_token'] -and -not [string]::IsNullOrEmpty($tokens.refresh_token))
 
-    $expiryStr = '2000-01-01T00:00:00Z'
+    $tokenIsExpiredOrSoon = $false
     if ($hasObtainedAt -and $hasExpiresIn) {
         try {
+            $obtainedCheck = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
+            $expSecCheck   = [int]$tokens.expires_in
+            if (([DateTime]::UtcNow - $obtainedCheck).TotalSeconds -ge ($expSecCheck - 120)) {
+                $tokenIsExpiredOrSoon = $true
+            }
+        } catch { }
+    } else {
+        # No timing metadata — assume expired to be safe
+        $tokenIsExpiredOrSoon = $true
+    }
+
+    if ($tokenIsExpiredOrSoon -and $hasRefresh -and $oauthConfig.ClientId) {
+        try {
+            $refreshResult = Refresh-GoogleAccessToken `
+                -ClientId     $oauthConfig.ClientId `
+                -ClientSecret $oauthConfig.ClientSecret `
+                -RefreshToken $tokens.refresh_token `
+                -AccountId    $AccountId
+            if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
+                $tokens = $refreshResult.Tokens
+            }
+        } catch { }
+    }
+
+    # --- Build accurate expiry timestamp ---
+    # Use the real expires_in value — do NOT cap it to 3600.  Google issues tokens with
+    # expires_in=3599 (just under one hour); capping at 3600 previously caused rclone to treat
+    # a still-valid token as expired and retry the refresh under shared-client rate limits.
+    $expiryStr = '2000-01-01T00:00:00Z'
+    $hasObtainedAt2 = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
+    $hasExpiresIn2  = ($tokens.PSObject.Properties['expires_in']  -and $tokens.expires_in)
+    if ($hasObtainedAt2 -and $hasExpiresIn2) {
+        try {
             $obtainedUtc = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
-            $expSec = [Math]::Min(3600, [int]$tokens.expires_in)
-            $expUtc = $obtainedUtc.AddSeconds($expSec)
+            $expSec      = [int]$tokens.expires_in            # real value — no arbitrary cap
+            $expUtc      = $obtainedUtc.AddSeconds($expSec)
             if ($expUtc -gt [DateTime]::UtcNow) {
                 $expiryStr = $expUtc.ToString('o')
             }
@@ -1137,23 +1176,23 @@ function Get-GoogleDriveRcloneEnvironment(
     }
 
     $tokenObj = [ordered]@{
-        access_token = $tokens.access_token
-        token_type = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
+        access_token  = $tokens.access_token
+        token_type    = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
         refresh_token = if ($tokens.PSObject.Properties['refresh_token']) { $tokens.refresh_token } else { $null }
-        expiry = $expiryStr
+        expiry        = $expiryStr
     }
     $tokenJson = $tokenObj | ConvertTo-Json -Compress
 
     $upperRemote = $RemoteName.ToUpperInvariant()
 
     $envMap = @{
-        "RCLONE_CONFIG_${upperRemote}_TYPE" = 'drive'
+        "RCLONE_CONFIG_${upperRemote}_TYPE"  = 'drive'
         "RCLONE_CONFIG_${upperRemote}_SCOPE" = $Scope
         "RCLONE_CONFIG_${upperRemote}_TOKEN" = $tokenJson
     }
 
     if ($oauthConfig.ClientId) {
-        $envMap["RCLONE_CONFIG_${upperRemote}_CLIENT_ID"] = $oauthConfig.ClientId
+        $envMap["RCLONE_CONFIG_${upperRemote}_CLIENT_ID"]     = $oauthConfig.ClientId
     }
     if ($oauthConfig.ClientSecret) {
         $envMap["RCLONE_CONFIG_${upperRemote}_CLIENT_SECRET"] = $oauthConfig.ClientSecret
