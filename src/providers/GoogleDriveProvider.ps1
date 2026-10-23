@@ -803,6 +803,58 @@ function Invoke-GoogleDriveApiWithRetry(
     }
 }
 
+function Invoke-GoogleRcloneCommand(
+    [string]$FilePath,
+    [string]$Arguments,
+    [hashtable]$EnvironmentVariables = @{},
+    [int]$TimeoutSeconds = 10
+) {
+    if ([string]::IsNullOrWhiteSpace($FilePath)) {
+        throw 'Google Drive helper executable path is missing.'
+    }
+    if ($TimeoutSeconds -lt 1) { $TimeoutSeconds = 1 }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    foreach ($key in $EnvironmentVariables.Keys) {
+        $psi.EnvironmentVariables[$key] = [string]$EnvironmentVariables[$key]
+    }
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    try {
+        if (-not $proc.Start()) {
+            throw 'Google Drive helper process failed to start.'
+        }
+
+        # Drain both redirected streams asynchronously before waiting on the child.
+        # Synchronous ReadToEnd() here can wait forever and makes a later WaitForExit
+        # timeout ineffective when rclone stalls or fills either pipe.
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $proc.Kill() } catch { }
+            [void]$proc.WaitForExit(2000)
+            throw "Google Drive helper timed out after $TimeoutSeconds seconds."
+        }
+
+        # Ensure asynchronous stream readers have observed EOF after process exit.
+        [void]$proc.WaitForExit()
+        return [ordered]@{
+            ExitCode = [int]$proc.ExitCode
+            StandardOutput = $stdoutTask.GetAwaiter().GetResult()
+            StandardError = $stderrTask.GetAwaiter().GetResult()
+        }
+    } finally {
+        $proc.Dispose()
+    }
+}
+
 $script:GoogleDriveSessionCache = @{}
 
 function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [string]$AccountId = '', [switch]$Force = $false) {
@@ -882,21 +934,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $safeRemote
-                $psi = [System.Diagnostics.ProcessStartInfo]::new()
-                $psi.FileName = $rclone
-                $psi.Arguments = "about --json ${safeRemote}:"
-                $psi.UseShellExecute = $false
-                $psi.RedirectStandardOutput = $true
-                $psi.RedirectStandardError = $true
-                $psi.CreateNoWindow = $true
-                foreach ($k in $envVars.Keys) {
-                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
-                }
-                $proc = [System.Diagnostics.Process]::Start($psi)
-                $outJson = $proc.StandardOutput.ReadToEnd()
-                [void]$proc.WaitForExit(4000)
-                if ($proc.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($outJson))) {
-                    $aboutObj = $outJson | ConvertFrom-Json
+                $result = Invoke-GoogleRcloneCommand -FilePath $rclone -Arguments "about --json ${safeRemote}:" -EnvironmentVariables $envVars -TimeoutSeconds 4
+                if ($result.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($result.StandardOutput))) {
+                    $aboutObj = $result.StandardOutput | ConvertFrom-Json
                     $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
                     $quotaUsed = if ($aboutObj.used) { [int64]$aboutObj.used } else { 0L }
 
@@ -981,20 +1021,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $safeRemote
-                $psi = [System.Diagnostics.ProcessStartInfo]::new()
-                $psi.FileName = $rclone
-                $psi.Arguments = "about --json ${safeRemote}:"
-                $psi.UseShellExecute = $false
-                $psi.RedirectStandardOutput = $true
-                $psi.CreateNoWindow = $true
-                foreach ($k in $envVars.Keys) {
-                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
-                }
-                $p = [System.Diagnostics.Process]::Start($psi)
-                $out = $p.StandardOutput.ReadToEnd()
-                [void]$p.WaitForExit(4000)
-                if ($p.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($out))) {
-                    $json = $out | ConvertFrom-Json
+                $result = Invoke-GoogleRcloneCommand -FilePath $rclone -Arguments "about --json ${safeRemote}:" -EnvironmentVariables $envVars -TimeoutSeconds 4
+                if ($result.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($result.StandardOutput))) {
+                    $json = $result.StandardOutput | ConvertFrom-Json
                     if ($json.PSObject.Properties['used']) { $quotaUsed = [int64]$json.used }
                     if ($json.PSObject.Properties['total']) { $quotaTotal = [int64]$json.total }
                 }
@@ -1064,21 +1093,9 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
             try {
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
-                $psi = [System.Diagnostics.ProcessStartInfo]::new()
-                $psi.FileName = $rclone
-                $psi.Arguments = "lsjson --max-depth 1 ${remoteName}:"
-                $psi.UseShellExecute = $false
-                $psi.RedirectStandardOutput = $true
-                $psi.RedirectStandardError = $true
-                $psi.CreateNoWindow = $true
-                foreach ($k in $envVars.Keys) {
-                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
-                }
-                $proc = [System.Diagnostics.Process]::Start($psi)
-                $outJson = $proc.StandardOutput.ReadToEnd()
-                [void]$proc.WaitForExit(10000)
-                if ($proc.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($outJson))) {
-                    $rawItems = $outJson | ConvertFrom-Json
+                $result = Invoke-GoogleRcloneCommand -FilePath $rclone -Arguments "lsjson --max-depth 1 ${remoteName}:" -EnvironmentVariables $envVars -TimeoutSeconds 10
+                if ($result.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($result.StandardOutput))) {
+                    $rawItems = $result.StandardOutput | ConvertFrom-Json
                     $items = @()
                     foreach ($it in $rawItems) {
                         $items += [pscustomobject]@{
