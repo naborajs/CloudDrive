@@ -238,21 +238,15 @@ function Get-VirtualDriveStatus(
     }
 
     if ($driveInfo) {
+        # Do not probe the filesystem root or query volume metadata here. A WinFsp
+        # provider can block those calls while its remote backend is slow, and this
+        # function is called from the UI refresh timer. This is a local mount signal,
+        # not a remote listing/read health check.
         $volumeLabel = $null
         $format = $null
         $freeSpace = [int64]0
         $totalSize = [int64]0
-
-        try { $volumeLabel = $driveInfo.VolumeLabel } catch { }
-        try { $format = $driveInfo.DriveFormat } catch { }
-        try { $freeSpace = [int64]$driveInfo.AvailableFreeSpace } catch { }
-        try { $totalSize = [int64]$driveInfo.TotalSize } catch { }
-
-        # A drive is considered mounted ONLY if it is physically accessible AND supported by an active process or driver
-        $isAccessible = $false
-        try { $isAccessible = Test-Path -LiteralPath $driveRoot } catch { }
-
-        $isManagedMount = $isAccessible -and $processAlive
+        $isManagedMount = $processAlive
 
         return [ordered]@{
             IsMounted = [bool]$isManagedMount
