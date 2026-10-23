@@ -20,8 +20,9 @@ NS Cloud Drive supports connecting both **Google Drive** and **TeraBox** account
 - **Google Drive connection flow**:
   1. Click **Add Cloud Disk** -> select **Google Drive**.
   2. Click **Sign in with Google** to launch 1-click authorization via rclone's verified desktop client with full read-write scope (`drive`). No Google Cloud Project or client ID configuration is required for standard users. (Optional custom Google Cloud client ID/secret is also supported).
-  3. The local listener cryptographically verifies the authorization callback, retrieves DPAPI-encrypted tokens, and validates quota via Google Drive API v3.
-  4. Supports multiple simultaneous Google accounts (e.g. Personal `G:` and Work `H:`) with isolated token storage.
+  3. The authorization handler validates user identity via root Drive metadata (`/files/root`), applies rate-limit backoff, retrieves storage quota via API/rclone, and stores DPAPI-encrypted tokens.
+  4. Mounts to drive `G:` (or user preference) as **Google Drive** with read-write Explorer access.
+  5. Supports multiple simultaneous Google accounts (e.g. Personal `G:` and Work `H:`) with isolated token storage.
 
 - **TeraBox connection flow**:
   1. Click **Connect TeraBox** or **Add Cloud Disk** -> **TeraBox**.
