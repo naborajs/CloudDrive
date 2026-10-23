@@ -93,6 +93,34 @@ function Test-DriveLetterAvailable([string]$DriveLetter) {
     return (-not $used)
 }
 
+function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 10) {
+    if ($DriveRoot -notmatch '^[A-Za-z]:\\$') { throw 'A valid drive root is required for the filesystem check.' }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'Filesystem check timeout must be between 1 and 30 seconds.' }
+
+    # Enumerate the root in a child process so a stalled WinFsp callback cannot
+    # hold the WPF dispatcher or this worker forever. The directory output is
+    # discarded; only the process result is used as the accessibility signal.
+    $command = 'dir /b "{0}" > NUL 2>&1' -f $DriveRoot
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $startInfo.Arguments = "/d /c $command"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            return [ordered]@{ Success = $false; State = 'Timeout'; Error = "Filesystem root did not respond within $TimeoutSeconds seconds." }
+        }
+        if ($process.ExitCode -ne 0) {
+            return [ordered]@{ Success = $false; State = 'Unavailable'; Error = 'Windows could not enumerate the mounted filesystem root.' }
+        }
+        return [ordered]@{ Success = $true; State = 'Accessible'; Error = $null }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
@@ -394,7 +422,13 @@ function Start-VirtualDriveMount(
 
     $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
     $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    $letter = if (Test-DriveLetterAvailable $cleanLetter) { $cleanLetter } else { Get-NextAvailableDriveLetter $cleanLetter }
+    if (-not (Test-DriveLetterAvailable $cleanLetter)) {
+        if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+            throw "Drive letter $cleanLetter`: is already in use. Choose another letter before mounting this account."
+        }
+        $cleanLetter = Get-NextAvailableDriveLetter $cleanLetter
+    }
+    $letter = $cleanLetter
     $driveRoot = "$letter`:\"
 
     $volName = if (-not [string]::IsNullOrEmpty($VolumeLabel)) {
@@ -467,6 +501,11 @@ function Start-VirtualDriveMount(
 
         $isMounted = [System.IO.DriveInfo]::GetDrives().Name -contains $driveRoot
         if ($isMounted) {
+            $filesystemCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 10
+            if (-not $filesystemCheck.Success) {
+                Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
+                throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
+            }
             return [ordered]@{
                 Success = $true
                 ProviderId = $resolvedProvider
@@ -476,6 +515,7 @@ function Start-VirtualDriveMount(
                 VolumeLabel = $volName
                 ProcessId = $proc.Id
                 LogPath = $logPath
+                FilesystemVerified = $true
             }
         }
 
