@@ -1545,6 +1545,16 @@ function Update-AllUIState {
         $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
         $emailAddr = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'EmailAddress' '' } else { '' }
         $userDisplay = if ($dispName) { $dispName } else { $emailAddr }
+        if (-not $userDisplay -or $userDisplay -eq 'Google Drive User') {
+            try {
+                $accs = Get-CloudAccounts
+                $primaryGd = $accs | Where-Object { $_.ProviderId -eq 'gdrive' } | Select-Object -First 1
+                if ($primaryGd) {
+                    if ($primaryGd.DisplayName) { $userDisplay = $primaryGd.DisplayName }
+                    if ($primaryGd.AccountEmail) { $emailAddr = $primaryGd.AccountEmail }
+                }
+            } catch { }
+        }
         if (-not $userDisplay) { $userDisplay = 'Google Drive' }
 
         $gdNameLabel.Text = $userDisplay
@@ -1620,7 +1630,18 @@ function Update-AllUIState {
 
     if ($tbCheck.IsValid) {
         $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
-        $tbNameLabel.Text = 'TeraBox'
+        $tbDisplayName = 'TeraBox'
+        if ($tbUName -eq 'TeraBox User') {
+            try {
+                $accs = Get-CloudAccounts
+                $primaryTb = $accs | Where-Object { $_.ProviderId -eq 'terabox' } | Select-Object -First 1
+                if ($primaryTb) {
+                    if ($primaryTb.DisplayName) { $tbDisplayName = $primaryTb.DisplayName }
+                    if ($primaryTb.AccountEmail) { $tbUName = $primaryTb.AccountEmail }
+                }
+            } catch { }
+        }
+        $tbNameLabel.Text = $tbDisplayName
         $tbAccountText.Text = $tbUName
         $tbErrorText.Visibility = 'Collapsed'
 
@@ -2258,6 +2279,52 @@ $window.Add_StateChanged({
     }
 })
 
+function Invoke-StartupAutoMount {
+    if (-not $script:Settings.AutoMountDrives) { return }
+    try {
+        $accounts = Get-CloudAccounts
+        if ($accounts -and $accounts.Count -gt 0) {
+            foreach ($acc in $accounts) {
+                if ($acc.AutoMount) {
+                    try {
+                        if ($acc.ProviderId -eq 'gdrive') {
+                            $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $acc.Id -RemoteName 'gdrive'
+                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                        } elseif ($acc.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                            $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $acc.Id
+                            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                        }
+                    } catch { }
+                }
+            }
+        } else {
+            # Fallback to default primary providers if no custom accounts configured
+            $gdCheck = Test-GoogleDriveBackendSession
+            if ($gdCheck.IsValid) {
+                $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+                if (-not $gdStatus.IsMounted) {
+                    $envVars = Get-GoogleDriveRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                }
+            }
+
+            $tbCheck = Test-TeraBoxBackendSession
+            if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
+                $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+                if (-not $tbStatus.IsMounted) {
+                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                }
+            }
+        }
+        if ($window.Dispatcher) {
+            $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{
+                Update-AllUIState
+            }) | Out-Null
+        }
+    } catch { }
+}
+
 $window.Add_Loaded({
     if (-not $Minimized) {
         $window.Activate() | Out-Null
@@ -2267,6 +2334,13 @@ $window.Add_Loaded({
         } catch { }
     }
     Invoke-MemoryTrim
+
+    # Run auto-mount asynchronously in background so the UI is immediately visible and responsive
+    if ($script:Settings.AutoMountDrives) {
+        [System.Threading.Tasks.Task]::Run({
+            Invoke-StartupAutoMount
+        }) | Out-Null
+    }
 })
 
 # ==============================================================================
@@ -2307,52 +2381,10 @@ $timer.Add_Tick({
 $timer.Start()
 
 if ($MyInvocation.InvocationName -ne '.') {
-    # Initial UI population
+    # Fast initial UI population (takes < 5ms with session caching)
     Update-AllUIState
 
     try { Invoke-StartupCacheRecovery -CacheDirectory $script:CacheDirectory | Out-Null } catch { }
-
-    # --- Auto-Mount on Startup ---
-    if ($script:Settings.AutoMountDrives) {
-        try {
-            $accounts = Get-CloudAccounts
-            if ($accounts -and $accounts.Count -gt 0) {
-                foreach ($acc in $accounts) {
-                    if ($acc.AutoMount) {
-                        try {
-                            if ($acc.ProviderId -eq 'gdrive') {
-                                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $acc.Id -RemoteName 'gdrive'
-                                Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                            } elseif ($acc.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
-                                $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $acc.Id
-                                Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                            }
-                        } catch { }
-                    }
-                }
-            } else {
-                # Fallback to default primary providers if no custom accounts configured
-                $gdCheck = Test-GoogleDriveBackendSession
-                if ($gdCheck.IsValid) {
-                    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-                    if (-not $gdStatus.IsMounted) {
-                        $envVars = Get-GoogleDriveRcloneEnvironment
-                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                    }
-                }
-
-                $tbCheck = Test-TeraBoxBackendSession
-                if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-                    $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-                    if (-not $tbStatus.IsMounted) {
-                        $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                        Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                    }
-                }
-            }
-            Update-AllUIState
-        } catch { }
-    }
 
     Invoke-MemoryTrim
 }
