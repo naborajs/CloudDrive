@@ -2149,8 +2149,17 @@ function Update-AllUIState {
             $aCombo.Add_SelectionChanged({
                 if ($aCombo.SelectedItem) {
                     $sel = $aCombo.SelectedItem.ToString().TrimEnd(':')
-                    $currAcc.DriveLetter = $sel
-                    Update-CloudAccount -Account $currAcc | Out-Null
+                    $previousLetter = [string]$currAcc.DriveLetter
+                    if ($sel -eq $previousLetter) { return }
+                    $updatedAccount = @{} + $currAcc
+                    $updatedAccount.DriveLetter = $sel
+                    try {
+                        Update-CloudAccount -Account $updatedAccount | Out-Null
+                        $currAcc.DriveLetter = $sel
+                    } catch {
+                        $aCombo.SelectedItem = "${previousLetter}:"
+                        [System.Windows.MessageBox]::Show((Format-SanitizedDiagnosticMessage $_.Exception.Message), 'Drive letter unavailable', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    }
                 }
             })
             $aActionRow.Children.Add($aCombo) | Out-Null
