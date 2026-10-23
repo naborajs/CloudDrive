@@ -1659,9 +1659,16 @@ function Update-AllUIState {
     }
 
     $statusSnapshot = $script:ProviderStatusSnapshot
+    $restoreInProgress = [bool]($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)
+    $restoreStateLabel = 'Preparing saved drives...'
+    if ($script:StartupAutoMountWorker -and $script:StartupAutoMountWorker.StartedAt) {
+        $restoreElapsed = [DateTime]::UtcNow - [DateTime]$script:StartupAutoMountWorker.StartedAt
+        $restoreStateLabel = 'Restoring saved drives... (' + [int][Math]::Floor($restoreElapsed.TotalMinutes) + ':' + $restoreElapsed.Seconds.ToString('00') + ')'
+    }
+    $checkingState = if ($restoreInProgress) { 'Mounting' } else { 'Checking' }
     $checkingResult = [ordered]@{
         IsValid = $false
-        State = 'Checking'
+        State = $checkingState
         Error = $null
         UserInfo = $null
     }
@@ -1731,7 +1738,10 @@ function Update-AllUIState {
         $gdNameLabel.Text = 'Google Drive'
         $gdState = Get-SafeProperty $gdCheck 'State' ''
         $gdErr = Get-SafeProperty $gdCheck 'Error' ''
-        if ($gdState -eq 'Checking') {
+        if ($gdState -eq 'Mounting') {
+            $gdAccountText.Text = $restoreStateLabel
+            $gdErrorText.Visibility = 'Collapsed'
+        } elseif ($gdState -eq 'Checking') {
             $gdAccountText.Text = 'Checking saved connection...'
             $gdErrorText.Visibility = 'Collapsed'
         } elseif ($gdState -eq 'AuthenticationExpired') {
@@ -1750,7 +1760,10 @@ function Update-AllUIState {
         $gdStorageBar.Visibility = 'Collapsed'
         $gdQuotaText.Visibility = 'Collapsed'
 
-        if ($gdState -eq 'Checking') {
+        if ($gdState -eq 'Mounting') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive...')
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        } elseif ($gdState -eq 'Checking') {
             $gdStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } else {
@@ -1828,7 +1841,10 @@ function Update-AllUIState {
         $tbNameLabel.Text = 'TeraBox'
         $tbState = Get-SafeProperty $tbCheck 'State' ''
         $tbErr = Get-SafeProperty $tbCheck 'Error' ''
-        if ($tbState -eq 'Checking') {
+        if ($tbState -eq 'Mounting') {
+            $tbAccountText.Text = $restoreStateLabel
+            $tbErrorText.Visibility = 'Collapsed'
+        } elseif ($tbState -eq 'Checking') {
             $tbAccountText.Text = 'Checking saved connection...'
             $tbErrorText.Visibility = 'Collapsed'
         } elseif ($tbState -eq 'AuthenticationExpired') {
@@ -1847,7 +1863,10 @@ function Update-AllUIState {
         $tbStorageBar.Visibility = 'Collapsed'
         $tbQuotaText.Visibility = 'Collapsed'
 
-        if ($tbState -eq 'Checking') {
+        if ($tbState -eq 'Mounting') {
+            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive...')
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        } elseif ($tbState -eq 'Checking') {
             $tbStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } else {
