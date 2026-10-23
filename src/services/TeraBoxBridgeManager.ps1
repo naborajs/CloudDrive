@@ -148,6 +148,23 @@ function Set-TeraBoxBridgeSecrets {
     return $secret
 }
 
+function Get-TeraBoxBridgeExistingPassword([string]$HomeDirectory = $null) {
+    try {
+        $dir = if ($HomeDirectory) { $HomeDirectory } else { Get-TeraBoxBridgeHomeDirectory }
+        $keyFile = Join-Path $dir 'terabox.bridge.key'
+        if (Test-Path -LiteralPath $keyFile -PathType Leaf) {
+            $encBytes = [System.IO.File]::ReadAllBytes($keyFile)
+            $decBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                $encBytes,
+                $script:BridgeEntropy,
+                [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+            )
+            return [System.Text.Encoding]::UTF8.GetString($decBytes)
+        }
+    } catch { }
+    return $null
+}
+
 function Test-TeraBoxBridgeHealth {
     [CmdletBinding()]
     param(
@@ -195,19 +212,27 @@ function Start-TeraBoxBridge {
     }
 
     $homeDir = Get-TeraBoxBridgeHomeDirectory -AccountId $AccountId
-    $secret = Set-TeraBoxBridgeSecrets -Session $session -HomeDirectory $homeDir
+    $existingPw = Get-TeraBoxBridgeExistingPassword -HomeDirectory $homeDir
 
-    # Check if already healthy
-    if (Test-TeraBoxBridgeHealth -Port $Port -BridgePassword $secret -TimeoutSec 1) {
+    # Check if already healthy with existing password
+    if ($existingPw -and (Test-TeraBoxBridgeHealth -Port $Port -BridgePassword $existingPw -TimeoutSec 1)) {
         return [ordered]@{
             Success = $true
             Port = $Port
             Url = "http://127.0.0.1:$Port/"
             User = 'cpx'
-            Password = $secret
+            Password = $existingPw
             ProcessId = if ($script:RunningBridgeProcess -and -not $script:RunningBridgeProcess.HasExited) { $script:RunningBridgeProcess.Id } else { $null }
         }
     }
+
+    # If an unhealthy or unresponsive cpx bridge is running, terminate it before starting fresh
+    try {
+        Stop-TeraBoxBridge -Port $Port -AccountId $AccountId
+        Start-Sleep -Milliseconds 250
+    } catch { }
+
+    $secret = Set-TeraBoxBridgeSecrets -Session $session -HomeDirectory $homeDir
 
     # Start cpx.exe background bridge process
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
