@@ -55,6 +55,7 @@ $script:ProviderStatusSnapshot = $null
 $script:LastProviderStatusCheck = [DateTime]::MinValue
 $script:StartupCacheRecoveryWorker = $null
 $script:StartupAutoMountWorker = $null
+$script:ReconnectWorker = $null
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
@@ -1623,6 +1624,27 @@ function Complete-AvailableStartupWorkers {
         $script:StartupAutoMountWorker = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
     }
+
+    if ($script:ReconnectWorker -and (Test-NSBackgroundOperationCompleted $script:ReconnectWorker)) {
+        try {
+            $completed = Complete-NSBackgroundOperation $script:ReconnectWorker
+            if (-not $completed.HadErrors) {
+                foreach ($result in $completed.Output) {
+                    if (-not $result -or -not $result.WorkerKey) { continue }
+                    $key = [string]$result.WorkerKey
+                    if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
+                        $script:ReconnectFailCount[$key] = 0
+                        $script:ReconnectNextAllowed.Remove($key)
+                    } elseif ($result.State -eq 'Error') {
+                        $script:ReconnectFailCount[$key] = [int]$result.FailureCount
+                        $script:ReconnectNextAllowed[$key] = [DateTime]$result.NextAllowed
+                    }
+                }
+            }
+        } catch { }
+        $script:ReconnectWorker = $null
+        $script:LastProviderStatusCheck = [DateTime]::MinValue
+    }
 }
 
 function Update-AllUIState {
@@ -2424,118 +2446,106 @@ $window.Add_StateChanged({
 # The watchdog does nothing when $script:IsConnecting is set (manual connect
 # in progress) or when AutoMountDrives is disabled in settings.
 function Invoke-AutoReconnectWatchdog {
-    if ($script:IsConnecting) { return }
-    if (-not $script:Settings.AutoMountDrives) { return }
-
-    $now = [DateTime]::UtcNow
+    if ($script:IsConnecting -or -not $script:Settings.AutoMountDrives) { return }
+    if ($script:ReconnectWorker -or $script:StartupAutoMountWorker) { return }
 
     try {
-        $accounts = Get-CloudAccounts
-        if (-not $accounts -or $accounts.Count -eq 0) {
-            # Fallback: handle legacy single-provider mode
-            $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-            if (-not $gdStatus.IsMounted) {
-                $key = '__gdrive_primary__'
-                $nextAllowed = if ($script:ReconnectNextAllowed.ContainsKey($key)) { $script:ReconnectNextAllowed[$key] } else { [DateTime]::MinValue }
-                if ($now -ge $nextAllowed) {
-                    $gdCheck = Test-GoogleDriveBackendSession
-                    if ($gdCheck.IsValid) {
-                        try {
-                            $envVars = Get-GoogleDriveRcloneEnvironment
-                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
-                                -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' `
-                                -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                            $script:ReconnectFailCount[$key] = 0
-                            $script:ReconnectNextAllowed.Remove($key)
-                            if ($window.Dispatcher) {
-                                $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{ Update-AllUIState }) | Out-Null
-                            }
-                        } catch {
-                            $fails = if ($script:ReconnectFailCount.ContainsKey($key)) { $script:ReconnectFailCount[$key] } else { 0 }
-                            $script:ReconnectFailCount[$key] = $fails + 1
-                            $delaySec = [Math]::Min(300, [Math]::Pow(2, $fails) * 30)
-                            $script:ReconnectNextAllowed[$key] = $now.AddSeconds($delaySec)
-                        }
-                    }
+        $accounts = @(Get-CloudAccounts)
+        $legacyMode = ($accounts.Count -eq 0)
+        $workerAccounts = if ($legacyMode) {
+            @(
+                [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true },
+                [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true }
+            )
+        } else {
+            @($accounts | Where-Object { $_.AutoMount } | ForEach-Object {
+                [pscustomobject]@{
+                    WorkerKey = [string]$_.Id
+                    Id = [string]$_.Id
+                    ProviderId = [string]$_.ProviderId
+                    DriveLetter = [string]$_.DriveLetter
+                    DisplayName = [string]$_.DisplayName
+                    AutoMount = [bool]$_.AutoMount
                 }
-            } else {
-                $script:ReconnectFailCount['__gdrive_primary__'] = 0
-                $script:ReconnectNextAllowed.Remove('__gdrive_primary__')
-            }
-
-            $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-            if (-not $tbStatus.IsMounted) {
-                $key = '__terabox_primary__'
-                $nextAllowed = if ($script:ReconnectNextAllowed.ContainsKey($key)) { $script:ReconnectNextAllowed[$key] } else { [DateTime]::MinValue }
-                if ($now -ge $nextAllowed) {
-                    $tbCheck = Test-TeraBoxBackendSession
-                    if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-                        try {
-                            $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
-                                -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' `
-                                -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                            $script:ReconnectFailCount[$key] = 0
-                            $script:ReconnectNextAllowed.Remove($key)
-                            if ($window.Dispatcher) {
-                                $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{ Update-AllUIState }) | Out-Null
-                            }
-                        } catch {
-                            $fails = if ($script:ReconnectFailCount.ContainsKey($key)) { $script:ReconnectFailCount[$key] } else { 0 }
-                            $script:ReconnectFailCount[$key] = $fails + 1
-                            $delaySec = [Math]::Min(300, [Math]::Pow(2, $fails) * 30)
-                            $script:ReconnectNextAllowed[$key] = $now.AddSeconds($delaySec)
-                        }
-                    }
-                }
-            } else {
-                $script:ReconnectFailCount['__terabox_primary__'] = 0
-                $script:ReconnectNextAllowed.Remove('__terabox_primary__')
-            }
-            return
+            })
         }
 
-        foreach ($acc in $accounts) {
-            if (-not $acc.AutoMount) { continue }
-            $key = $acc.Id
-            $accStatus = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
+        $nextAllowed = @{}
+        foreach ($key in $script:ReconnectNextAllowed.Keys) { $nextAllowed[$key] = $script:ReconnectNextAllowed[$key] }
+        $failureCounts = @{}
+        foreach ($key in $script:ReconnectFailCount.Keys) { $failureCounts[$key] = [int]$script:ReconnectFailCount[$key] }
+        $cacheDirectory = $script:CacheDirectory
 
-            if ($accStatus.IsMounted) {
-                # Mount is healthy — reset backoff counters
-                $script:ReconnectFailCount[$key] = 0
-                $script:ReconnectNextAllowed.Remove($key)
-                continue
-            }
+        $script:ReconnectWorker = Start-NSBackgroundOperation -ArgumentList @(
+            $PSScriptRoot, $cacheDirectory, $workerAccounts, $nextAllowed, $failureCounts
+        ) -ScriptBlock {
+            param([string]$sourceRoot, [string]$cacheDirectory, [object[]]$accounts, [hashtable]$nextAllowed, [hashtable]$failureCounts)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+            . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+            . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
 
-            # Drive is not mounted — check if we can attempt reconnect yet
-            $nextAllowed = if ($script:ReconnectNextAllowed.ContainsKey($key)) { $script:ReconnectNextAllowed[$key] } else { [DateTime]::MinValue }
-            if ($now -lt $nextAllowed) { continue }
+            $now = [DateTime]::UtcNow
+            foreach ($account in $accounts) {
+                if (-not $account.AutoMount) { continue }
+                $key = [string]$account.WorkerKey
+                try {
+                    $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
+                    if ($status.IsMounted) {
+                        [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                        continue
+                    }
 
-            try {
-                if ($acc.ProviderId -eq 'gdrive') {
-                    $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $acc.Id -RemoteName 'gdrive'
-                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $acc.Id `
-                        -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName `
-                        -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                } elseif ($acc.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
-                    $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $acc.Id
-                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $acc.Id `
-                        -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName `
-                        -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                } else {
-                    continue
+                    $retryAt = if ($nextAllowed.ContainsKey($key)) { [DateTime]$nextAllowed[$key] } else { [DateTime]::MinValue }
+                    if ($now -lt $retryAt) {
+                        [pscustomobject]@{ WorkerKey = $key; State = 'Backoff'; FailureCount = [int]$failureCounts[$key]; NextAllowed = $retryAt; Error = $null }
+                        continue
+                    }
+
+                    if ($account.ProviderId -eq 'gdrive') {
+                        if ($key -like '__*') {
+                            $check = Test-GoogleDriveBackendSession
+                            if (-not $check.IsValid) {
+                                [pscustomobject]@{ WorkerKey = $key; State = 'Disconnected'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                                continue
+                            }
+                            $environment = Get-GoogleDriveRcloneEnvironment
+                        } else {
+                            $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
+                        }
+                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                    } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                        if ($key -like '__*') {
+                            $check = Test-TeraBoxBackendSession
+                            if (-not $check.IsValid) {
+                                [pscustomobject]@{ WorkerKey = $key; State = 'Disconnected'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                                continue
+                            }
+                        }
+                        $environment = if ($key -like '__*') { Get-TeraBoxRcloneEnvironment } else { Get-TeraBoxRcloneEnvironment -AccountId $account.Id }
+                        Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                    } else {
+                        continue
+                    }
+
+                    [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                } catch {
+                    $failures = if ($failureCounts.ContainsKey($key)) { [int]$failureCounts[$key] } else { 0 }
+                    $delaySeconds = [Math]::Min(300, [Math]::Pow(2, $failures) * 30)
+                    $next = $now.AddSeconds($delaySeconds)
+                    [pscustomobject]@{
+                        WorkerKey = $key
+                        State = 'Error'
+                        FailureCount = $failures + 1
+                        NextAllowed = $next
+                        Error = Format-SanitizedDiagnosticMessage $_.Exception.Message
+                    }
                 }
-                # Success — reset counters
-                $script:ReconnectFailCount[$key] = 0
-                $script:ReconnectNextAllowed.Remove($key)
-                if ($window.Dispatcher) {
-                    $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{ Update-AllUIState }) | Out-Null
-                }
-            } catch {
-                $fails = if ($script:ReconnectFailCount.ContainsKey($key)) { $script:ReconnectFailCount[$key] } else { 0 }
-                $script:ReconnectFailCount[$key] = $fails + 1
-                $delaySec = [Math]::Min(300, [Math]::Pow(2, $fails) * 30)
-                $script:ReconnectNextAllowed[$key] = $now.AddSeconds($delaySec)
             }
         }
     } catch { }
