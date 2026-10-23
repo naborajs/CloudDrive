@@ -12,6 +12,15 @@ $script:ActiveMountProcesses = @{}
 $script:ProviderDriveMapping = @{}
 $script:MountProcess = $null
 
+function Format-SafeProcessArgument([string]$Argument) {
+    if ([string]::IsNullOrEmpty($Argument)) { return '""' }
+    if ($Argument -notmatch '[\s"\\]') { return $Argument }
+    $escaped = [regex]::Replace($Argument, '(\\+)(")', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    $escaped = $escaped -replace '"', '\"'
+    return "`"$escaped`""
+}
+
 function Find-RcloneBinary([string]$CustomPath = '') {
     if (-not [string]::IsNullOrEmpty($CustomPath) -and (Test-Path -LiteralPath $CustomPath -PathType Leaf)) {
         return $CustomPath
@@ -270,7 +279,7 @@ function Build-RcloneMountArguments(
     $safeCache = Resolve-SafeCacheDirectory $CacheDirectory
 
     $volName = if (-not [string]::IsNullOrEmpty($VolumeLabel)) {
-        $VolumeLabel
+        [regex]::Replace($VolumeLabel, '["\r\n]', '').Trim()
     } elseif ($RemoteName -match '(?i)gdrive|google') {
         'Google Drive'
     } elseif ($RemoteName -match '(?i)terabox') {
@@ -278,10 +287,12 @@ function Build-RcloneMountArguments(
     } else {
         'NS Cloud Drive'
     }
+    if ([string]::IsNullOrWhiteSpace($volName)) { $volName = 'NS Cloud Drive' }
 
+    $cleanRemote = [regex]::Replace($RemoteName, '[^a-zA-Z0-9_\-]', '_')
     $args = @(
         'mount',
-        "${RemoteName}:",
+        "${cleanRemote}:",
         $driveRoot
     )
 
@@ -377,7 +388,7 @@ function Start-VirtualDriveMount(
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
-    $psi.Arguments = ($mountArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+    $psi.Arguments = ($mountArgs | ForEach-Object { Format-SafeProcessArgument $_ }) -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardError = $true
