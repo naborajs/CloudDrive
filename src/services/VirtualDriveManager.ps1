@@ -107,6 +107,32 @@ function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
     try {
         $null = & subst.exe "$letter`:" /d 2>&1
     } catch { }
+
+    # Clean stale HKCU:\Network\$letter if present
+    try {
+        $netKey = "HKCU:\Network\$letter"
+        if (Test-Path -LiteralPath $netKey) {
+            Remove-Item -LiteralPath $netKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+
+    # Clean stale MountPoints2 registry entries that cause Windows Explorer red X / offline overlays
+    try {
+        $mpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2'
+        if (Test-Path -LiteralPath $mpKey) {
+            # Letter key, e.g. MountPoints2\G
+            $letterSubKey = Join-Path $mpKey $letter
+            if (Test-Path -LiteralPath $letterSubKey) {
+                Remove-Item -LiteralPath $letterSubKey -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            # Server share keys, e.g. ##server#Google Drive, ##server#TeraBox
+            Get-ChildItem -LiteralPath $mpKey -ErrorAction SilentlyContinue | Where-Object {
+                $_.PSChildName -like '##server#*'
+            } | ForEach-Object {
+                Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
 }
 
 function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
@@ -226,12 +252,7 @@ function Get-VirtualDriveStatus(
         $isAccessible = $false
         try { $isAccessible = Test-Path -LiteralPath $driveRoot } catch { }
 
-        $isManagedMount = $isAccessible -and (
-            $processAlive -or (
-                ($format -and ($format -like '*WinFsp*' -or $format -like '*FUSE*' -or $format -like '*NTFS*')) -and
-                ($volumeLabel -match '(?i)Google|TeraBox|CloudDrive|Cloud')
-            )
-        )
+        $isManagedMount = $isAccessible -and $processAlive
 
         return [ordered]@{
             IsMounted = [bool]$isManagedMount
@@ -385,6 +406,9 @@ function Start-VirtualDriveMount(
     # Isolated cache directory per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
     $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -ReadOnly:$ReadOnly -FixedDisk
+    # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
+    # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
+    $mountArgs[2] = "$letter`:"
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
