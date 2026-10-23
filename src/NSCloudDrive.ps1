@@ -55,6 +55,8 @@ $script:ProviderStatusSnapshot = $null
 $script:LastProviderStatusCheck = [DateTime]::MinValue
 $script:StartupCacheRecoveryWorker = $null
 $script:StartupAutoMountWorker = $null
+$script:StartupAutoMountTimer = $null
+$script:StartupAutoMountError = $null
 $script:ReconnectWorker = $null
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
 
@@ -411,6 +413,10 @@ $refreshBtn.BorderThickness = [System.Windows.Thickness]::new(1)
 $refreshBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
 $refreshBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $refreshBtn.Add_Click({
+    if ($script:StartupAutoMountError -and -not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker) {
+        $script:StartupAutoMountError = $null
+        Start-StartupAutoMountTimer
+    }
     Update-AllUIState
     Invoke-MemoryTrim
 })
@@ -1591,6 +1597,20 @@ Apply-UITheme $script:Settings.Theme
 # ==============================================================================
 # UI STATE SYNCHRONIZER
 # ==============================================================================
+function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [string]$DriveLetter = '') {
+    $snapshot = $script:ProviderStatusSnapshot
+    if ($snapshot) {
+        if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $snapshot.PSObject.Properties['AccountStatuses'] -and $snapshot.AccountStatuses -and $snapshot.AccountStatuses.ContainsKey($AccountId)) {
+            return $snapshot.AccountStatuses[$AccountId]
+        }
+        if ($ProviderId -eq 'gdrive' -and $snapshot.GoogleStatus) { return $snapshot.GoogleStatus }
+        if ($ProviderId -eq 'terabox' -and $snapshot.TeraBoxStatus) { return $snapshot.TeraBoxStatus }
+    }
+
+    $letter = if ($DriveLetter) { $DriveLetter } elseif ($ProviderId -eq 'gdrive') { $script:GDriveLetter } else { $script:TeraBoxLetter }
+    return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null }
+}
+
 function Start-ProviderStatusRefreshWorker {
     if ($script:ProviderStatusWorker) { return }
 
@@ -1610,12 +1630,19 @@ function Start-ProviderStatusRefreshWorker {
             [ordered]@{ IsValid = $false; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); UserInfo = $null }
         }
         $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+        $accountStatuses = @{}
+        foreach ($account in @(Get-CloudAccounts)) {
+            try {
+                $accountStatuses[[string]$account.Id] = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
+            } catch { }
+        }
 
         [pscustomobject]@{
             GoogleCheck = $googleCheck
             GoogleStatus = $googleStatus
             TeraBoxCheck = $teraBoxCheck
             TeraBoxStatus = $teraBoxStatus
+            AccountStatuses = $accountStatuses
             CheckedAt = [DateTime]::UtcNow
         }
     }
@@ -1647,9 +1674,9 @@ function Complete-AvailableStartupWorkers {
                 }
                 $script:ProviderStatusSnapshot = [pscustomobject]@{
                     GoogleCheck = [ordered]@{ IsValid = $false; State = 'Error'; Error = $message; UserInfo = $null }
-                    GoogleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+                    GoogleStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
                     TeraBoxCheck = [ordered]@{ IsValid = $false; State = 'Error'; Error = $message; UserInfo = $null }
-                    TeraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+                    TeraBoxStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
                     CheckedAt = [DateTime]::UtcNow
                 }
             }
@@ -1702,6 +1729,17 @@ function Update-AllUIState {
     }
 
     $statusSnapshot = $script:ProviderStatusSnapshot
+    if ($script:StartupAutoMountError -and -not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker) {
+        $failure = [ordered]@{ IsValid = $false; State = 'Error'; Error = $script:StartupAutoMountError; UserInfo = $null }
+        $script:ProviderStatusSnapshot = [pscustomobject]@{
+            GoogleCheck = $failure
+            GoogleStatus = [ordered]@{ IsMounted = $false; DriveLetter = $script:GDriveLetter }
+            TeraBoxCheck = $failure
+            TeraBoxStatus = [ordered]@{ IsMounted = $false; DriveLetter = $script:TeraBoxLetter }
+            CheckedAt = [DateTime]::UtcNow
+        }
+        $statusSnapshot = $script:ProviderStatusSnapshot
+    }
     $restoreInProgress = [bool]($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)
     $restoreStateLabel = 'Preparing saved drives...'
     if ($script:StartupAutoMountWorker -and $script:StartupAutoMountWorker.StartedAt) {
@@ -1718,7 +1756,7 @@ function Update-AllUIState {
 
     # 1. Google Drive State
     $gdCheck = if ($statusSnapshot) { $statusSnapshot.GoogleCheck } else { $checkingResult }
-    $gdStatus = if ($statusSnapshot) { $statusSnapshot.GoogleStatus } else { Get-VirtualDriveStatus -ProviderId 'gdrive' }
+    $gdStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
 
     if ($gdCheck.IsValid) {
         $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
@@ -1823,7 +1861,7 @@ function Update-AllUIState {
 
     # 2. TeraBox State
     $tbCheck = if ($statusSnapshot) { $statusSnapshot.TeraBoxCheck } else { $checkingResult }
-    $tbStatus = if ($statusSnapshot) { $statusSnapshot.TeraBoxStatus } else { Get-VirtualDriveStatus -ProviderId 'terabox' }
+    $tbStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
 
     if ($tbCheck.IsValid) {
         $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
@@ -1987,7 +2025,7 @@ function Update-AllUIState {
             $aActionRow.VerticalAlignment = 'Center'
             $aInfoStack.Children.Add($aActionRow) | Out-Null
 
-            $aStatus = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
+            $aStatus = Get-CachedUiDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId -DriveLetter $acc.DriveLetter
 
             $aBtn = [System.Windows.Controls.Button]::new()
             $aBtn.Padding = [System.Windows.Thickness]::new(16, 5, 16, 5)
@@ -2623,6 +2661,30 @@ function Invoke-AutoReconnectWatchdog {
     } catch { }
 }
 
+function Start-StartupAutoMountTimer {
+    if (-not $script:Settings.AutoMountDrives -or $script:StartupAutoMountWorker -or $script:StartupAutoMountTimer) { return }
+
+    $script:StartupAutoMountPending = $true
+    $script:StartupAutoMountTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:StartupAutoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:StartupAutoMountTimer.Add_Tick({
+        $timer = $script:StartupAutoMountTimer
+        if ($timer) { $timer.Stop() }
+        $script:StartupAutoMountTimer = $null
+        $script:StartupAutoMountPending = $false
+        try {
+            $script:StartupAutoMountError = $null
+            Invoke-StartupAutoMount
+        } catch {
+            $script:StartupAutoMountError = Format-SanitizedDiagnosticMessage $_.Exception.Message
+            $script:LastProviderStatusCheck = [DateTime]::MinValue
+        } finally {
+            Update-AllUIState
+        }
+    })
+    $script:StartupAutoMountTimer.Start()
+}
+
 function Invoke-StartupAutoMount {
     if (-not $script:Settings.AutoMountDrives) { return }
     if ($script:StartupAutoMountWorker) { return }
@@ -2718,22 +2780,15 @@ $window.Add_Loaded({
     Invoke-MemoryTrim
     if ($script:Settings.AutoMountDrives) {
         $script:StartupAutoMountPending = $true
-    } else {
-        try { Start-ProviderStatusRefreshWorker } catch { }
     }
+    try { Start-ProviderStatusRefreshWorker } catch { }
     try { Start-StartupCacheRecoveryWorker } catch { }
     Update-AllUIState
 
-    # Start mount reconciliation after the window is visible; the mount itself runs in a background runspace.
+    # Keep the timer rooted in script scope: Dispatcher callbacks run after this Loaded
+    # handler returns, so a handler-local timer variable is unavailable under StrictMode.
     if ($script:Settings.AutoMountDrives) {
-        $autoMountTimer = [System.Windows.Threading.DispatcherTimer]::new()
-        $autoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-        $autoMountTimer.Add_Tick({
-            $autoMountTimer.Stop()
-            $script:StartupAutoMountPending = $false
-            Invoke-StartupAutoMount
-        })
-        $autoMountTimer.Start()
+        Start-StartupAutoMountTimer
     }
 })
 
