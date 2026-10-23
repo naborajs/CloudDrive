@@ -5,6 +5,35 @@ $ErrorActionPreference = 'Stop'
 
 Write-Output 'Testing GoogleDriveProvider...'
 
+# 0. Verify bounded rclone helper output handling using only local child processes
+$childShell = Get-Command 'powershell.exe' -ErrorAction SilentlyContinue
+if (-not $childShell) {
+    throw 'powershell.exe is required for the local helper-process regression test.'
+}
+$captureResult = Invoke-GoogleRcloneCommand -FilePath $childShell.Source `
+    -Arguments '-NoProfile -Command "[Console]::Out.WriteLine(\"stdout-ok\"); [Console]::Error.WriteLine(\"stderr-ok\")"' `
+    -TimeoutSeconds 5
+if ($captureResult.ExitCode -ne 0 -or
+    $captureResult.StandardOutput -notmatch 'stdout-ok' -or
+    $captureResult.StandardError -notmatch 'stderr-ok') {
+    throw 'Google Drive helper process must drain and capture both output streams.'
+}
+
+$timeoutClock = [System.Diagnostics.Stopwatch]::StartNew()
+$timedOut = $false
+try {
+    Invoke-GoogleRcloneCommand -FilePath $childShell.Source `
+        -Arguments '-NoProfile -Command "Start-Sleep -Seconds 8"' `
+        -TimeoutSeconds 1 | Out-Null
+} catch {
+    $timedOut = $_.Exception.Message -match 'timed out'
+}
+$timeoutClock.Stop()
+if (-not $timedOut -or $timeoutClock.Elapsed.TotalSeconds -gt 5) {
+    throw "Google Drive helper timeout was not enforced (elapsed=$([Math]::Round($timeoutClock.Elapsed.TotalSeconds, 2))s)."
+}
+Write-Output '  [PASS] Rclone helper stdout/stderr draining and bounded timeout verified'
+
 # Sandbox LOCALAPPDATA to prevent touching real user credentials
 $origGlobalLocalAppData = $env:LOCALAPPDATA
 $globalSandboxDir = Join-Path $env:TEMP "gdrive_test_global_sandbox_$([Guid]::NewGuid().ToString('N'))"
