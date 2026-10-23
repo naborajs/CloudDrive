@@ -158,4 +158,32 @@ if ($sanitized -match 'GOCSPX-secret123' -or $sanitized -match 'ya29\.sample_tok
 }
 Write-Output '  [PASS] Transfer message secret sanitization and zero-leakage verified'
 
+# 7. Test Path Traversal Sanitization and Command Argument Escaping
+Write-Output '  -> Testing path traversal sanitization and argument injection defense...'
+$p1 = Normalize-CloudPath 'foo/../../bar'
+if ($p1 -ne 'bar') { throw "Normalize-CloudPath failed on foo/../../bar: got '$p1'" }
+
+$p2 = Normalize-CloudPath '/folder/subfolder/'
+if ($p2 -ne 'folder/subfolder') { throw "Normalize-CloudPath failed on /folder/subfolder/: got '$p2'" }
+
+$p3 = Normalize-CloudPath 'foo\bar\baz'
+if ($p3 -ne 'foo/bar/baz') { throw "Normalize-CloudPath failed on backslash conversion: got '$p3'" }
+
+$p4 = Normalize-CloudPath '../../escape'
+if ($p4 -ne 'escape') { throw "Normalize-CloudPath failed on root escape attempt: got '$p4'" }
+
+$arg1 = Format-SafeProcessArgument 'copy'
+if ($arg1 -ne 'copy') { throw "Format-SafeProcessArgument failed on simple argument: got '$arg1'" }
+
+$arg2 = Format-SafeProcessArgument 'remote:my folder'
+if ($arg2 -ne '"remote:my folder"') { throw "Format-SafeProcessArgument failed on spaced argument: got '$arg2'" }
+
+$arg3 = Format-SafeProcessArgument 'remote:folder"withquote'
+if ($arg3 -ne '"remote:folder\"withquote"') { throw "Format-SafeProcessArgument failed on quoted argument: got '$arg3'" }
+
+$arg4 = Format-SafeProcessArgument 'D:\Cache\'
+if ($arg4 -ne '"D:\Cache\\"') { throw "Format-SafeProcessArgument failed on trailing backslash argument: got '$arg4'" }
+
+Write-Output '  [PASS] Path traversal sanitization and argument injection defense verified'
+
 Write-Output 'All Cloud Transfer Manager tests passed.'
