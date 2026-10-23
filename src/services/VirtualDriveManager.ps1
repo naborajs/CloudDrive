@@ -565,6 +565,13 @@ function Stop-VirtualDriveMount(
         $targets = @($script:ActiveMountProcesses.Keys)
     }
 
+    # The shared $script:MountProcess handle may point at any account's rclone
+    # process (the most recently started mount). Killing it as a fallback while
+    # servicing a scoped request would terminate an unrelated account's mount.
+    $hasScopeFilter = (-not [string]::IsNullOrEmpty($AccountId)) -or
+                      (-not [string]::IsNullOrEmpty($ProviderId)) -or
+                      (-not [string]::IsNullOrEmpty($DriveLetter))
+
     foreach ($target in $targets) {
         if ($script:ProviderDriveMapping.ContainsKey($target)) {
             $lettersToClean += $script:ProviderDriveMapping[$target]
@@ -585,7 +592,7 @@ function Stop-VirtualDriveMount(
         }
     }
 
-    if ($targets.Count -eq 0 -and $script:MountProcess -and (-not $script:MountProcess.HasExited)) {
+    if (-not $hasScopeFilter -and $targets.Count -eq 0 -and $script:MountProcess -and (-not $script:MountProcess.HasExited)) {
         try {
             $script:MountProcess.Kill()
             $script:MountProcess.WaitForExit(5000) | Out-Null
@@ -604,26 +611,57 @@ function Stop-VirtualDriveMount(
         try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
 
-    # Clean up any matching orphaned rclone processes
+    # Clean up any matching orphaned rclone processes. Ownership is decided by
+    # the per-account cache/log path segment rclone was started with: account
+    # mounts embed their AccountId, legacy provider mounts do not. A scoped
+    # request must never terminate a process owned by a different account, and
+    # a provider-wide request must not terminate any account-owned process.
     try {
+        $savedAccountIds = @()
+        try { $savedAccountIds = @((Get-CloudAccounts) | ForEach-Object { [string]$_.Id }) } catch { }
         $orphans = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '\bmount\b' }
         foreach ($proc in $orphans) {
-            # Account removals are scoped to the saved drive letter and provider;
-            # a provider-wide match would terminate every account using that backend.
-            $ownedLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
-                $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-            } elseif ($lettersToClean.Count -gt 0) { [string]$lettersToClean[0] } else { '' }
-            if (-not [string]::IsNullOrEmpty($ownedLetter) -and -not [string]::IsNullOrEmpty($ProviderId)) {
-                $targetPattern = "(?i)\bmount\b.*\s+[`"']?${ownedLetter}:\\?[`"']?(\s+|$)"
-                if ($proc.CommandLine -match $targetPattern -and $proc.CommandLine -match "(?i)\b${ProviderId}:") {
+            if ([string]::IsNullOrEmpty($proc.CommandLine)) { continue }
+            $ownerAccountId = ''
+            foreach ($accId in $savedAccountIds) {
+                if (-not [string]::IsNullOrEmpty($accId) -and $proc.CommandLine.Contains($accId)) { $ownerAccountId = $accId; break }
+            }
+
+            if (-not [string]::IsNullOrEmpty($ownerAccountId)) {
+                # Account-owned process: only a request scoped to this exact
+                # account (and, when a letter is known, that letter) may stop it.
+                if ([string]::Equals($ownerAccountId, [string]$AccountId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    if ((-not [string]::IsNullOrEmpty($DriveLetter)) -or $lettersToClean.Count -gt 0) {
+                        $ownedLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+                            $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                        } else { [string]$lettersToClean[0] }
+                        $targetPattern = "(?i)\bmount\b.*\s+[`"']?${ownedLetter}:\\?[`"']?(\s+|$)"
+                        if ($proc.CommandLine -match $targetPattern) {
+                            try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                        }
+                    } else {
+                        try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                    }
+                }
+                continue
+            }
+
+            # Legacy (no account) mount process. Only legacy scopes reach here:
+            # a request carrying an AccountId must never stop unowned mounts.
+            if ([string]::IsNullOrEmpty($AccountId)) {
+                $shouldStop = $false
+                if ((-not [string]::IsNullOrEmpty($DriveLetter)) -and (-not [string]::IsNullOrEmpty($ProviderId))) {
+                    $ownedLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                    $targetPattern = "(?i)\bmount\b.*\s+[`"']?${ownedLetter}:\\?[`"']?(\s+|$)"
+                    $shouldStop = ($proc.CommandLine -match $targetPattern -and $proc.CommandLine -match "(?i)\b${ProviderId}:")
+                } elseif ([string]::IsNullOrEmpty($DriveLetter) -and (-not [string]::IsNullOrEmpty($ProviderId))) {
+                    $shouldStop = ($proc.CommandLine -match "(?i)\b${ProviderId}:")
+                } elseif ([string]::IsNullOrEmpty($DriveLetter) -and [string]::IsNullOrEmpty($ProviderId)) {
+                    $shouldStop = $true
+                }
+                if ($shouldStop) {
                     try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
                 }
-            } elseif ([string]::IsNullOrEmpty($AccountId) -and -not [string]::IsNullOrEmpty($ProviderId)) {
-                if ($proc.CommandLine -match "(?i)\b${ProviderId}:") {
-                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
-                }
-            } elseif ([string]::IsNullOrEmpty($AccountId) -and [string]::IsNullOrEmpty($ProviderId)) {
-                try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
             }
         }
     } catch { }
