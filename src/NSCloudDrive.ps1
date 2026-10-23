@@ -109,6 +109,14 @@ function Get-WpfBitmapImage([string]$Path) {
     return $null
 }
 
+function Start-ExplorerWindow([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    try {
+        $clean = $Path.Trim().Trim('"')
+        [System.Diagnostics.Process]::Start('explorer.exe', "`"$clean`"") | Out-Null
+    } catch { }
+}
+
 # ==============================================================================
 # THREE THEMES PALETTE RESOLVER
 # ==============================================================================
@@ -415,10 +423,11 @@ $addDiskBtn.Add_Click({
             $created = Connect-NewCloudAccount -Owner $window -ProviderId 'gdrive'
             if ($created) {
                 try {
-                    $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $created.Id -RemoteName 'gdrive'
-                    $res = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
+                    $remoteName = if ($created.Id) { [regex]::Replace($created.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'gdrive' }
+                    $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $created.Id -RemoteName $remoteName
+                    $res = Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'gdrive' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
                     if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
-                        [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+                        Start-ExplorerWindow $res.DriveRoot
                     }
                 } catch { }
                 Update-AllUIState
@@ -428,10 +437,11 @@ $addDiskBtn.Add_Click({
             $created = Connect-NewCloudAccount -Owner $window -ProviderId 'terabox'
             if ($created) {
                 try {
+                    $remoteName = if ($created.Id) { [regex]::Replace($created.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'terabox' }
                     $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $created.Id
-                    $res = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
+                    $res = Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'terabox' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
                     if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
-                        [System.Diagnostics.Process]::Start('explorer.exe', $res.DriveRoot) | Out-Null
+                        Start-ExplorerWindow $res.DriveRoot
                     }
                 } catch { }
                 Update-AllUIState
@@ -1062,7 +1072,7 @@ $openCacheBtn.Add_Click({
     if (-not (Test-Path -LiteralPath $script:CacheDirectory)) {
         New-Item -ItemType Directory -Path $script:CacheDirectory -Force | Out-Null
     }
-    [System.Diagnostics.Process]::Start('explorer.exe', $script:CacheDirectory) | Out-Null
+    Start-ExplorerWindow $script:CacheDirectory
 })
 $cacheActionStack.Children.Add($openCacheBtn) | Out-Null
 
@@ -1765,11 +1775,13 @@ function Update-AllUIState {
                 $aBtn.Add_Click({
                     try {
                         if ($currAcc.ProviderId -eq 'gdrive') {
-                            $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $currAcc.Id -RemoteName 'gdrive'
-                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+                            $remoteName = if ($currAcc.Id) { [regex]::Replace($currAcc.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'gdrive' }
+                            $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $currAcc.Id -RemoteName $remoteName
+                            Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'gdrive' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
                         } elseif ($currAcc.ProviderId -eq 'terabox') {
+                            $remoteName = if ($currAcc.Id) { [regex]::Replace($currAcc.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'terabox' }
                             $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $currAcc.Id
-                            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+                            Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'terabox' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
                         }
                     } catch { }
                     Update-AllUIState
@@ -1801,7 +1813,7 @@ function Update-AllUIState {
             $aExpBtn = New-QuickIconButton ([char]::ConvertFromUtf32(0x1F4C1)) 'Open in Windows File Explorer'
             $aExpBtn.IsEnabled = $aStatus.IsMounted
             $aExpBtn.Add_Click({
-                [System.Diagnostics.Process]::Start('explorer.exe', ($currAcc.DriveLetter + ':\')) | Out-Null
+                Start-ExplorerWindow ($currAcc.DriveLetter + ':\')
             })
             $aActionRow.Children.Add($aExpBtn) | Out-Null
 
@@ -1921,7 +1933,7 @@ $gdActionBtn.Add_Click({
             $envVars = Get-GoogleDriveRcloneEnvironment
             $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
             if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                Start-ExplorerWindow $mRes.DriveRoot
             }
         } catch {
             $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
@@ -1954,7 +1966,7 @@ $gdActionBtn.Add_Click({
                         $envVars = Get-GoogleDriveRcloneEnvironment
                         $mRes = Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
                         if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                            [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                            Start-ExplorerWindow $mRes.DriveRoot
                         }
                     } catch {
                         $gdErrorText.Text = 'Connected, but could not mount ' + $script:GDriveLetter + ': ' + $_.Exception.Message
@@ -1982,7 +1994,7 @@ $gdActionBtn.Add_Click({
 $gdExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($status.IsMounted) {
-        [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
+        Start-ExplorerWindow $status.DriveRoot
     }
 })
 
@@ -2050,7 +2062,7 @@ $tbActionBtn.Add_Click({
             $tbEnvVars = Get-TeraBoxRcloneEnvironment
             $mRes = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
             if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                Start-ExplorerWindow $mRes.DriveRoot
             }
         } catch {
             $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
@@ -2078,7 +2090,7 @@ $tbActionBtn.Add_Click({
                     $tbEnvVars = Get-TeraBoxRcloneEnvironment
                     $mRes = Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
                     if ($mRes.Success -and $script:Settings.OpenExplorerOnMount) {
-                        [System.Diagnostics.Process]::Start('explorer.exe', $mRes.DriveRoot) | Out-Null
+                        Start-ExplorerWindow $mRes.DriveRoot
                     }
                 } catch {
                     $tbErrorText.Text = 'Connected, but could not mount ' + $script:TeraBoxLetter + ': ' + $_.Exception.Message
@@ -2102,7 +2114,7 @@ $tbActionBtn.Add_Click({
 $tbExplorerBtn.Add_Click({
     $status = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($status.IsMounted) {
-        [System.Diagnostics.Process]::Start('explorer.exe', $status.DriveRoot) | Out-Null
+        Start-ExplorerWindow $status.DriveRoot
     }
 })
 
@@ -2167,7 +2179,7 @@ $menuOpenGD = $trayMenu.Items.Add('Open Google Drive (' + $script:GDriveLetter +
 $menuOpenGD.Add_Click({
     $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($gdStatus.IsMounted) {
-        [System.Diagnostics.Process]::Start('explorer.exe', $gdStatus.DriveRoot) | Out-Null
+        Start-ExplorerWindow $gdStatus.DriveRoot
     }
 })
 
@@ -2175,7 +2187,7 @@ $menuOpenTB = $trayMenu.Items.Add('Open TeraBox (' + $script:TeraBoxLetter + ':\
 $menuOpenTB.Add_Click({
     $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($tbStatus.IsMounted) {
-        [System.Diagnostics.Process]::Start('explorer.exe', $tbStatus.DriveRoot) | Out-Null
+        Start-ExplorerWindow $tbStatus.DriveRoot
     }
 })
 
