@@ -179,26 +179,41 @@ function Get-CloudAccount([string]$AccountId) {
     return $null
 }
 
+function Test-CloudAccountPersisted([string]$AccountId) {
+    if ([string]::IsNullOrWhiteSpace($AccountId)) { return $false }
+    return ($null -ne (Get-CloudAccount -AccountId $AccountId))
+}
+
+function Test-CloudAccountDriveLetterAvailable([string]$DriveLetter, [string]$ExcludeAccountId = '') {
+    $letter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    if ($letter -notmatch '^[A-Z]$') { throw 'Choose a single valid drive letter before saving this account.' }
+    foreach ($savedAccount in (Get-CloudAccounts)) {
+        if (-not [string]::IsNullOrWhiteSpace($ExcludeAccountId) -and [string]$savedAccount.Id -eq $ExcludeAccountId) { continue }
+        $savedLetter = ([string]$savedAccount.DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+        if ($savedLetter -eq $letter) {
+            throw "Drive letter $letter`: is already assigned to '$($savedAccount.DisplayName)'. Choose a different letter."
+        }
+    }
+    return $true
+}
+
 function Add-CloudAccount([hashtable]$Account) {
     if (-not $Account -or -not $Account.ContainsKey('Id') -or -not $Account.Id) {
         throw 'Account with valid Id is required.'
     }
 
     $settings = Get-NSCloudDriveSettings
-    $accounts = @()
-    if ($settings.Accounts) {
-        foreach ($a in $settings.Accounts) {
-            if ($a.Id -ne $Account.Id) {
-                $accounts += $a
-            }
-        }
+    if (@($settings.Accounts | Where-Object { [string]$_.Id -eq [string]$Account.Id }).Count -gt 0) {
+        throw "An account with Id '$($Account.Id)' is already saved. Existing account was left unchanged."
     }
+    $accounts = @($settings.Accounts)
 
     $cleanLetter = if ($Account.ContainsKey('DriveLetter') -and $Account.DriveLetter) {
         [string]$Account.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     } else {
         ''
     }
+    Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter | Out-Null
 
     $item = [ordered]@{
         Id = [string]$Account.Id
@@ -234,6 +249,7 @@ function Update-CloudAccount([hashtable]$Account) {
     } else {
         $existing.DriveLetter
     }
+    Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter -ExcludeAccountId $targetId | Out-Null
 
     # Merge properties while preserving account Id, ProviderId, and Created
     $merged = [ordered]@{
