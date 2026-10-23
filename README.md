@@ -18,41 +18,43 @@
 NS Cloud Drive supports connecting both **Google Drive** and **TeraBox** accounts through a dedicated desktop interface with explicit connection validation:
 
 - **Google Drive connection flow**:
-  1. Configure your Google OAuth client ID and optional secret via environment variables (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) or standard Google desktop client JSON at `%LOCALAPPDATA%\NSCloudDrive\config\google-oauth.json`.
-  2. Click **Connect Google Drive** from the main dashboard.
-  3. Click **Sign in with Google** to launch the official Google OAuth 2.0 flow in the system browser using an RFC 8252 loopback callback on `127.0.0.1` protected by RFC 7636 PKCE S256 challenge generation.
-  4. The local listener cryptographically verifies the `state` parameter to prevent CSRF attacks.
-  5. The authorization code is exchanged for tokens with minimum necessary read-only scope (`drive.readonly`).
-  6. File querying and user quota are validated via Google Drive API v3 (`/about`, `/files`), and tokens are stored in current-user DPAPI storage with automatic token refresh retries.
-  7. Mounts to drive `G:` (or user preference) as **Google Drive**.
+  1. Click **Add Cloud Disk** -> select **Google Drive**.
+  2. Click **Sign in with Google** to launch 1-click authorization via rclone's verified desktop client with full read-write scope (`drive`). No Google Cloud Project or client ID configuration is required for standard users. (Optional custom Google Cloud client ID/secret is also supported).
+  3. The local listener cryptographically verifies the authorization callback, retrieves DPAPI-encrypted tokens, and validates quota via Google Drive API v3.
+  4. Supports multiple simultaneous Google accounts (e.g. Personal `G:` and Work `H:`) with isolated token storage.
 
 - **TeraBox connection flow**:
-  1. Click **Connect TeraBox** from the main dashboard.
-  2. The dedicated connection window opens explaining the authentication method and truthful feasibility disclosure.
-  3. The user opens the legitimate TeraBox website and completes authentication personally.
-  4. Manual session tokens are validated against `/api/check/login` and stored in current-user DPAPI storage.
-  5. Mounts to drive `T:` (or user preference) as **TeraBox** using the patched, verified rclone binary.
+  1. Click **Connect TeraBox** or **Add Cloud Disk** -> **TeraBox**.
+  2. The embedded Edge WebView2 authentication window opens.
+  3. Complete sign-in normally. NS Cloud Drive automatically extracts session parameters (`ndus`, `BDUSS`, `jsToken`, User-Agent, and regional API endpoints) without exposing credentials.
+  4. The session is validated against `/api/check/login` and stored in current-user DPAPI storage.
+  5. The local WebDAV bridge daemon (`cpx.exe terabox-bridge --port 19191`) is started with DPAPI-encrypted shared secret.
+  6. Mounts to drive `T:` (or user-chosen drive letter) in read-write mode with `--vfs-cache-mode full` and `--vfs-write-back 5s`. Files can be created, edited, copied, and streamed directly in Windows Explorer.
 
 - **Independent Multi-Drive Mounts**:
-  - Both providers can be mounted simultaneously to separate drive letters.
-  - A failure or disconnect in one provider never drops or disrupts the other.
+  - Both providers and multiple accounts can be mounted simultaneously to separate drive letters.
+  - Active mounts are reconciled across application restarts via process inspection (`Find-ActiveMountProcess`).
   - Clean unmount controls terminate rclone and WinFsp cleanly without deleting cached files.
 
 ## Running the Automated Test Suite
 
-To run all automated regression tests across the state machine, provider adapters, virtual drive manager, settings manager, UI layout constraints, and DPAPI credential helpers:
+To run all automated regression tests across the state machine, provider adapters, virtual drive manager, settings manager, UI layout constraints, DPAPI credential helpers, and live provider validation:
 
 ```powershell
 powershell.exe -NoProfile -File .\tests\Run-AllTests.ps1
 ```
 
-All 7 test suites verify:
+All 11 test suites verify:
 - Connection state lifecycle, transitions, and secret sanitization across JSON, queries, and raw tokens (`Test-ConnectionState.ps1`).
-- TeraBox provider metadata, fail-closed handling, DPAPI persistence in sandboxed storage, and scope checking (`Test-TeraBoxProvider.ps1`).
-- Google Drive provider metadata, cryptographic state entropy, RFC 7636 PKCE S256 verifiers, fail-closed handling, DPAPI persistence, rclone environment variable construction, OAuth client configuration discovery, and auth URL formatting with validation (`Test-GoogleDriveProvider.ps1`).
-- Virtual drive manager rclone binary discovery, WinFsp detection, drive availability, mount argument formatting with security flags, next available drive letter allocation, distinct provider volume labels, cache statistics, and multi-provider virtual drive status querying (`Test-VirtualDriveManager.ps1`).
-- Settings manager defaults, custom persistence, drive preferences, and Windows user logon startup registry configuration (`Test-SettingsManager.ps1`).
-- Desktop UI regression: non-conflicting parameter names (avoiding read-only `$PID`), explicit horizontal scrollbar constraints to prevent WPF layout overflow, and clean STA window initialization (`Test-DesktopUIRegression.ps1`).
+- TeraBox provider metadata, fail-closed handling, DPAPI persistence, regional host failover, and strict mode parsing (`Test-TeraBoxProvider.ps1`).
+- TeraBox WebDAV bridge discovery, DPAPI entropy key generation, and remote environment variables (`Test-TeraBoxBridgeManager.ps1`).
+- Google Drive provider metadata, PKCE verifiers, fail-closed handling, multi-account token isolation, and 1-click desktop authorization (`Test-GoogleDriveProvider.ps1`).
+- Virtual drive manager rclone binary discovery, WinFsp detection, drive availability, read-write mount arguments, active process reconciliation, and volume labeling (`Test-VirtualDriveManager.ps1`).
+- Settings manager defaults, custom persistence, drive preferences, placeholder account purging, and Windows user logon startup registry configuration (`Test-SettingsManager.ps1`).
+- Desktop UI regression: non-conflicting parameter names, explicit horizontal scrollbar constraints, single-instance mutex, and clean STA window initialization (`Test-DesktopUIRegression.ps1`).
+- Embedded WebView2 runtime detection, host verification, and non-blocking dispatcher pumps (`Test-EmbeddedBrowserWindow.ps1`).
+- End-to-end acceptance: multi-account token isolation, dynamic remotes, virtual drive status isolation, and Win32 `EmptyWorkingSet` memory trimming (`Test-EndToEndAcceptance.ps1`).
+- Write protection prevention, direct upload verification, and live provider account integrity (`Test-WriteAndUploadVerification.ps1`).
 - DPAPI config-encryption password storage, private ACLs, and plaintext absence (`Test-RcloneConfigPassword.ps1`).
 
 ## Resource & Performance Benchmark
