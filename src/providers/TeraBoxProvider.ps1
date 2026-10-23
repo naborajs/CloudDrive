@@ -9,7 +9,11 @@ function Get-TeraBoxCredentialDirectory {
     return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
 }
 
-function Get-TeraBoxCredentialFilePath {
+function Get-TeraBoxCredentialFilePath([string]$AccountId = '') {
+    if (-not [string]::IsNullOrEmpty($AccountId) -and $AccountId -ne 'terabox') {
+        $safeAccId = [regex]::Replace($AccountId, '[^a-zA-Z0-9_\-]', '_')
+        return (Join-Path (Get-TeraBoxCredentialDirectory) "terabox-session-$safeAccId.xml")
+    }
     return (Join-Path (Get-TeraBoxCredentialDirectory) 'terabox-session.xml')
 }
 
@@ -72,10 +76,20 @@ function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue 
     return $DefaultValue
 }
 
-function Get-TeraBoxStoredSession {
-    $credPath = Get-TeraBoxCredentialFilePath
+function Get-TeraBoxStoredSession([string]$AccountId = '') {
+    $credPath = Get-TeraBoxCredentialFilePath -AccountId $AccountId
     if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
-        return $null
+        # Fallback to default if account-specific file does not exist
+        if (-not [string]::IsNullOrEmpty($AccountId) -and $AccountId -ne 'terabox') {
+            $defaultPath = Get-TeraBoxCredentialFilePath
+            if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
+                $credPath = $defaultPath
+            } else {
+                return $null
+            }
+        } else {
+            return $null
+        }
     }
 
     try {
@@ -134,14 +148,15 @@ function Save-TeraBoxSession(
     [string]$Secret,
     [string]$JsToken = $null,
     [string]$BaseUrl = $null,
-    [string]$UserAgent = $null
+    [string]$UserAgent = $null,
+    [string]$AccountId = ''
 ) {
     if ([string]::IsNullOrEmpty($Secret)) {
         throw 'Cannot store empty TeraBox session secret.'
     }
 
     $credDir = Get-TeraBoxCredentialDirectory
-    $credPath = Get-TeraBoxCredentialFilePath
+    $credPath = Get-TeraBoxCredentialFilePath -AccountId $AccountId
 
     if (-not (Test-Path -LiteralPath $credDir)) {
         New-Item -ItemType Directory -Path $credDir | Out-Null
@@ -171,8 +186,8 @@ function Save-TeraBoxSession(
     }
 }
 
-function Remove-TeraBoxSession {
-    $credPath = Get-TeraBoxCredentialFilePath
+function Remove-TeraBoxSession([string]$AccountId = '') {
+    $credPath = Get-TeraBoxCredentialFilePath -AccountId $AccountId
     if (Test-Path -LiteralPath $credPath) {
         Remove-Item -LiteralPath $credPath -Force -ErrorAction SilentlyContinue
     }
@@ -202,16 +217,21 @@ function Format-TeraBoxCookieHeader([string]$Secret) {
     return "ndus=$trimmed"
 }
 
-function Get-TeraBoxRcloneEnvironment([hashtable]$SessionOverride = $null) {
-    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
+function Get-TeraBoxRcloneEnvironment(
+    [hashtable]$SessionOverride = $null,
+    [string]$AccountId = '',
+    [string]$RemoteName = 'terabox'
+) {
+    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     if (-not $session -or -not $session.Secret) {
         return @{}
     }
 
     $cookie = Format-TeraBoxCookieHeader $session.Secret
+    $safeRemote = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
     return @{
-        'RCLONE_CONFIG_TERABOX_TYPE' = 'terabox'
-        'RCLONE_CONFIG_TERABOX_COOKIE' = $cookie
+        "RCLONE_CONFIG_${safeRemote}_TYPE" = 'terabox'
+        "RCLONE_CONFIG_${safeRemote}_COOKIE" = $cookie
     }
 }
 
@@ -339,9 +359,10 @@ function Invoke-TeraBoxHttp(
 
 function Test-TeraBoxBackendSession(
     [hashtable]$SessionOverride = $null,
-    [object]$Window = $null
+    [object]$Window = $null,
+    [string]$AccountId = ''
 ) {
-    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
+    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     if (-not $session) {
         return [ordered]@{
             IsValid = $false
@@ -481,8 +502,11 @@ function Test-TeraBoxBackendSession(
     }
 }
 
-function Test-TeraBoxAccountScope([hashtable]$SessionOverride = $null) {
-    $validation = Test-TeraBoxBackendSession -SessionOverride $SessionOverride
+function Test-TeraBoxAccountScope(
+    [hashtable]$SessionOverride = $null,
+    [string]$AccountId = ''
+) {
+    $validation = Test-TeraBoxBackendSession -SessionOverride $SessionOverride -AccountId $AccountId
     if (-not $validation.IsValid) {
         return [ordered]@{
             ScopeVerified = $false
@@ -491,7 +515,7 @@ function Test-TeraBoxAccountScope([hashtable]$SessionOverride = $null) {
         }
     }
 
-    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
+    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     if ($session.Type -eq 'open-api') {
         # Official Open Platform is documented to be app-folder only
         return [ordered]@{
@@ -514,9 +538,10 @@ function Test-TeraBoxAccountScope([hashtable]$SessionOverride = $null) {
 function Get-TeraBoxFileList(
     [string]$Directory = '/',
     [hashtable]$SessionOverride = $null,
-    [object]$Window = $null
+    [object]$Window = $null,
+    [string]$AccountId = ''
 ) {
-    $scopeInfo = Test-TeraBoxAccountScope -SessionOverride $SessionOverride
+    $scopeInfo = Test-TeraBoxAccountScope -SessionOverride $SessionOverride -AccountId $AccountId
     if (-not $scopeInfo.ScopeVerified) {
         return [ordered]@{
             Success = $false
@@ -527,7 +552,7 @@ function Get-TeraBoxFileList(
         }
     }
 
-    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession }
+    $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     try {
         $activeUserAgent = if ($session.UserAgent) {
             $session.UserAgent
