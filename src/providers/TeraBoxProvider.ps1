@@ -520,6 +520,8 @@ function Get-TeraBoxFileList(
     if (-not $scopeInfo.ScopeVerified) {
         return [ordered]@{
             Success = $false
+            Directory = $Directory
+            ItemCount = 0
             Files = @()
             Error = $scopeInfo.Error
         }
@@ -554,14 +556,25 @@ function Get-TeraBoxFileList(
             }
         }
 
-        $response = $null
-        if ($Window) {
-            $response = Invoke-TeraBoxHttp -Url $listUrl -Headers $headers -TimeoutSec 15 -Window $Window
-        } else {
-            $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop
-        }
+        $response = Invoke-TeraBoxHttp -Url $listUrl -Headers $headers -TimeoutSec 15 -Window $Window
 
         $errno = Get-SafeProperty $response 'errno' $null
+        $prefix = Get-SafeProperty $response 'UrlDomainPrefix' $null
+
+        # If errno is -6 and a regional host switch prefix is present, update baseUrl and retry once
+        if (($null -eq $errno -or [int]$errno -eq -6) -and -not [string]::IsNullOrEmpty($prefix) -and $session.Type -ne 'open-api') {
+            $switchedBaseUrl = "https://$prefix.terabox.com"
+            if ($switchedBaseUrl -ne $baseUrl) {
+                $headers['Referer'] = "$switchedBaseUrl/"
+                $retryUrl = "$switchedBaseUrl/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&dir=$dirParam&page=1&num=100"
+                if ($session.JsToken) {
+                    $retryUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+                }
+                $response = Invoke-TeraBoxHttp -Url $retryUrl -Headers $headers -TimeoutSec 15 -Window $Window
+                $errno = Get-SafeProperty $response 'errno' $null
+            }
+        }
+
         if ($null -ne $errno -and [int]$errno -eq 0) {
             $items = @()
             $list = Get-SafeProperty $response 'list' $null
@@ -587,6 +600,8 @@ function Get-TeraBoxFileList(
             $errCode = if ($null -ne $errno) { [int]$errno } else { -1 }
             return [ordered]@{
                 Success = $false
+                Directory = $Directory
+                ItemCount = 0
                 Files = @()
                 Error = "TeraBox directory listing failed with code $errCode"
             }
@@ -594,6 +609,8 @@ function Get-TeraBoxFileList(
     } catch {
         return [ordered]@{
             Success = $false
+            Directory = $Directory
+            ItemCount = 0
             Files = @()
             Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message)
         }
