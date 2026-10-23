@@ -7,6 +7,7 @@ Write-Output '============================================'
 
 $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-ConnectionState.ps1'),
+    (Join-Path $PSScriptRoot 'Test-BackgroundOperationManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxProvider.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxBridgeManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-GoogleDriveProvider.ps1'),
