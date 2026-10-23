@@ -116,21 +116,13 @@ function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
         }
     } catch { }
 
-    # Clean stale MountPoints2 registry entries that cause Windows Explorer red X / offline overlays
+    # Remove only the stale Explorer cache entry for this drive letter. Server-share
+    # entries belong to unrelated user mappings and must not be cleared globally.
     try {
         $mpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2'
-        if (Test-Path -LiteralPath $mpKey) {
-            # Letter key, e.g. MountPoints2\G
-            $letterSubKey = Join-Path $mpKey $letter
-            if (Test-Path -LiteralPath $letterSubKey) {
-                Remove-Item -LiteralPath $letterSubKey -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            # Server share keys, e.g. ##server#Google Drive, ##server#TeraBox
-            Get-ChildItem -LiteralPath $mpKey -ErrorAction SilentlyContinue | Where-Object {
-                $_.PSChildName -like '##server#*'
-            } | ForEach-Object {
-                Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
+        $letterSubKey = Join-Path $mpKey $letter
+        if (Test-Path -LiteralPath $letterSubKey) {
+            Remove-Item -LiteralPath $letterSubKey -Recurse -Force -ErrorAction SilentlyContinue
         }
     } catch { }
 }
