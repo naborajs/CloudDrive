@@ -1,41 +1,45 @@
 # NS Cloud Drive Handover & Architecture Status
 
-**Reviewed & Updated:** 2026-10-23 (Phase 3 Cloud-to-Cloud Transfers, Minimal Cache & Live Network Statistics)
+**Reviewed & Updated:** 2026-10-23 (Final Production-Ready Release Gate)
 **Repository:** `C:\Users\Naboraj_sarkar\Documents\Codex\CloudDrive`
+**GitHub:** `https://github.com/naborajs/CloudDrive`
 **Branch:** `main` (synchronized with `origin/main`)
 
 ---
 
 ## 1. Executive Summary & Capabilities
 
-NS Cloud Drive has been completely modernized into an ultra-clean, production-ready Windows cloud drive management application inspired directly by Air Live Drive. Phase 3 implements reliable cloud-to-cloud file transfers between connected accounts, minimal and in-use protected local caching, and accurate real-time network transfer metrics, building upon Phase 1's fixed disk mounts and Phase 2's 3-theme interface.
+NS Cloud Drive has reached full production readiness. It is a lightweight, reliable, and secure Windows desktop application that mounts cloud storage (Google Drive and TeraBox) directly into Windows File Explorer as native virtual drives, providing seamless browsing, streaming playback, uploads, cloud-to-cloud transfers, and minimal local resource usage.
 
-### Core Capabilities:
-1. **Cloud-to-Cloud Streaming Transfers (Google Drive ↔ TeraBox & Multi-Account):**
-   - **Interactive Transfer Dialog (`Show-CloudTransferModal`):** Accessible via the "+ Transfer Files" toolbar button in the Disks view.
-   - **Dual Cloud Explorer:** Left-side source account/directory browser with file sizes, right-side destination account/directory browser.
-   - **Streaming Relay Architecture:** Streams file data in bounded memory chunks (4–8 MiB) directly between source and destination HTTP connections without writing full temporary files to the local OS drive.
-   - **Supported Directions:** Google Drive to TeraBox, TeraBox to Google Drive, and transfers between multiple Google Drive or TeraBox accounts.
-   - **Truthful Operation Transparency:** Explicitly labels transfers as "Streaming Relay" (`IsServerSide = $false`) rather than fabricating non-existent cross-provider server-side copy support.
-   - **Conflict Handling:** Supports `Skip existing files` (default/recommended) and `Overwrite`.
-   - **Pause, Resume, and Cancel:** Native Win32 thread suspension (`NtSuspendProcess`) and resumption (`NtResumeProcess`) allows pausing and resuming active transfers without killing the process or corrupting the stream. Clean cancellation terminates processes cleanly.
-2. **Accurate Real-Time Network & Transfer Statistics:**
-   - **Speed Smoothing (Exponential Moving Average):** Smooths noisy network spikes using $\alpha = 0.25$ ($\text{EMA}_t = \alpha \cdot \text{Speed}_t + (1 - \alpha) \cdot \text{EMA}_{t-1}$) to display stable, trustworthy throughput rates.
-   - **Accurate Division-by-Zero Protected ETA:** Calculates realistic remaining time from remaining bytes and smoothed speed. Suppresses ETA until sufficient throughput data is collected, and shows indeterminate progress when total file size is unknown.
-   - **Live Progress Reporting:** Emits real-time bytes transferred, total size, percentage, elapsed duration, throughput, and error counters parsed directly from rclone's structured 500ms JSON stats feed.
-3. **Cache Management & OS Drive Protection:**
-   - **In-Use File Protection (`Test-FileInUse`):** Automatically tests exclusive file handles before eviction. Files currently held by active `rclone mount` processes, media players, or in-progress transfers are strictly protected and never deleted.
-   - **Configurable Cache Location & Safety Checks (`Test-CacheDirectorySafety`):** Users can select any custom folder on secondary fixed storage. Detects and warns if the cache is placed on the operating system drive (`C:`) or low-space volumes.
-   - **LRU Size Eviction & Inactivity Cleanup (`Invoke-SafeCacheCleanup`):** Automatically purges oldest-accessed evictable files when the configured quota (`10 GB`, `20 GB`, `50 GB`, `100 GB`) is reached.
-   - **Startup Recovery (`Invoke-StartupCacheRecovery`):** Automatically cleans up orphaned temporary partial chunks (`.partial`, `.rclone-tmp`, `*~`) left behind by unexpected system reboots or application crashes.
-   - **Manual "Clean Cache" Action:** Reclaims non-locked cache files immediately and truthfully reports: `Cleaned X MB (Y files). Z files protected in-use.`
-4. **Three Native Themes (Pure Black, Translucent, Pure White):**
-   - High-contrast OLED Pure Black (`#000000`), Dark Acrylic Glass Translucent (`#13161CE6`), and Clean Light Pure White (`#F8FAFC`).
-5. **Phase 1 & 2 Mount Stability:**
-   - Fixed Disk local mounting (no network redirector "red X" or `FUSE-rclone` issues).
-   - Local loopback WebDAV bridge for TeraBox (`cpx.exe terabox-bridge --port 19191`) with DPAPI encryption.
-   - Multi-account isolation for Google Drive and TeraBox.
-   - Ultra-low idle RAM (~10-15 MB on minimize via Win32 `EmptyWorkingSet`).
+### Key Capabilities Verified:
+1. **Virtual Drive Mounting (Fixed Disk Integration):**
+   - WinFsp-backed local fixed-disk filesystem mount (`FixedDisk`) eliminating network redirector "red X" artifacts, UNC drive issues, or `FUSE-rclone` labels.
+   - Distinct provider and account volume labels in File Explorer (e.g. `Google Drive (G:)`, `TeraBox (T:)`).
+   - Read-write support with full VFS caching (`--vfs-cache-mode full`, `--vfs-write-back 5s`) enabling native drag-and-drop file copying and media streaming.
+   - Dynamic drive letter conflict resolution with automatic allocation of the next available drive letter.
+2. **Provider Implementations:**
+   - **Google Drive:** One-click desktop OAuth 2.0 loopback flow (RFC 8252) with RFC 7636 PKCE, cryptographic state CSRF defense, and automatic token refresh on HTTP 401. Multi-account credential isolation and dynamic per-account rclone remote aliases (`gdrive_<id>`).
+   - **TeraBox:** Local loopback WebDAV bridge daemon (`cpx.exe terabox-bridge --port 19191`) with DPAPI-encrypted secret storage. Supports interactive Edge WebView2 sign-in with isolated profile and manual BYOC session fallback.
+3. **Cloud-to-Cloud Streaming Transfers:**
+   - Dedicated themed modal (`Show-CloudTransferModal`) with dual cloud directory browsers.
+   - Streaming relay mode (`rclone copy` / `rclone move`) transferring files in bounded memory buffers without writing intermediate full-size files to the operating system drive.
+   - Direction support: Google Drive to TeraBox, TeraBox to Google Drive, and transfers between multiple accounts.
+   - Pause and resume transfers via native Win32 process suspension (`NtSuspendProcess` / `NtResumeProcess`).
+   - Exponential Moving Average speed smoothing ($\alpha = 0.25$) and division-by-zero protected ETA calculations.
+4. **Cache Policy & Operating System Safety:**
+   - In-use file lock detection (`Test-FileInUse`) guaranteeing that active streaming files, open handles, and pending uploads are never evicted.
+   - OS drive protection warning if cache is placed on `%SystemDrive%`.
+   - LRU quota bounding (configurable: 10 GB, 20 GB, 50 GB, 100 GB, 200 GB) based on file access times.
+   - Startup recovery of orphaned partial files (`.partial`, `.rclone-tmp`, `*~`).
+5. **Air Live Drive-Inspired 3-Theme User Interface:**
+   - Three native themes: **Pure Black** (`#000000`), **Translucent Acrylic** (`#13161CE6`), and **Pure White** (`#F8FAFC`).
+   - Clean navigation sidebar (Disks, Options, Help), dynamic multi-account cards, quick actions (Explorer, Upload, Options, Disconnect).
+   - Low resource footprint: idle RAM trimmed via Win32 `EmptyWorkingSet` down to ~10 MB when minimized to the system tray.
+6. **Hardened Security & Process Argument Defense:**
+   - Command line argument escaping (`Format-SafeProcessArgument`) protecting all child process launches against flag injection.
+   - Cloud path traversal normalization (`Normalize-CloudPath`) resolving `.` and `..` segments and stripping control characters.
+   - Strict Windows DPAPI encryption at rest with directory-aware ACL inheritance (`ContainerInherit | ObjectInherit`) on credential stores.
+   - Multi-pattern diagnostic redaction (`Format-SanitizedDiagnosticMessage`) scrubbing tokens, cookies, authorization headers, and keys.
 
 ---
 
@@ -43,42 +47,47 @@ NS Cloud Drive has been completely modernized into an ultra-clean, production-re
 
 | Component | Path | Description |
 | :--- | :--- | :--- |
-| **Main Application** | `src/NSCloudDrive.ps1` | WPF desktop application with 3-theme engine, Air Live Drive navigation, account cards, transfer action, cache settings, and memory trimming. |
-| **Cloud Transfer Manager** | `src/services/CloudTransferManager.ps1` | Manages streaming relay transfers between remotes, rclone JSON stats monitoring, speed smoothing, ETA calculations, and pause/resume. |
+| **Main Application** | `src/NSCloudDrive.ps1` | Primary WPF desktop application, 3-theme engine, navigation, account cards, transfer integration, cache settings, and memory trimming. |
+| **Cloud Transfer Manager** | `src/services/CloudTransferManager.ps1` | Manages streaming relay transfers between cloud remotes, path normalization, Win32 argument escaping, speed smoothing, and pause/resume. |
 | **Cache Manager** | `src/services/CacheManager.ps1` | In-use file lock detection (`Test-FileInUse`), LRU cache quota enforcement, OS drive safety checks, and startup recovery. |
 | **Connection & Setup UI** | `src/ui/ProviderConnectionWindow.ps1` | Themed modal dialogs: `Show-CloudTransferModal`, `Show-AddCloudDiskModal`, `Show-CloudAccountSetupModal`, `Get-ModalThemePalette`. |
 | **Settings Manager** | `src/services/SettingsManager.ps1` | Multi-account registry, 3-theme resolution (`Resolve-AppTheme`), cache quota policies, and Windows startup management. |
 | **Virtual Drive Manager** | `src/services/VirtualDriveManager.ps1` | Orchestrates read-write `rclone mount` with WinFsp fixed disk mode, active mount reconciliation, VFS full caching, and clean unmounting. |
 | **TeraBox Bridge Manager** | `src/services/TeraBoxBridgeManager.ps1` | Manages local loopback WebDAV daemon, DPAPI secret exchange, and rclone environment configuration. |
 | **Embedded Browser** | `src/ui/EmbeddedBrowserWindow.ps1` | Edge WebView2 modal handling interactive sign-in, user-agent extraction, cookie synchronization, and clean lifecycle management. |
-| **TeraBox Provider** | `src/providers/TeraBoxProvider.ps1` | Session validation, regional API dispatch, quota retrieval, and DPAPI credential persistence. |
+| **TeraBox Provider** | `src/providers/TeraBoxProvider.ps1` | Session validation, regional API dispatch, quota retrieval, directory-aware DPAPI credential persistence, and strict ACLs. |
 | **Google Drive Provider** | `src/providers/GoogleDriveProvider.ps1` | One-click rclone desktop OAuth, token refresh lifecycle, multi-account token isolation, and dynamic rclone remotes. |
 
 ---
 
-## 3. Test Suites & Verification
+## 3. Automated Test Suite & CI
 
-All 15 automated test suites pass with 100% success rate:
+The repository contains 15 automated test suites executed via `tests/Run-AllTests.ps1`. All 15 test suites pass cleanly (15 Passed, 0 Failed):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/Run-AllTests.ps1
 ```
 
-- `Test-ConnectionState.ps1` — State machine and secret sanitization.
-- `Test-TeraBoxProvider.ps1` — DPAPI session load/save, quota parsing, and error-handling.
-- `Test-TeraBoxBridgeManager.ps1` — WebDAV daemon discovery, DPAPI entropy key generation, and remote environment variables.
-- `Test-GoogleDriveProvider.ps1` — OAuth state, PKCE verifier, multi-account token isolation, and dynamic remotes.
-- `Test-VirtualDriveManager.ps1` — WinFsp detection, rclone mount argument generation (read-write default & fixed disk), and drive letter conflict checks.
-- `Test-SettingsManager.ps1` — Multi-account registry CRUD, settings serialization, placeholder purge, and startup tasks.
-- `Test-DesktopUIRegression.ps1` — STA window construction, modal interfaces, single-instance mutex, and scrollbar constraints.
-- `Test-EmbeddedBrowserWindow.ps1` — WebView2 runtime detection, host verification, and non-blocking dispatcher pumps.
-- `Test-MultiAccountIsolation.ps1` — Multi-account credential isolation, WebView2 profiles, bridge homes, and truthful drive states.
-- `Test-ThemesAndAccountCustomization.ps1` — 3-theme palette generation, runtime theme switching in STA, account customization field preservation, and diagnostics safety.
-- `Test-CloudTransferManager.ps1` — Streaming relay remote mapping, speed smoothing (EMA), division-by-zero protected ETA, transfer lifecycle, and data integrity.
-- `Test-CacheManagement.ps1` — In-use file lock detection, detailed statistics, LRU size quota eviction, OS drive safety warnings, and startup partial recovery.
-- `Test-EndToEndAcceptance.ps1` — Multi-account token isolation, WebDAV environment, drive status isolation, and memory trimming (~10 MB working set).
-- `Test-WriteAndUploadVerification.ps1` — Read-write mount arguments, upload verification, and live account integrity.
-- `Test-RcloneConfigPassword.ps1` — DPAPI encryption and access control verification.
+1. `Test-ConnectionState.ps1` — State machine transitions, fail-closed handling, and secret sanitization across JSON, queries, and raw tokens.
+2. `Test-TeraBoxProvider.ps1` — DPAPI session load/save, quota parsing, and error-handling.
+3. `Test-TeraBoxBridgeManager.ps1` — WebDAV daemon discovery, DPAPI entropy key generation, and remote environment variables.
+4. `Test-GoogleDriveProvider.ps1` — OAuth state, PKCE verifier, multi-account token isolation, and dynamic remotes.
+5. `Test-VirtualDriveManager.ps1` — WinFsp detection, rclone mount argument generation (read-write default & fixed disk), and drive letter conflict checks.
+6. `Test-SettingsManager.ps1` — Multi-account registry CRUD, settings serialization, placeholder purge, and startup tasks.
+7. `Test-DesktopUIRegression.ps1` — STA window construction, modal interfaces, single-instance mutex, and scrollbar constraints.
+8. `Test-EmbeddedBrowserWindow.ps1` — WebView2 runtime detection, host verification, and non-blocking dispatcher pumps.
+9. `Test-MultiAccountIsolation.ps1` — Multi-account credential isolation, WebView2 profiles, bridge homes, and truthful drive states.
+10. `Test-ThemesAndAccountCustomization.ps1` — 3-theme palette generation, runtime theme switching in STA, account customization field preservation, and diagnostics safety.
+11. `Test-CloudTransferManager.ps1` — Streaming relay remote mapping, speed smoothing (EMA), division-by-zero protected ETA, transfer lifecycle, path traversal defense, and argument escaping.
+12. `Test-CacheManagement.ps1` — In-use file lock detection, detailed statistics, LRU size quota eviction, OS drive safety warnings, and startup partial recovery.
+13. `Test-EndToEndAcceptance.ps1` — Multi-account token isolation, WebDAV environment, drive status isolation, and memory trimming (~10 MB working set).
+14. `Test-WriteAndUploadVerification.ps1` — Read-write mount arguments, upload verification, and live account integrity.
+15. `Test-RcloneConfigPassword.ps1` — DPAPI encryption and access control verification.
+
+**GitHub Actions CI (`.github/workflows/ci.yml`):**
+- Automated PowerShell AST syntax validation across all scripts.
+- Secret scanning detecting any unredacted credential patterns.
+- Automated test runner execution on `windows-latest`.
 
 ---
 
@@ -90,5 +99,5 @@ From repository root:
 ```
 or via PowerShell:
 ```powershell
-powershell.exe -NoProfile -STA -File .\src\NSCloudDrive.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
 ```
