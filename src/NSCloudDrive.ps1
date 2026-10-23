@@ -28,6 +28,7 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
+. (Join-Path $PSScriptRoot 'services\ExplorerIntegration.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
@@ -1721,6 +1722,9 @@ function Complete-AvailableStartupWorkers {
                     StartedAt = $null
                     UpdatedAt = [DateTime]::UtcNow
                 }
+                if ($result.State -in @('Mounted', 'ExistingProcess')) {
+                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
+                }
             }
         } catch { }
         $script:StartupAutoMountWorker = $null
@@ -1741,6 +1745,9 @@ function Complete-AvailableStartupWorkers {
                         DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { '' }
                         StartedAt = $null
                         UpdatedAt = [DateTime]::UtcNow
+                    }
+                    if ($result.State -eq 'Mounted') {
+                        Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
                     }
                 }
                 if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
@@ -2214,6 +2221,8 @@ function Update-AllUIState {
                         # its previous letter everywhere.
                         Update-CloudAccount -Account $updatedAccount | Out-Null
                         $currAcc.DriveLetter = $sel
+                        Remove-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter $previousLetter
+                        Register-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter $sel
                     } catch {
                         $aCombo.SelectedItem = "${previousLetter}:"
                         [System.Windows.MessageBox]::Show((Format-SanitizedDiagnosticMessage $_.Exception.Message), 'Drive letter unavailable', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
@@ -2249,6 +2258,7 @@ function Update-AllUIState {
             $aRemBtn = New-QuickIconButton ([string][char]0x2715) 'Disconnect and Remove'
             $aRemBtn.Add_Click({
                 Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
+                Remove-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter ([string]$currAcc.DriveLetter)
                 Remove-CloudAccount -AccountId $currAcc.Id | Out-Null
                 Update-AllUIState
             })
@@ -2331,6 +2341,7 @@ $gdActionBtn.Add_Click({
         $gdActionBtn.IsEnabled = $false
         try {
             Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
+            Remove-ProviderExplorerIcon -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter
         } finally {
             $gdActionBtn.IsEnabled = $true
             Update-AllUIState
@@ -2438,6 +2449,7 @@ $gdRemoveBtn.Add_Click({
     if ($conf -eq [System.Windows.MessageBoxResult]::Yes) {
         Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
         Remove-GoogleDriveSession
+        Remove-NSCloudDriveOwnedExplorerIcons
         $gdErrorText.Visibility = 'Collapsed'
         Update-AllUIState
     }
@@ -2455,6 +2467,7 @@ $tbActionBtn.Add_Click({
         $tbActionBtn.IsEnabled = $false
         try {
             Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
+            Remove-ProviderExplorerIcon -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter
         } finally {
             $tbActionBtn.IsEnabled = $true
             Update-AllUIState
@@ -2553,6 +2566,7 @@ $tbRemoveBtn.Add_Click({
     if ($conf -eq [System.Windows.MessageBoxResult]::Yes) {
         Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
         Remove-TeraBoxSession
+        Remove-NSCloudDriveOwnedExplorerIcons
         $tbErrorText.Visibility = 'Collapsed'
         Update-AllUIState
     }
@@ -2600,6 +2614,7 @@ $menuExit = $trayMenu.Items.Add('Exit NS Cloud Drive')
 $menuExit.Add_Click({
     $script:IsExiting = $true
     Stop-VirtualDriveMount | Out-Null
+    Remove-NSCloudDriveOwnedExplorerIcons
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
     if ($script:RestoreEvent) {
@@ -2636,6 +2651,7 @@ $window.Add_Closing({
         } else {
             $script:IsExiting = $true
             Stop-VirtualDriveMount | Out-Null
+            Remove-NSCloudDriveOwnedExplorerIcons
             $notifyIcon.Visible = $false
             $notifyIcon.Dispose()
             if ($script:RestoreEvent) {
@@ -2660,6 +2676,54 @@ $window.Add_StateChanged({
         Invoke-MemoryTrim
     }
 })
+
+# ==============================================================================
+# EXPLORER DRIVE ICON LIFECYCLE
+# ==============================================================================
+# Only verified mounts get their Explorer icon registered, and only icons this
+# application stamped are removed. Registration is per-user (HKCU DriveIcons),
+# fails closed on foreign registrations, and never blocks the mount flow.
+function Register-ProviderExplorerIcon([string]$ProviderId, [string]$DriveLetter) {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter) -or [string]::IsNullOrWhiteSpace($ProviderId)) { return }
+    $cleanLetter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    if ($cleanLetter.Length -ne 1) { return }
+    try { Invoke-NSCloudDriveExplorerIconRegistration -Action Register -DriveLetter $cleanLetter -ProviderId ([string]$ProviderId) | Out-Null } catch { }
+}
+
+# Registers the Explorer icon for a mounted saved account by resolving its
+# provider from the persisted record (mount results only carry ids/letters).
+function Register-ProviderExplorerIconViaAccount([string]$AccountId, [string]$DriveLetter) {
+    try {
+        $account = Get-CloudAccount -AccountId $AccountId
+        if ($account) { Register-ProviderExplorerIcon -ProviderId ([string]$account.ProviderId) -DriveLetter $DriveLetter }
+    } catch { }
+}
+
+function Remove-ProviderExplorerIcon([string]$ProviderId, [string]$DriveLetter) {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
+    $cleanLetter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    if ($cleanLetter.Length -ne 1) { return }
+    try { Invoke-NSCloudDriveExplorerIconRegistration -Action Remove -DriveLetter $cleanLetter -ProviderId ([string]$ProviderId) | Out-Null } catch { }
+}
+
+# Removes every Explorer icon this application owns (per the NSCloudDriveOwner
+# stamp), regardless of which letter currently maps to which provider. Used on
+# shutdown and provider removal so app-owned letters stay clean when idle.
+function Remove-NSCloudDriveOwnedExplorerIcons {
+    $letters = @($script:GDriveLetter, $script:TeraBoxLetter)
+    try { $letters += @((Get-CloudAccounts) | ForEach-Object { ([string]$_.DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\') }) } catch { }
+    foreach ($letter in ($letters | Select-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($letter)) { continue }
+        if ($letter.Length -ne 1 -or $letter -notmatch '^[A-Z]$') { continue }
+        try {
+            $registration = Get-NSCloudDriveExplorerIconRegistration $letter
+            if ($registration.IsOwned -and $registration.IconPath) {
+                $rawIconPath = ([string]$registration.IconPath) -replace ',0$',''
+                Remove-NSCloudDriveExplorerIcon -DriveLetter $letter -ExpectedIconPath $rawIconPath | Out-Null
+            }
+        } catch { }
+    }
+}
 
 # ==============================================================================
 # LEGACY PROVIDER-CARD MOUNT WORKERS
@@ -2771,6 +2835,7 @@ function Complete-AvailableLegacyMountWorkers {
         } catch { }
         $script:LegacyMountStates[$providerKey] = $final
         if ($final.State -eq 'Mounted') {
+            Register-ProviderExplorerIcon -ProviderId $providerKey -DriveLetter ([string]$final.DriveLetter)
             if ($script:Settings.OpenExplorerOnMount -and $final.DriveLetter) {
                 try { Start-ExplorerWindow ($final.DriveLetter + ':\') } catch { }
             }
