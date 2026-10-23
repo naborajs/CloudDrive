@@ -15,6 +15,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-DesktopUIRegression.ps1'),
     (Join-Path $PSScriptRoot 'Test-EmbeddedBrowserWindow.ps1'),
     (Join-Path $PSScriptRoot 'Test-MultiAccountIsolation.ps1'),
+    (Join-Path $PSScriptRoot 'Test-ThemesAndAccountCustomization.ps1'),
     (Join-Path $PSScriptRoot 'Test-EndToEndAcceptance.ps1'),
     (Join-Path $PSScriptRoot 'Test-WriteAndUploadVerification.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
