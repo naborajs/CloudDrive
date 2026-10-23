@@ -165,6 +165,7 @@ function Initialize-WebView2Assemblies {
 
 function Show-TeraBoxEmbeddedLoginWindow(
     [System.Windows.Window]$Owner = $null,
+    [string]$AccountId = '',
     [scriptblock]$OnLoginSucceeded = $null,
     [scriptblock]$OnStateChanged = $null
 ) {
@@ -259,11 +260,17 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $statusBlock.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
     $textStack.Children.Add($statusBlock) | Out-Null
 
-    # WebView2 container
+    # WebView2 container with isolated user profile per account
     $wv = [Microsoft.Web.WebView2.Wpf.WebView2]::new()
     $props = [Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties]::new()
     $props.BrowserExecutableFolder = $wvInfo.RuntimePath
-    $props.UserDataFolder = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\webview2-profile'
+    $profileDir = if (-not [string]::IsNullOrEmpty($AccountId)) {
+        Join-Path $env:LOCALAPPDATA "NSCloudDrive\webview2-profile\$AccountId"
+    } else {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive\webview2-profile'
+    }
+    [void](New-Item -ItemType Directory -Path $profileDir -Force -ErrorAction SilentlyContinue)
+    $props.UserDataFolder = $profileDir
     $wv.CreationProperties = $props
     [System.Windows.Controls.Grid]::SetRow($wv, 1)
     $rootGrid.Children.Add($wv) | Out-Null
@@ -438,7 +445,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
 
                 # Store session with DPAPI (including active BaseUrl and UserAgent)
                 $activeOrigin = if ($testCheck.UserInfo -and $testCheck.UserInfo.BaseUrl) { $testCheck.UserInfo.BaseUrl } else { $origin }
-                Save-TeraBoxSession -Type 'web-session' -Secret $cookieHeader -JsToken $jsToken -BaseUrl $activeOrigin -UserAgent $ua
+                Save-TeraBoxSession -Type 'web-session' -Secret $cookieHeader -JsToken $jsToken -BaseUrl $activeOrigin -UserAgent $ua -AccountId $AccountId
 
                 $scope = Test-TeraBoxAccountScope -SessionOverride $sessionOverride
                 $files = Get-TeraBoxFileList -Directory $scope.RootPath -SessionOverride $sessionOverride -Window $activeWin
@@ -450,6 +457,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
 
                 $script:SessionResult = [ordered]@{
                     Success = $true
+                    AccountId = $AccountId
                     UserName = $userName
                     ItemCount = $fileCount
                     Cookie = $cookieHeader
@@ -461,12 +469,6 @@ function Show-TeraBoxEmbeddedLoginWindow(
                 if ($OnLoginSucceeded) {
                     & $OnLoginSucceeded $script:SessionResult
                 }
-
-                # Clear browsing data from the isolated embedded profile
-                try {
-                    $clearTask = $wv.CoreWebView2.Profile.ClearBrowsingDataAsync()
-                    [void](Wait-WpfTask -Task $clearTask -TimeoutMs 2000 -Window $activeWin)
-                } catch { }
 
                 # Brief delay so user sees confirmed success before window closes
                 $closeTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -542,7 +544,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
             # If still not marked complete, check if a valid DPAPI session already exists
             if (-not $script:LoginCompleted) {
                 try {
-                    $savedSession = Get-TeraBoxSession
+                    $savedSession = Get-TeraBoxStoredSession -AccountId $AccountId
                     if ($savedSession -and $savedSession.Secret) {
                         $savedCheck = Test-TeraBoxBackendSession -SessionOverride $savedSession -Window $browserWin
                         if ($savedCheck.IsValid) {
@@ -550,6 +552,7 @@ function Show-TeraBoxEmbeddedLoginWindow(
                             $uName = if ($savedCheck.UserInfo -and $savedCheck.UserInfo.UserName) { $savedCheck.UserInfo.UserName } else { 'TeraBox User' }
                             $script:SessionResult = [ordered]@{
                                 Success = $true
+                                AccountId = $AccountId
                                 UserName = $uName
                                 ItemCount = 0
                                 Cookie = $savedSession.Secret
