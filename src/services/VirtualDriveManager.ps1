@@ -84,6 +84,22 @@ function Test-DriveLetterAvailable([string]$DriveLetter) {
     return (-not $used)
 }
 
+function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    if ($letter.Length -ne 1) { return }
+
+    # Clean orphaned network redirector mapping if present (eliminates Explorer red X artifacts)
+    try {
+        $null = & net.exe use "$letter`:" /delete /y 2>&1
+    } catch { }
+
+    # Clean orphaned subst mapping if present
+    try {
+        $null = & subst.exe "$letter`:" /d 2>&1
+    } catch { }
+}
+
 function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
     $cleanPref = $PreferredLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($cleanPref.Length -eq 1 -and (Test-DriveLetterAvailable $cleanPref)) {
@@ -197,14 +213,12 @@ function Get-VirtualDriveStatus(
         try { $freeSpace = [int64]$driveInfo.AvailableFreeSpace } catch { }
         try { $totalSize = [int64]$driveInfo.TotalSize } catch { }
 
-        # A drive is considered mounted if:
-        # 1. An active rclone mount process is running for this drive letter, OR
-        # 2. It is an accessible WinFsp/FUSE/network drive with matching volume label
+        # A drive is considered mounted ONLY if it is physically accessible AND supported by an active process or driver
         $isAccessible = $false
         try { $isAccessible = Test-Path -LiteralPath $driveRoot } catch { }
 
-        $isManagedMount = $processAlive -or (
-            $isAccessible -and (
+        $isManagedMount = $isAccessible -and (
+            $processAlive -or (
                 ($format -and ($format -like '*WinFsp*' -or $format -like '*FUSE*' -or $format -like '*NTFS*')) -and
                 ($volumeLabel -match '(?i)Google|TeraBox|CloudDrive|Cloud')
             )
@@ -248,7 +262,8 @@ function Build-RcloneMountArguments(
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf'),
-    [switch]$ReadOnly = $false
+    [switch]$ReadOnly = $false,
+    [switch]$FixedDisk = $false
 ) {
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     $driveRoot = "$letter`:\"
@@ -274,8 +289,11 @@ function Build-RcloneMountArguments(
         $args += '--read-only'
     }
 
+    if (-not $FixedDisk) {
+        $args += '--network-mode'
+    }
+
     $args += @(
-        '--network-mode',
         '--volname', $volName,
         '--cache-dir', $safeCache,
         '--vfs-cache-mode', 'full',
@@ -350,9 +368,12 @@ function Start-VirtualDriveMount(
         'NS Cloud Drive'
     }
 
+    # Clean any stale/orphaned network or subst mapping for this drive letter to prevent Explorer red X artifacts
+    Clear-StaleDriveLetterMapping -DriveLetter $letter
+
     # Isolated cache directory per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -ReadOnly:$ReadOnly
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -ReadOnly:$ReadOnly -FixedDisk
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
@@ -410,12 +431,14 @@ function Stop-VirtualDriveMount(
 
     # Determine which targets to stop
     $targets = @()
+    $lettersToClean = @()
     if (-not [string]::IsNullOrEmpty($AccountId)) {
         $targets += $AccountId
     } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
         $targets += $ProviderId
     } elseif (-not [string]::IsNullOrEmpty($DriveLetter)) {
         $cleanLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+        $lettersToClean += $cleanLetter
         foreach ($pidKey in $script:ProviderDriveMapping.Keys) {
             if ($script:ProviderDriveMapping[$pidKey] -eq $cleanLetter) {
                 $targets += $pidKey
@@ -426,6 +449,9 @@ function Stop-VirtualDriveMount(
     }
 
     foreach ($target in $targets) {
+        if ($script:ProviderDriveMapping.ContainsKey($target)) {
+            $lettersToClean += $script:ProviderDriveMapping[$target]
+        }
         if ($script:ActiveMountProcesses.ContainsKey($target)) {
             $p = $script:ActiveMountProcesses[$target]
             if ($p -and (-not $p.HasExited)) {
@@ -449,6 +475,11 @@ function Stop-VirtualDriveMount(
             $stoppedAny = $true
         } catch { }
         $script:MountProcess = $null
+    }
+
+    # Clean any stale network redirector or subst mappings for affected drive letters
+    foreach ($cl in ($lettersToClean | Select-Object -Unique)) {
+        Clear-StaleDriveLetterMapping -DriveLetter $cl
     }
 
     # If stopping TeraBox, also gracefully terminate TeraBox bridge daemon
