@@ -435,7 +435,8 @@ function Exchange-GoogleAuthCode(
     [string]$ClientSecret,
     [string]$Code,
     [string]$RedirectUri,
-    [string]$CodeVerifier = $null
+    [string]$CodeVerifier = $null,
+    [string]$AccountId = ''
 ) {
     $body = @{
         client_id = $ClientId
@@ -461,7 +462,7 @@ function Exchange-GoogleAuthCode(
                 scope = $tokenResponse.scope
                 obtained_at = [DateTime]::UtcNow.ToString('o')
             }
-            Save-GoogleDriveTokens -TokenData $tokenData
+            Save-GoogleDriveTokens -TokenData $tokenData -AccountId $AccountId
             return [ordered]@{
                 Success = $true
                 Tokens = $tokenData
@@ -479,6 +480,150 @@ function Exchange-GoogleAuthCode(
             Tokens = $null
             Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message)
         }
+    }
+}
+
+function Find-GoogleRcloneBinary {
+    if (Get-Command 'Find-RcloneBinary' -ErrorAction SilentlyContinue) {
+        $found = Find-RcloneBinary
+        if ($found) { return $found }
+    }
+    $localTool = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe'
+    if (Test-Path -LiteralPath $localTool) { return $localTool }
+    $onPath = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Invoke-GoogleRcloneAuthorize([string]$AccountId = '', [int]$TimeoutSeconds = 120) {
+    $rclone = Find-GoogleRcloneBinary
+    if (-not $rclone) {
+        return [ordered]@{
+            Success = $false
+            Error = 'rclone.exe was not found to execute Google Drive authorization.'
+            Tokens = $null
+        }
+    }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $rclone
+    $psi.Arguments = 'authorize "drive"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.HasExited) {
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
+            try { $proc.Kill() } catch { }
+            return [ordered]@{
+                Success = $false
+                Error = "Google Drive authorization timed out after $TimeoutSeconds seconds."
+                Tokens = $null
+            }
+        }
+        [System.Threading.Thread]::Sleep(250)
+    }
+
+    $outText = $stdoutTask.Result
+    $errText = $stderrTask.Result
+
+    # Extract JSON between "Paste the following into your remote machine --->" and "<---End paste" or find {"access_token"
+    $match = [regex]::Match($outText, '\{[\s\S]*"access_token"[\s\S]*\}')
+    if (-not $match.Success) {
+        $match = [regex]::Match($errText, '\{[\s\S]*"access_token"[\s\S]*\}')
+    }
+
+    if ($match.Success) {
+        try {
+            $tokenObj = $match.Value | ConvertFrom-Json
+            $tokenData = [ordered]@{
+                access_token = [string]$tokenObj.access_token
+                refresh_token = if ($tokenObj.PSObject.Properties['refresh_token'] -and $tokenObj.refresh_token) { [string]$tokenObj.refresh_token } else { $null }
+                token_type = if ($tokenObj.PSObject.Properties['token_type'] -and $tokenObj.token_type) { [string]$tokenObj.token_type } else { 'Bearer' }
+                expires_in = if ($tokenObj.PSObject.Properties['expiry'] -and $tokenObj.expiry) {
+                    try {
+                        [int]([DateTime]::Parse($tokenObj.expiry) - [DateTime]::UtcNow).TotalSeconds
+                    } catch { 3600 }
+                } else { 3600 }
+                scope = 'https://www.googleapis.com/auth/drive'
+                obtained_at = [DateTime]::UtcNow.ToString('o')
+            }
+
+            Save-GoogleDriveTokens -TokenData $tokenData -AccountId $AccountId
+            return [ordered]@{
+                Success = $true
+                Tokens = $tokenData
+                Error = $null
+            }
+        } catch {
+            return [ordered]@{
+                Success = $false
+                Tokens = $null
+                Error = "Failed to parse token payload: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    return [ordered]@{
+        Success = $false
+        Tokens = $null
+        Error = "Google Drive authorization cancelled or failed to produce tokens: $errText"
+    }
+}
+
+function Start-GoogleOAuthFlow(
+    [string]$ClientId,
+    [string]$ClientSecret = $null,
+    [string]$AccountId = '',
+    [int]$TimeoutSeconds = 120,
+    [scriptblock]$CancelCheck = $null
+) {
+    $state = New-OAuthState
+    $verifier = New-PkceVerifier
+    $challenge = New-PkceChallenge -Verifier $verifier
+    $listenerCtx = Start-OAuthLoopbackListener -ExpectedState $state -TimeoutSeconds $TimeoutSeconds
+    $authUrl = Build-GoogleAuthorizationUrl -ClientId $ClientId -RedirectUri $listenerCtx.RedirectUri -State $state -CodeChallenge $challenge -Scope 'https://www.googleapis.com/auth/drive'
+
+    [System.Diagnostics.Process]::Start($authUrl) | Out-Null
+    $loopbackRes = Wait-OAuthLoopbackResponse -ListenerContext $listenerCtx -CancelCheck $CancelCheck
+
+    if (-not $loopbackRes.Success) {
+        return [ordered]@{
+            Success = $false
+            Tokens = $null
+            Error = $loopbackRes.Error
+        }
+    }
+
+    $tokenRes = Exchange-GoogleAuthCode -ClientId $ClientId -ClientSecret $ClientSecret -Code $loopbackRes.Code -RedirectUri $listenerCtx.RedirectUri -CodeVerifier $verifier -AccountId $AccountId
+    return $tokenRes
+}
+
+function Invoke-GoogleDriveAuthorization(
+    [string]$AccountId = '',
+    [int]$TimeoutSeconds = 120,
+    [scriptblock]$CancelCheck = $null
+) {
+    $oauthConfig = Get-GoogleOAuthConfig
+    if ($oauthConfig.IsConfigured -and $oauthConfig.ClientId) {
+        return (Start-GoogleOAuthFlow -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -AccountId $AccountId -TimeoutSeconds $TimeoutSeconds -CancelCheck $CancelCheck)
+    }
+
+    $rclonePath = Find-GoogleRcloneBinary
+    if ($rclonePath) {
+        return (Invoke-GoogleRcloneAuthorize -AccountId $AccountId -TimeoutSeconds $TimeoutSeconds)
+    }
+
+    return [ordered]@{
+        Success = $false
+        Tokens = $null
+        Error = "Google Drive authorization requires a configured OAuth Client ID or rclone binary. Set GOOGLE_CLIENT_ID or configure client_secret.json in %LOCALAPPDATA%\NSCloudDrive\config."
     }
 }
 
@@ -654,7 +799,11 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     }
 }
 
-function Get-GoogleDriveRcloneEnvironment([string]$AccountId = '', [string]$RemoteName = 'gdrive') {
+function Get-GoogleDriveRcloneEnvironment(
+    [string]$AccountId = '',
+    [string]$RemoteName = 'gdrive',
+    [string]$Scope = 'drive'
+) {
     $tokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
     $oauthConfig = Get-GoogleOAuthConfig
     if (-not $tokens -or -not $tokens.access_token) {
@@ -684,7 +833,7 @@ function Get-GoogleDriveRcloneEnvironment([string]$AccountId = '', [string]$Remo
 
     $envMap = @{
         "RCLONE_CONFIG_${upperRemote}_TYPE" = 'drive'
-        "RCLONE_CONFIG_${upperRemote}_SCOPE" = 'drive.readonly'
+        "RCLONE_CONFIG_${upperRemote}_SCOPE" = $Scope
         "RCLONE_CONFIG_${upperRemote}_TOKEN" = $tokenJson
     }
 
