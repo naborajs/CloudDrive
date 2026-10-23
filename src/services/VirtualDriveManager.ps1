@@ -292,6 +292,7 @@ function Build-RcloneMountArguments(
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf'),
+    [string]$LogFile = '',
     [switch]$ReadOnly = $false,
     [switch]$FixedDisk = $false
 ) {
@@ -342,6 +343,13 @@ function Build-RcloneMountArguments(
     if (-not [string]::IsNullOrEmpty($ConfigPath)) {
         $args += @('--config', $ConfigPath)
     }
+
+    if (-not [string]::IsNullOrEmpty($LogFile)) {
+        $args += @('--log-file', $LogFile)
+    }
+
+    # Set WinFsp filesystem name to NTFS so Windows File Explorer displays clean volume format
+    $args += @('--fuse-flag', '--FileSystemName=NTFS')
 
     return $args
 }
@@ -403,9 +411,25 @@ function Start-VirtualDriveMount(
     # Clean any stale/orphaned network or subst mapping for this drive letter to prevent Explorer red X artifacts
     Clear-StaleDriveLetterMapping -DriveLetter $letter
 
+    # Prepare rotating log file for this mount under %LOCALAPPDATA%\NSCloudDrive\logs\
+    $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+    if (-not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    $logPath = Join-Path $logDir "rclone-$mountKey.log"
+    if (Test-Path -LiteralPath $logPath) {
+        try {
+            $fi = [System.IO.FileInfo]::new($logPath)
+            if ($fi.Length -gt 5MB) {
+                $oldLog = Join-Path $logDir "rclone-$mountKey.1.log"
+                Move-Item -LiteralPath $logPath -Destination $oldLog -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+
     # Isolated cache directory per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -ReadOnly:$ReadOnly -FixedDisk
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -LogFile $logPath -ReadOnly:$ReadOnly -FixedDisk
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
@@ -415,7 +439,8 @@ function Start-VirtualDriveMount(
     $psi.Arguments = ($mountArgs | ForEach-Object { Format-SafeProcessArgument $_ }) -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardError = $true
+    # Direct rclone output to log file rather than unconsumed pipe to prevent buffer deadlocks and broken pipe crashes
+    $psi.RedirectStandardError = $false
 
     foreach ($key in $EnvironmentVariables.Keys) {
         $psi.EnvironmentVariables[$key] = [string]$EnvironmentVariables[$key]
@@ -429,7 +454,12 @@ function Start-VirtualDriveMount(
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         if ($proc.HasExited) {
-            $err = $proc.StandardError.ReadToEnd()
+            $err = ''
+            if (Test-Path -LiteralPath $logPath) {
+                try {
+                    $err = (Get-Content -LiteralPath $logPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+                } catch { }
+            }
             $script:ActiveMountProcesses.Remove($mountKey)
             $script:ProviderDriveMapping.Remove($mountKey)
             if ($script:MountProcess -eq $proc) { $script:MountProcess = $null }
@@ -446,6 +476,7 @@ function Start-VirtualDriveMount(
                 DriveRoot = $driveRoot
                 VolumeLabel = $volName
                 ProcessId = $proc.Id
+                LogPath = $logPath
             }
         }
 
@@ -582,4 +613,15 @@ function Test-VirtualDriveWriteSupported([string]$DriveLetter = '') {
     if (-not $status.IsMounted) { return $false }
     if ($status.IsReadOnly) { return $false }
     return $true
+}
+
+function Get-MountLogContent([string]$MountKey, [int]$Tail = 50) {
+    $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+    $logPath = Join-Path $logDir "rclone-$MountKey.log"
+    if (Test-Path -LiteralPath $logPath) {
+        try {
+            return (Get-Content -LiteralPath $logPath -Tail $Tail -ErrorAction SilentlyContinue)
+        } catch { }
+    }
+    return @()
 }
