@@ -26,6 +26,37 @@ Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
 $script:ActiveTransferJobs = @{}
 
 # ==============================================================================
+# COMMAND LINE & PATH SANITIZATION
+# ==============================================================================
+
+function Format-SafeProcessArgument([string]$Argument) {
+    if ([string]::IsNullOrEmpty($Argument)) { return '""' }
+    if ($Argument -notmatch '[\s"\\]') { return $Argument }
+    $escaped = [regex]::Replace($Argument, '(\\+)(")', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    $escaped = $escaped -replace '"', '\"'
+    return "`"$escaped`""
+}
+
+function Normalize-CloudPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $clean = $Path.Replace('\', '/').Trim()
+    $clean = [regex]::Replace($clean, '[\x00-\x1F\x7F]', '')
+    $segments = $clean.Split('/') | Where-Object { $_ -ne '' -and $_ -ne '.' }
+    $resolved = [System.Collections.Generic.List[string]]::new()
+    foreach ($seg in $segments) {
+        if ($seg -eq '..') {
+            if ($resolved.Count -gt 0) {
+                $resolved.RemoveAt($resolved.Count - 1)
+            }
+        } else {
+            $resolved.Add($seg)
+        }
+    }
+    return ($resolved -join '/')
+}
+
+# ==============================================================================
 # SPEED & ETA CALCULATION ENGINE
 # ==============================================================================
 
@@ -181,12 +212,13 @@ function Get-CloudDirectoryContents {
     $tempRemote = "browse_" + [Guid]::NewGuid().ToString('N').Substring(0, 6)
     $envVars = Get-CloudAccountTransferRemoteEnvironment -Account $Account -RemoteAlias $tempRemote
 
-    $cleanPath = $Path.TrimStart('/').TrimEnd('/')
+    $cleanPath = Normalize-CloudPath -Path $Path
     $targetSpec = if ($cleanPath) { "${tempRemote}:${cleanPath}" } else { "${tempRemote}:" }
+    $safeTargetArg = Format-SafeProcessArgument $targetSpec
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
-    $psi.Arguments = "lsjson `"$targetSpec`" --max-depth 1"
+    $psi.Arguments = "lsjson $safeTargetArg --max-depth 1"
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -267,8 +299,8 @@ function Start-CloudTransfer {
     $srcEnv = Get-CloudAccountTransferRemoteEnvironment -Account $SourceAccount -RemoteAlias $srcRemote
     $dstEnv = Get-CloudAccountTransferRemoteEnvironment -Account $DestinationAccount -RemoteAlias $dstRemote
 
-    $cleanSrcPath = $SourcePath.TrimStart('/').TrimEnd('/')
-    $cleanDstPath = $DestinationPath.TrimStart('/').TrimEnd('/')
+    $cleanSrcPath = Normalize-CloudPath -Path $SourcePath
+    $cleanDstPath = Normalize-CloudPath -Path $DestinationPath
 
     $srcSpec = if ($cleanSrcPath) { "${srcRemote}:${cleanSrcPath}" } else { "${srcRemote}:" }
     $dstSpec = if ($cleanDstPath) { "${dstRemote}:${cleanDstPath}" } else { "${dstRemote}:" }
@@ -276,7 +308,7 @@ function Start-CloudTransfer {
     # Build rclone streaming arguments
     # Important: Uses rclone copy/move streaming relay. No large file writes to local OS drive.
     $commandVerb = if ($IsMove) { 'move' } else { 'copy' }
-    $argsList = @(
+    $rawArgs = @(
         $commandVerb,
         $srcSpec,
         $dstSpec,
@@ -288,17 +320,19 @@ function Start-CloudTransfer {
     )
 
     if ($ConflictAction -eq 'Skip') {
-        $argsList += '--ignore-existing'
+        $rawArgs += '--ignore-existing'
     }
 
     if ($BandwidthLimit) {
-        $argsList += '--bwlimit'
-        $argsList += $BandwidthLimit
+        $rawArgs += '--bwlimit'
+        $rawArgs += [regex]::Replace($BandwidthLimit, '[^0-9a-zA-Z]', '')
     }
+
+    $escapedArgs = ($rawArgs | ForEach-Object { Format-SafeProcessArgument $_ }) -join ' '
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
-    $psi.Arguments = ($argsList -join ' ')
+    $psi.Arguments = $escapedArgs
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
