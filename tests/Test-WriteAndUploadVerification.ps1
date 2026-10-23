@@ -125,4 +125,26 @@ if ($tbSession -and $tbSession.Secret) {
     Write-Output '  [SKIP] No local TeraBox session found for live listing test'
 }
 
+# ------------------------------------------------------------------------------
+# 6. Live Google Drive Backend Session & File Listing Verification
+# ------------------------------------------------------------------------------
+$gdTokens = Get-GoogleDriveStoredTokens
+if ($gdTokens -and $gdTokens.access_token) {
+    $sessionRes = Test-GoogleDriveBackendSession
+    if ($sessionRes.IsValid) {
+        Write-Output "  [PASS] Live Google Drive backend session verified (User: $($sessionRes.UserInfo.DisplayName), Email: $($sessionRes.UserInfo.EmailAddress))"
+    } else {
+        throw "Google Drive session verification failed: $($sessionRes.Error)"
+    }
+
+    $gdListRes = Get-GoogleDriveFileList -PageSize 5
+    if ($gdListRes.Success) {
+        Write-Output "  [PASS] Live Google Drive file listing verified ($($gdListRes.ItemCount) items found)"
+    } else {
+        throw "Google Drive file listing check failed: $($gdListRes.Error)"
+    }
+} else {
+    Write-Output '  [SKIP] No local Google Drive tokens found for live listing test'
+}
+
 Write-Output 'All Write Protection, Upload, and Mount Reconciliation Tests Passed Successfully.'
