@@ -306,7 +306,7 @@ function Start-VirtualDriveMount(
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [hashtable]$EnvironmentVariables = @{},
     [switch]$ReadOnly = $false,
-    [int]$TimeoutSeconds = 15
+    [int]$TimeoutSeconds = 35
 ) {
     if (-not (Test-WinFspInstalled)) {
         throw 'WinFsp is not installed or running. Cannot mount virtual drive.'
