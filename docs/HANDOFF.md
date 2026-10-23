@@ -15,8 +15,16 @@ The application supports:
    - Narrow left navigation sidebar (64px width) featuring one-click view switching (`Disks`, `Options`, `Help`).
    - Unified cloud disk cards matching reference UX: 3D hard drive graphic with overlaid provider logo badge, bold account identity, direct `Connect` / `Disconnect` action buttons, in-line drive letter selector (`in [ G: v ]`), quick action icon buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), storage usage progress bars with "X free of Y" display, and real-time status indicators (`● Mounted (G:)`, `● Ready to connect`, `● Disconnected`).
    - Embedded `Options` view providing instant access to Windows login auto-start, system tray minimization, Explorer auto-open, auto-mounting, and full Cache Management (clean cache, open cache directory, live cache usage statistics).
-2. **TeraBox WebDAV Bridge Mounts & Full Read-Write Access:** Seamless integration via `TeraBoxBridgeManager` running the local loopback WebDAV bridge daemon (`cpx.exe terabox-bridge --port 19191`) with DPAPI encryption (`CloudPlayX.v1.secret` entropy). Official `rclone.exe` connects through a native RFC 4918 `webdav` remote. Mounts default to read-write with `--vfs-cache-mode full` and `--vfs-write-back 5s`, enabling file creation, direct edits, and uploads without write-protection errors.
-3. **Fixed Embedded Sign-In & Session Persistence:** WebView2 login captures live navigator `UserAgent`, `Url-Domain-Prefix` headers, regional host, `ndus`/`BDUSS` cookies, and `jsToken`. Fixes the `-6` authentication error and prevents premature disconnection when closing the login modal.
+2. **TeraBox WebDAV Bridge Mounts & Fixed Disk Mode (Eliminating Red X and FUSE-rclone):**
+   - Seamless integration via `TeraBoxBridgeManager` running the local loopback WebDAV bridge daemon (`cpx.exe terabox-bridge --port 19191`) with DPAPI encryption (`CloudPlayX.v1.secret` entropy).
+   - Mounts as a native Fixed Disk (local drive) without `--network-mode`, appearing directly under "Devices and drives" with custom volume names (`TeraBox`, `Google Drive`). Completely eliminates the network redirector "red X" and `FUSE-rclone` artifacts.
+   - Proactive stale drive cleanup (`Clear-StaleDriveLetterMapping`) cleans any orphaned network mappings or subst entries before mounting and after unmounting.
+   - Defaults to read-write with `--vfs-cache-mode full` and `--vfs-write-back 5s`, enabling file creation, direct edits, and uploads without write-protection errors.
+3. **Fixed Embedded Sign-In & Multi-Account Profile Isolation:**
+   - Isolated WebView2 user data folders per account (`NSCloudDrive\webview2-profile\<id>`), preventing cross-account session pollution.
+   - Removed destructive `ClearBrowsingDataAsync()` call that previously wiped authentication cookies on modal completion.
+   - Fixed session retrieval function call (`Get-TeraBoxStoredSession`) preventing false "Disconnected" states on window close.
+   - DPAPI session isolation (`terabox-session-<id>.xml`) and per-account loopback bridge home directories (`NSCloudDrive\terabox-bridge\<id>`).
 4. **One-Click Google Drive OAuth with Self-Healing Token Refresh:** One-click sign-in via rclone's desktop client with full read-write scope (`drive`). Resolved HTTP 403 rate limits on `/drive/v3/about` by switching session validation to direct root metadata (`/drive/v3/files/root`), rate-limit backoff, and automatic token refresh via `rclone about` / `rclone lsjson` when access tokens expire. Multi-account support allows multiple simultaneous Google accounts (e.g., Personal `G:`, Work `H:`) with isolated DPAPI token stores (`google-drive-tokens-<id>.xml`). Verified read and write on mounted `G:\` drive in Windows Explorer.
 5. **Mount Reconciliation & Placeholder Purge:** `Find-ActiveMountProcess` inspects running `rclone.exe` process arguments to reconcile active mount status on startup or refresh, preventing UI/Explorer state discrepancies. Synthetic demo accounts are automatically purged and filtered from the dashboard.
 6. **Low RAM Footprint & Background Operation:** Integrated Win32 `EmptyWorkingSet` memory trimming, reducing working set memory to ~10-15 MB on idle/minimize. Background system tray integration and auto-mount on Windows startup.
@@ -40,7 +48,7 @@ The application supports:
 
 ## 3. Test Suites & Verification
 
-All 11 automated test suites pass with 100% success rate:
+All 12 automated test suites pass with 100% success rate:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/Run-AllTests.ps1
@@ -50,10 +58,11 @@ powershell -ExecutionPolicy Bypass -File tests/Run-AllTests.ps1
 - `Test-TeraBoxProvider.ps1` — DPAPI session load/save, quota parsing, and error-handling.
 - `Test-TeraBoxBridgeManager.ps1` — WebDAV daemon discovery, DPAPI entropy key generation, and remote environment variables.
 - `Test-GoogleDriveProvider.ps1` — OAuth state, PKCE verifier, multi-account token isolation, and dynamic remotes.
-- `Test-VirtualDriveManager.ps1` — WinFsp detection, rclone mount argument generation (read-write default), and drive letter conflict checks.
+- `Test-VirtualDriveManager.ps1` — WinFsp detection, rclone mount argument generation (read-write default & fixed disk), and drive letter conflict checks.
 - `Test-SettingsManager.ps1` — Multi-account registry CRUD, settings serialization, placeholder purge, and startup tasks.
 - `Test-DesktopUIRegression.ps1` — STA window construction, modal interfaces, single-instance mutex, and scrollbar constraints.
 - `Test-EmbeddedBrowserWindow.ps1` — WebView2 runtime detection, host verification, and non-blocking dispatcher pumps.
+- `Test-MultiAccountIsolation.ps1` — Multi-account credential isolation, WebView2 profiles, bridge homes, and truthful drive states.
 - `Test-EndToEndAcceptance.ps1` — Multi-account token isolation, WebDAV environment, drive status isolation, and memory trimming.
 - `Test-WriteAndUploadVerification.ps1` — Read-write mount arguments, upload verification, and live account integrity.
 - `Test-RcloneConfigPassword.ps1` — DPAPI encryption and access control verification.
