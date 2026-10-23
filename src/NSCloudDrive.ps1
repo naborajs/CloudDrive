@@ -1862,6 +1862,9 @@ function Update-AllUIState {
         $tbUploadBtn.IsEnabled = $false
     }
 
+    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $gdCheck.State -ne 'Checking')
+    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheck.State -ne 'Checking')
+
     # 3. Dynamic Multi-Account Cards
     $accountsStack.Children.Clear()
     $allAccounts = @()
@@ -1939,6 +1942,7 @@ function Update-AllUIState {
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Danger)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
                 $aBtn.Add_Click({
+                    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
                     Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
                     Update-AllUIState
                 })
@@ -1947,6 +1951,7 @@ function Update-AllUIState {
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
                 $aBtn.Add_Click({
+                    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
                     try {
                         if ($currAcc.ProviderId -eq 'gdrive') {
                             $remoteName = if ($currAcc.Id) { [regex]::Replace($currAcc.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'gdrive' }
@@ -1962,6 +1967,7 @@ function Update-AllUIState {
                 })
             }
             $aActionRow.Children.Add($aBtn) | Out-Null
+            $aBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker)
 
             $aInLabel = New-Label 'in' 12 $p.TextSecondary
             $aInLabel.VerticalAlignment = 'Center'
@@ -2084,6 +2090,7 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
 # GOOGLE DRIVE: Connect / Disconnect Action
 # ------------------------------------------------------------------------------
 $gdActionBtn.Add_Click({
+    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
     $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
     if ($gdStatus.IsMounted) {
         $gdStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
@@ -2213,6 +2220,7 @@ $gdRemoveBtn.Add_Click({
 # TERABOX: Connect / Disconnect Action
 # ------------------------------------------------------------------------------
 $tbActionBtn.Add_Click({
+    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
     $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
     if ($tbStatus.IsMounted) {
         $tbStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
