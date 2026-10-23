@@ -58,6 +58,10 @@ $script:StartupAutoMountWorker = $null
 $script:StartupAutoMountTimer = $null
 $script:StartupAutoMountError = $null
 $script:ReconnectWorker = $null
+$script:ReconnectWorkerAccountId = ''
+$script:ReconnectWorkerProgress = $null
+$script:AccountMountStates = @{}
+$script:PendingManualMountAccountIds = [System.Collections.Generic.Queue[string]]::new()
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
 $script:StartupAutoMountProgress = [hashtable]::Synchronized(@{ Stage = 'Waiting for startup dispatcher'; ProviderId = ''; DriveLetter = ''; StartedAt = $null })
 $script:LastStartupAutoMountLogKey = ''
@@ -444,28 +448,14 @@ $addDiskBtn.Add_Click({
         if ($selected -eq 'gdrive') {
             $created = Connect-NewCloudAccount -Owner $window -ProviderId 'gdrive'
             if ($created) {
-                try {
-                    $remoteName = if ($created.Id) { [regex]::Replace($created.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'gdrive' }
-                    $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $created.Id -RemoteName $remoteName
-                    $res = Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'gdrive' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars
-                    if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
-                        Start-ExplorerWindow $res.DriveRoot
-                    }
-                } catch { }
+                Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
                 Update-AllUIState
                 Invoke-MemoryTrim
             }
         } elseif ($selected -eq 'terabox') {
             $created = Connect-NewCloudAccount -Owner $window -ProviderId 'terabox'
             if ($created) {
-                try {
-                    $remoteName = if ($created.Id) { [regex]::Replace($created.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'terabox' }
-                    $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $created.Id
-                    $res = Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'terabox' -AccountId $created.Id -DriveLetter $created.DriveLetter -VolumeLabel $created.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars
-                    if ($res.Success -and $script:Settings.OpenExplorerOnMount) {
-                        Start-ExplorerWindow $res.DriveRoot
-                    }
-                } catch { }
+                Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
                 Update-AllUIState
                 Invoke-MemoryTrim
             }
@@ -1600,6 +1590,17 @@ Apply-UITheme $script:Settings.Theme
 # UI STATE SYNCHRONIZER
 # ==============================================================================
 function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [string]$DriveLetter = '') {
+    if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $script:AccountMountStates.ContainsKey($AccountId)) {
+        $mountState = $script:AccountMountStates[$AccountId]
+        if ($mountState -and $mountState.State -eq 'Mounting') {
+            $letter = if ($DriveLetter) { $DriveLetter } else { [string]$mountState.DriveLetter }
+            return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $mountState }
+        }
+        if ($mountState -and $mountState.State -in @('Error', 'AuthRequired')) {
+            $letter = if ($DriveLetter) { $DriveLetter } else { [string]$mountState.DriveLetter }
+            return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $mountState }
+        }
+    }
     $snapshot = $script:ProviderStatusSnapshot
     if ($snapshot) {
         if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $snapshot.PSObject.Properties['AccountStatuses'] -and $snapshot.AccountStatuses -and $snapshot.AccountStatuses.ContainsKey($AccountId)) {
@@ -1693,7 +1694,21 @@ function Complete-AvailableStartupWorkers {
     }
 
     if ($script:StartupAutoMountWorker -and (Test-NSBackgroundOperationCompleted $script:StartupAutoMountWorker)) {
-        try { Complete-NSBackgroundOperation $script:StartupAutoMountWorker | Out-Null } catch { }
+        try {
+            $completed = Complete-NSBackgroundOperation $script:StartupAutoMountWorker
+            foreach ($result in $completed.Output) {
+                if (-not $result -or -not $result.AccountId) { continue }
+                $key = [string]$result.AccountId
+                $script:AccountMountStates[$key] = [ordered]@{
+                    State = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Mounted' } elseif ($result.State -eq 'Error') { 'Error' } else { [string]$result.State }
+                    Stage = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Filesystem verified' } else { 'Startup restore finished' }
+                    Error = if ($result.Error) { [string]$result.Error } else { $null }
+                    DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { '' }
+                    StartedAt = $null
+                    UpdatedAt = [DateTime]::UtcNow
+                }
+            }
+        } catch { }
         $script:StartupAutoMountWorker = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
     }
@@ -1701,22 +1716,41 @@ function Complete-AvailableStartupWorkers {
     if ($script:ReconnectWorker -and (Test-NSBackgroundOperationCompleted $script:ReconnectWorker)) {
         try {
             $completed = Complete-NSBackgroundOperation $script:ReconnectWorker
-            if (-not $completed.HadErrors) {
-                foreach ($result in $completed.Output) {
-                    if (-not $result -or -not $result.WorkerKey) { continue }
-                    $key = [string]$result.WorkerKey
-                    if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
-                        $script:ReconnectFailCount[$key] = 0
-                        $script:ReconnectNextAllowed.Remove($key)
-                    } elseif ($result.State -eq 'Error') {
-                        $script:ReconnectFailCount[$key] = [int]$result.FailureCount
-                        $script:ReconnectNextAllowed[$key] = [DateTime]$result.NextAllowed
+            foreach ($result in $completed.Output) {
+                if (-not $result -or -not $result.WorkerKey) { continue }
+                $key = [string]$result.WorkerKey
+                if ($key -notlike '__*') {
+                    $script:AccountMountStates[$key] = [ordered]@{
+                        State = if ($result.State -eq 'Mounted') { 'Mounted' } elseif ($result.State -eq 'Error') { 'Error' } elseif ($result.State -eq 'AuthRequired') { 'AuthRequired' } else { [string]$result.State }
+                        Stage = if ($result.State -eq 'Mounted') { 'Filesystem verified' } elseif ($result.State -eq 'AuthRequired') { 'Sign-in required' } else { 'Mount attempt finished' }
+                        Error = if ($result.Error) { [string]$result.Error } else { $null }
+                        DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { '' }
+                        StartedAt = $null
+                        UpdatedAt = [DateTime]::UtcNow
                     }
                 }
+                if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
+                    $script:ReconnectFailCount[$key] = 0
+                    $script:ReconnectNextAllowed.Remove($key)
+                } elseif ($result.State -eq 'Error') {
+                    $script:ReconnectFailCount[$key] = [int]$result.FailureCount
+                    $script:ReconnectNextAllowed[$key] = [DateTime]$result.NextAllowed
+                }
+            }
+            if ($completed.HadErrors -and -not [string]::IsNullOrWhiteSpace($script:ReconnectWorkerAccountId)) {
+                $message = if ($completed.Errors.Count -gt 0) { Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message) } else { 'The mount worker stopped unexpectedly.' }
+                $script:AccountMountStates[$script:ReconnectWorkerAccountId] = [ordered]@{ State = 'Error'; Stage = 'Mount worker stopped'; Error = $message; DriveLetter = [string]$script:ReconnectWorkerProgress.DriveLetter; StartedAt = $null; UpdatedAt = [DateTime]::UtcNow }
             }
         } catch { }
         $script:ReconnectWorker = $null
+        $script:ReconnectWorkerAccountId = ''
+        $script:ReconnectWorkerProgress = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
+    }
+
+    if (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $script:PendingManualMountAccountIds.Count -gt 0) {
+        $nextAccountId = $script:PendingManualMountAccountIds.Dequeue()
+        Invoke-AutoReconnectWatchdog -AccountId $nextAccountId
     }
 }
 
@@ -2066,6 +2100,7 @@ function Update-AllUIState {
             $aInfoStack.Children.Add($aActionRow) | Out-Null
 
             $aStatus = Get-CachedUiDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId -DriveLetter $acc.DriveLetter
+            $aMountState = if ($aStatus.MountState) { $aStatus.MountState } elseif ($script:AccountMountStates.ContainsKey([string]$acc.Id)) { $script:AccountMountStates[[string]$acc.Id] } else { $null }
 
             $aBtn = [System.Windows.Controls.Button]::new()
             $aBtn.Padding = [System.Windows.Thickness]::new(16, 5, 16, 5)
@@ -2087,27 +2122,17 @@ function Update-AllUIState {
                     Update-AllUIState
                 })
             } else {
-                $aBtn.Content = 'Connect'
+                $aBtn.Content = if ($aMountState -and $aMountState.State -eq 'Mounting') { 'Mounting...' } elseif ($aMountState -and $aMountState.State -in @('Error', 'AuthRequired')) { 'Retry' } else { 'Connect' }
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
                 $aBtn.Add_Click({
-                    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
-                    try {
-                        if ($currAcc.ProviderId -eq 'gdrive') {
-                            $remoteName = if ($currAcc.Id) { [regex]::Replace($currAcc.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'gdrive' }
-                            $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $currAcc.Id -RemoteName $remoteName
-                            Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'gdrive' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                        } elseif ($currAcc.ProviderId -eq 'terabox') {
-                            $remoteName = if ($currAcc.Id) { [regex]::Replace($currAcc.Id, '[^a-zA-Z0-9_\-]', '_') } else { 'terabox' }
-                            $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $currAcc.Id
-                            Start-VirtualDriveMount -RemoteName $remoteName -ProviderId 'terabox' -AccountId $currAcc.Id -DriveLetter $currAcc.DriveLetter -VolumeLabel $currAcc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                        }
-                    } catch { }
+                    if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id) -and $script:AccountMountStates[[string]$currAcc.Id].State -eq 'Mounting') { return }
+                    Invoke-AutoReconnectWatchdog -AccountId ([string]$currAcc.Id)
                     Update-AllUIState
                 })
             }
             $aActionRow.Children.Add($aBtn) | Out-Null
-            $aBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker)
+            $aBtn.IsEnabled = -not ($aMountState -and $aMountState.State -eq 'Mounting')
 
             $aInLabel = New-Label 'in' 12 $p.TextSecondary
             $aInLabel.VerticalAlignment = 'Center'
@@ -2171,8 +2196,9 @@ function Update-AllUIState {
             [System.Windows.Controls.Grid]::SetColumn($aRightStack, 2)
             $aGrid.Children.Add($aRightStack) | Out-Null
 
-            $pillText = if ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':)' } else { [string][char]0x25CF + ' Ready to connect' }
-            $pillColor = if ($aStatus.IsMounted) { $p.PillMounted } else { $p.PillConnected }
+            $mountElapsed = if ($aMountState -and $aMountState.StartedAt) { [Math]::Max(0, [int]([DateTime]::UtcNow - [DateTime]$aMountState.StartedAt).TotalSeconds) } else { 0 }
+            $pillText = if ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':)' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
+            $pillColor = if ($aStatus.IsMounted) { $p.PillMounted } elseif ($aMountState -and $aMountState.State -eq 'Error') { $p.Danger } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { $p.PillWarning } else { $p.PillConnected }
             $aStatusLbl = New-Label $pillText 11 $pillColor $true
             $aStatusLbl.HorizontalAlignment = 'Right'
             $aRightStack.Children.Add($aStatusLbl) | Out-Null
@@ -2596,13 +2622,25 @@ $window.Add_StateChanged({
 # The watchdog does nothing when $script:IsConnecting is set (manual connect
 # in progress) or when AutoMountDrives is disabled in settings.
 function Invoke-AutoReconnectWatchdog {
-    if ($script:IsConnecting -or -not $script:Settings.AutoMountDrives) { return }
-    if ($script:ReconnectWorker -or $script:StartupAutoMountWorker) { return }
+    param([string]$AccountId = '')
+    if ($script:IsConnecting -or ([string]::IsNullOrWhiteSpace($AccountId) -and -not $script:Settings.AutoMountDrives)) { return }
+    if ($script:ReconnectWorker -or $script:StartupAutoMountWorker -or $script:StartupAutoMountPending) {
+        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            if (-not $script:PendingManualMountAccountIds.Contains($AccountId)) { $script:PendingManualMountAccountIds.Enqueue($AccountId) }
+            $account = Get-CloudAccount -AccountId $AccountId
+            if ($account) { $script:AccountMountStates[$AccountId] = [ordered]@{ State = 'Mounting'; Stage = 'Queued behind another mount'; Error = $null; DriveLetter = [string]$account.DriveLetter; StartedAt = [DateTime]::UtcNow; UpdatedAt = [DateTime]::UtcNow } }
+        }
+        return
+    }
 
     try {
         $accounts = @(Get-CloudAccounts)
         $legacyMode = ($accounts.Count -eq 0)
-        $workerAccounts = if ($legacyMode) {
+        $workerAccounts = if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            $account = Get-CloudAccount -AccountId $AccountId
+            if (-not $account) { throw 'The saved account could not be found.' }
+            @([pscustomobject]@{ WorkerKey = [string]$account.Id; Id = [string]$account.Id; ProviderId = [string]$account.ProviderId; DriveLetter = [string]$account.DriveLetter; DisplayName = [string]$account.DisplayName; AutoMount = $true })
+        } elseif ($legacyMode) {
             @(
                 [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true },
                 [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true }
@@ -2625,11 +2663,18 @@ function Invoke-AutoReconnectWatchdog {
         $failureCounts = @{}
         foreach ($key in $script:ReconnectFailCount.Keys) { $failureCounts[$key] = [int]$script:ReconnectFailCount[$key] }
         $cacheDirectory = $script:CacheDirectory
+        $mountProgress = [hashtable]::Synchronized(@{ AccountId = $AccountId; Stage = 'Starting mount worker'; DriveLetter = ''; StartedAt = [DateTime]::UtcNow; Error = $null })
+        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            $mountProgress.DriveLetter = [string]$workerAccounts[0].DriveLetter
+            $script:AccountMountStates[$AccountId] = $mountProgress
+        }
 
+        $script:ReconnectWorkerAccountId = $AccountId
+        $script:ReconnectWorkerProgress = $mountProgress
         $script:ReconnectWorker = Start-NSBackgroundOperation -ArgumentList @(
-            $PSScriptRoot, $cacheDirectory, $workerAccounts, $nextAllowed, $failureCounts
+            $PSScriptRoot, $cacheDirectory, $workerAccounts, $nextAllowed, $failureCounts, $mountProgress
         ) -ScriptBlock {
-            param([string]$sourceRoot, [string]$cacheDirectory, [object[]]$accounts, [hashtable]$nextAllowed, [hashtable]$failureCounts)
+            param([string]$sourceRoot, [string]$cacheDirectory, [object[]]$accounts, [hashtable]$nextAllowed, [hashtable]$failureCounts, [hashtable]$mountProgress)
             $ErrorActionPreference = 'Stop'
             . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
             . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
@@ -2640,20 +2685,24 @@ function Invoke-AutoReconnectWatchdog {
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
                 $key = [string]$account.WorkerKey
+                if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Checking existing mount'; $mountProgress.DriveLetter = [string]$account.DriveLetter }
                 try {
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.IsMounted) {
-                        [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                        $health = Test-VirtualDriveFilesystem -DriveRoot $status.DriveRoot -TimeoutSeconds 10
+                        if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
+                        [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
                         continue
                     }
 
                     $retryAt = if ($nextAllowed.ContainsKey($key)) { [DateTime]$nextAllowed[$key] } else { [DateTime]::MinValue }
-                    if ($now -lt $retryAt) {
+                    if ($mountProgress.AccountId -ne $key -and $now -lt $retryAt) {
                         [pscustomobject]@{ WorkerKey = $key; State = 'Backoff'; FailureCount = [int]$failureCounts[$key]; NextAllowed = $retryAt; Error = $null }
                         continue
                     }
 
                     if ($account.ProviderId -eq 'gdrive') {
+                        if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Validating Google Drive credentials' }
                         if ($key -like '__*') {
                             $check = Test-GoogleDriveBackendSession
                             if (-not $check.IsValid) {
@@ -2662,20 +2711,30 @@ function Invoke-AutoReconnectWatchdog {
                             }
                             $environment = Get-GoogleDriveRcloneEnvironment
                         } else {
+                            $check = Test-GoogleDriveBackendSession -AccountId $account.Id -Force
+                            if (-not $check.IsValid) {
+                                [pscustomobject]@{ WorkerKey = $key; State = 'AuthRequired'; FailureCount = 0; NextAllowed = $null; Error = (Format-SanitizedDiagnosticMessage ([string]$check.Error)); DriveLetter = $account.DriveLetter }
+                                continue
+                            }
                             $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
                         }
-                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
-                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                        if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Validating TeraBox session' }
                         if ($key -like '__*') {
                             $check = Test-TeraBoxBackendSession
                             if (-not $check.IsValid) {
                                 [pscustomobject]@{ WorkerKey = $key; State = 'Disconnected'; FailureCount = 0; NextAllowed = $null; Error = $null }
                                 continue
                             }
+                        } else {
+                            $check = Test-TeraBoxBackendSession -AccountId $account.Id -Force
+                            if (-not $check.IsValid) {
+                                [pscustomobject]@{ WorkerKey = $key; State = 'AuthRequired'; FailureCount = 0; NextAllowed = $null; Error = (Format-SanitizedDiagnosticMessage ([string]$check.Error)); DriveLetter = $account.DriveLetter }
+                                continue
+                            }
                         }
                         $environment = if ($key -like '__*') { Get-TeraBoxRcloneEnvironment } else { Get-TeraBoxRcloneEnvironment -AccountId $account.Id }
+                        if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -2683,22 +2742,36 @@ function Invoke-AutoReconnectWatchdog {
                         continue
                     }
 
-                    [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null }
+                    if ($account.ProviderId -eq 'gdrive' -and $mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
+                    if ($account.ProviderId -eq 'gdrive') {
+                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                    }
+
+                    [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
                 } catch {
                     $failures = if ($failureCounts.ContainsKey($key)) { [int]$failureCounts[$key] } else { 0 }
                     $delaySeconds = [Math]::Min(300, [Math]::Pow(2, $failures) * 30)
                     $next = $now.AddSeconds($delaySeconds)
+                    if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Mount failed'; $mountProgress.Error = Format-SanitizedDiagnosticMessage $_.Exception.Message }
                     [pscustomobject]@{
                         WorkerKey = $key
                         State = 'Error'
                         FailureCount = $failures + 1
                         NextAllowed = $next
                         Error = Format-SanitizedDiagnosticMessage $_.Exception.Message
+                        DriveLetter = $account.DriveLetter
                     }
                 }
             }
         }
-    } catch { }
+    } catch {
+        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            $safeMessage = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+            $script:AccountMountStates[$AccountId] = [ordered]@{ State = 'Error'; Stage = 'Could not start mount worker'; Error = $safeMessage; DriveLetter = ''; StartedAt = $null; UpdatedAt = [DateTime]::UtcNow }
+        }
+    }
 }
 
 function Start-StartupAutoMountTimer {
@@ -2758,7 +2831,10 @@ function Invoke-StartupAutoMount {
                     $progress.Stage = "Checking existing $($account.DriveLetter): mount"
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.ProcessRunning) {
-                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null })
+                        if (-not $status.IsMounted) { throw 'A mount process exists, but its assigned drive is not present.' }
+                        $health = Test-VirtualDriveFilesystem -DriveRoot $status.DriveRoot -TimeoutSeconds 10
+                        if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                         continue
                     }
 
@@ -2769,7 +2845,7 @@ function Invoke-StartupAutoMount {
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
-                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null })
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
                         $progress.Stage = 'Validating TeraBox session'
                         $environment = Get-TeraBoxRcloneEnvironment -AccountId $account.Id
@@ -2777,13 +2853,14 @@ function Invoke-StartupAutoMount {
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
-                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null })
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     }
                 } catch {
                     $results.Add([pscustomobject]@{
                         AccountId = $account.Id
                         State = 'Error'
                         Error = Format-SanitizedDiagnosticMessage $_.Exception.Message
+                        DriveLetter = [string]$account.DriveLetter
                     })
                 }
             }
