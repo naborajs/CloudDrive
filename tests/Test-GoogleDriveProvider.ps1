@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\src\providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\src\services\VirtualDriveManager.ps1')
 
 Write-Output 'Testing GoogleDriveProvider...'
 
@@ -33,6 +34,18 @@ if (-not $timedOut -or $timeoutClock.Elapsed.TotalSeconds -gt 5) {
     throw "Google Drive helper timeout was not enforced (elapsed=$([Math]::Round($timeoutClock.Elapsed.TotalSeconds, 2))s)."
 }
 Write-Output '  [PASS] Rclone helper stdout/stderr draining and bounded timeout verified'
+
+# Google Drive alone receives extra WinFsp dispatcher capacity. TeraBox keeps its
+# provider-specific mount arguments unchanged.
+$googleMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive_personal' -DriveLetter 'G' -ConfigPath ''
+$teraBoxMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath ''
+if ($googleMountArgs -notcontains '--fuse-flag' -or $googleMountArgs -notcontains '--ThreadCount=64') {
+    throw 'Google Drive mount arguments must pass the WinFsp ThreadCount flag.'
+}
+if ($teraBoxMountArgs -contains '--ThreadCount=64') {
+    throw 'TeraBox mount arguments must not inherit the Google Drive dispatcher setting.'
+}
+Write-Output '  [PASS] Google Drive-only WinFsp dispatcher setting verified'
 
 # Sandbox LOCALAPPDATA to prevent touching real user credentials
 $origGlobalLocalAppData = $env:LOCALAPPDATA
