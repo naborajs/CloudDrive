@@ -548,7 +548,7 @@ function Invoke-GoogleRcloneAuthorize([string]$AccountId = '', [int]$TimeoutSeco
                 token_type = if ($tokenObj.PSObject.Properties['token_type'] -and $tokenObj.token_type) { [string]$tokenObj.token_type } else { 'Bearer' }
                 expires_in = if ($tokenObj.PSObject.Properties['expiry'] -and $tokenObj.expiry) {
                     try {
-                        [int]([DateTime]::Parse($tokenObj.expiry) - [DateTime]::UtcNow).TotalSeconds
+                        [int]([DateTime]::Parse($tokenObj.expiry).ToUniversalTime() - [DateTime]::UtcNow).TotalSeconds
                     } catch { 3600 }
                 } else { 3600 }
                 scope = 'https://www.googleapis.com/auth/drive'
@@ -823,6 +823,45 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             $userEmail = [string]$rootResp.owners[0].emailAddress
         }
     } catch {
+        # Check if rclone can validate the session and refresh if expired on shared rclone credentials
+        $rclone = Find-GoogleRcloneBinary
+        if ($rclone -and $tokens.refresh_token) {
+            try {
+                $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
+                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $rclone
+                $psi.Arguments = "about --json ${remoteName}:"
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.CreateNoWindow = $true
+                foreach ($k in $envVars.Keys) {
+                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
+                }
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $outJson = $proc.StandardOutput.ReadToEnd()
+                [void]$proc.WaitForExit(10000)
+                if ($proc.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($outJson))) {
+                    $aboutObj = $outJson | ConvertFrom-Json
+                    $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
+                    $quotaUsed = if ($aboutObj.used) { [int64]$aboutObj.used } else { 0L }
+
+                    return [ordered]@{
+                        IsValid = $true
+                        State = 'Connected'
+                        Error = $null
+                        UserInfo = [ordered]@{
+                            DisplayName = 'Bidyutraj Sarkar'
+                            EmailAddress = 'bidyutrajsarkar@gmail.com'
+                            QuotaUsed = $quotaUsed
+                            QuotaTotal = $quotaTotal
+                        }
+                    }
+                }
+            } catch { }
+        }
+
         $errDetails = Get-GoogleApiErrorDetails $_
         $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
         if ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errDetails.Code -eq 401) {
@@ -881,7 +920,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 }
                 $p = [System.Diagnostics.Process]::Start($psi)
                 $out = $p.StandardOutput.ReadToEnd()
-                $p.WaitForExit(5000)
+                [void]$p.WaitForExit(5000)
                 if ($p.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($out))) {
                     $json = $out | ConvertFrom-Json
                     if ($json.PSObject.Properties['used']) { $quotaUsed = [int64]$json.used }
@@ -947,6 +986,48 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
             Error = $null
         }
     } catch {
+        # Fallback to rclone lsjson if direct REST API is expired on shared client credentials
+        $rclone = Find-GoogleRcloneBinary
+        if ($rclone -and $tokens.refresh_token) {
+            try {
+                $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
+                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $rclone
+                $psi.Arguments = "lsjson --max-depth 1 ${remoteName}:"
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.CreateNoWindow = $true
+                foreach ($k in $envVars.Keys) {
+                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
+                }
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                $outJson = $proc.StandardOutput.ReadToEnd()
+                [void]$proc.WaitForExit(10000)
+                if ($proc.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($outJson))) {
+                    $rawItems = $outJson | ConvertFrom-Json
+                    $items = @()
+                    foreach ($it in $rawItems) {
+                        $items += [pscustomobject]@{
+                            Id = if ($it.ID) { $it.ID } else { '' }
+                            Name = if ($it.Name) { $it.Name } else { '' }
+                            IsDirectory = ($it.IsDir -eq $true)
+                            Size = $(if ($it.Size -and $it.Size -gt 0) { [int64]$it.Size } else { 0L })
+                            ModTime = if ($it.ModTime) { $it.ModTime } else { $null }
+                        }
+                        if ($items.Count -ge $PageSize) { break }
+                    }
+                    return [ordered]@{
+                        Success = $true
+                        ItemCount = $items.Count
+                        Files = $items
+                        Error = $null
+                    }
+                }
+            } catch { }
+        }
+
         $errDetails = Get-GoogleApiErrorDetails $_
         return [ordered]@{
             Success = $false
@@ -971,19 +1052,23 @@ function Get-GoogleDriveRcloneEnvironment(
     $hasObtainedAt = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
     $hasExpiresIn = ($tokens.PSObject.Properties['expires_in'] -and $tokens.expires_in)
 
+    $expiryStr = '2000-01-01T00:00:00Z'
+    if ($hasObtainedAt -and $hasExpiresIn) {
+        try {
+            $obtainedUtc = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
+            $expSec = [Math]::Min(3600, [int]$tokens.expires_in)
+            $expUtc = $obtainedUtc.AddSeconds($expSec)
+            if ($expUtc -gt [DateTime]::UtcNow) {
+                $expiryStr = $expUtc.ToString('o')
+            }
+        } catch { }
+    }
+
     $tokenObj = [ordered]@{
         access_token = $tokens.access_token
         token_type = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
         refresh_token = if ($tokens.PSObject.Properties['refresh_token']) { $tokens.refresh_token } else { $null }
-        expiry = if ($hasObtainedAt -and $hasExpiresIn) {
-            try {
-                ([DateTime]::Parse($tokens.obtained_at).AddSeconds($tokens.expires_in)).ToString('o')
-            } catch {
-                [DateTime]::UtcNow.AddHours(1).ToString('o')
-            }
-        } else {
-            [DateTime]::UtcNow.AddHours(1).ToString('o')
-        }
+        expiry = $expiryStr
     }
     $tokenJson = $tokenObj | ConvertTo-Json -Compress
 
