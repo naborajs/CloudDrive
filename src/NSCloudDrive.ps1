@@ -27,6 +27,7 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CacheManager.ps1')
+. (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
@@ -49,6 +50,11 @@ $script:ReconnectNextAllowed = @{}
 $script:ReconnectFailCount = @{}
 # Tracks when the watchdog was last executed (prevents it running every 1-second tick)
 $script:LastWatchdogRun = [DateTime]::MinValue
+$script:ProviderStatusWorker = $null
+$script:ProviderStatusSnapshot = $null
+$script:LastProviderStatusCheck = [DateTime]::MinValue
+$script:StartupCacheRecoveryWorker = $null
+$script:StartupAutoMountWorker = $null
 
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
@@ -1540,12 +1546,105 @@ Apply-UITheme $script:Settings.Theme
 # ==============================================================================
 # UI STATE SYNCHRONIZER
 # ==============================================================================
+function Start-ProviderStatusRefreshWorker {
+    if ($script:ProviderStatusWorker) { return }
+
+    $script:ProviderStatusWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
+        param([string]$sourceRoot)
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+        . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+        . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+        . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+
+        $googleCheck = try { Test-GoogleDriveBackendSession } catch {
+            [ordered]@{ IsValid = $false; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); UserInfo = $null }
+        }
+        $googleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+        $teraBoxCheck = try { Test-TeraBoxBackendSession } catch {
+            [ordered]@{ IsValid = $false; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); UserInfo = $null }
+        }
+        $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+
+        [pscustomobject]@{
+            GoogleCheck = $googleCheck
+            GoogleStatus = $googleStatus
+            TeraBoxCheck = $teraBoxCheck
+            TeraBoxStatus = $teraBoxStatus
+            CheckedAt = [DateTime]::UtcNow
+        }
+    }
+}
+
+function Start-StartupCacheRecoveryWorker {
+    if ($script:StartupCacheRecoveryWorker) { return }
+
+    $script:StartupCacheRecoveryWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $script:CacheDirectory) -ScriptBlock {
+        param([string]$sourceRoot, [string]$cacheDirectory)
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'services\CacheManager.ps1')
+        Invoke-StartupCacheRecovery -CacheDirectory $cacheDirectory | Out-Null
+        [pscustomobject]@{ Success = $true }
+    }
+}
+
+function Complete-AvailableStartupWorkers {
+    if ($script:ProviderStatusWorker -and (Test-NSBackgroundOperationCompleted $script:ProviderStatusWorker)) {
+        try {
+            $completed = Complete-NSBackgroundOperation $script:ProviderStatusWorker
+            if (-not $completed.HadErrors -and $completed.Output.Count -gt 0) {
+                $script:ProviderStatusSnapshot = $completed.Output[-1]
+            } elseif ($completed.HadErrors) {
+                $message = if ($completed.Errors.Count -gt 0) {
+                    Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message)
+                } else {
+                    'Provider status check failed.'
+                }
+                $script:ProviderStatusSnapshot = [pscustomobject]@{
+                    GoogleCheck = [ordered]@{ IsValid = $false; State = 'Error'; Error = $message; UserInfo = $null }
+                    GoogleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+                    TeraBoxCheck = [ordered]@{ IsValid = $false; State = 'Error'; Error = $message; UserInfo = $null }
+                    TeraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+                    CheckedAt = [DateTime]::UtcNow
+                }
+            }
+        } catch { }
+        $script:ProviderStatusWorker = $null
+        $script:LastProviderStatusCheck = [DateTime]::UtcNow
+    }
+
+    if ($script:StartupCacheRecoveryWorker -and (Test-NSBackgroundOperationCompleted $script:StartupCacheRecoveryWorker)) {
+        try { Complete-NSBackgroundOperation $script:StartupCacheRecoveryWorker | Out-Null } catch { }
+        $script:StartupCacheRecoveryWorker = $null
+    }
+
+    if ($script:StartupAutoMountWorker -and (Test-NSBackgroundOperationCompleted $script:StartupAutoMountWorker)) {
+        try { Complete-NSBackgroundOperation $script:StartupAutoMountWorker | Out-Null } catch { }
+        $script:StartupAutoMountWorker = $null
+        $script:LastProviderStatusCheck = [DateTime]::MinValue
+    }
+}
+
 function Update-AllUIState {
     if ($script:IsConnecting) { return }
 
+    Complete-AvailableStartupWorkers
+    if (-not $script:ProviderStatusWorker -and
+        ([DateTime]::UtcNow - $script:LastProviderStatusCheck).TotalSeconds -ge 120) {
+        try { Start-ProviderStatusRefreshWorker } catch { }
+    }
+
+    $statusSnapshot = $script:ProviderStatusSnapshot
+    $checkingResult = [ordered]@{
+        IsValid = $false
+        State = 'Checking'
+        Error = $null
+        UserInfo = $null
+    }
+
     # 1. Google Drive State
-    $gdCheck = Test-GoogleDriveBackendSession
-    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+    $gdCheck = if ($statusSnapshot) { $statusSnapshot.GoogleCheck } else { $checkingResult }
+    $gdStatus = if ($statusSnapshot) { $statusSnapshot.GoogleStatus } else { Get-VirtualDriveStatus -ProviderId 'gdrive' }
 
     if ($gdCheck.IsValid) {
         $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
@@ -1608,9 +1707,16 @@ function Update-AllUIState {
         $gdNameLabel.Text = 'Google Drive'
         $gdState = Get-SafeProperty $gdCheck 'State' ''
         $gdErr = Get-SafeProperty $gdCheck 'Error' ''
-        if ($gdState -eq 'AuthenticationExpired') {
+        if ($gdState -eq 'Checking') {
+            $gdAccountText.Text = 'Checking saved connection...'
+            $gdErrorText.Visibility = 'Collapsed'
+        } elseif ($gdState -eq 'AuthenticationExpired') {
             $gdAccountText.Text = 'Session expired. Click Connect to re-authenticate.'
             $gdErrorText.Text = if ($gdErr) { $gdErr } else { 'Session expired.' }
+            $gdErrorText.Visibility = 'Visible'
+        } elseif ($gdState -eq 'Error') {
+            $gdAccountText.Text = 'Could not check saved connection.'
+            $gdErrorText.Text = if ($gdErr) { $gdErr } else { 'Connection check failed.' }
             $gdErrorText.Visibility = 'Visible'
         } else {
             $gdAccountText.Text = 'Not connected'
@@ -1620,8 +1726,13 @@ function Update-AllUIState {
         $gdStorageBar.Visibility = 'Collapsed'
         $gdQuotaText.Visibility = 'Collapsed'
 
-        $gdStatusText.Text = ([string][char]0x25CF + ' Disconnected')
-        $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+        if ($gdState -eq 'Checking') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        } else {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Disconnected')
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+        }
 
         $gdActionBtn.Content = 'Connect'
         $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
@@ -1631,8 +1742,8 @@ function Update-AllUIState {
     }
 
     # 2. TeraBox State
-    $tbCheck = Test-TeraBoxBackendSession
-    $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+    $tbCheck = if ($statusSnapshot) { $statusSnapshot.TeraBoxCheck } else { $checkingResult }
+    $tbStatus = if ($statusSnapshot) { $statusSnapshot.TeraBoxStatus } else { Get-VirtualDriveStatus -ProviderId 'terabox' }
 
     if ($tbCheck.IsValid) {
         $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
@@ -1693,9 +1804,16 @@ function Update-AllUIState {
         $tbNameLabel.Text = 'TeraBox'
         $tbState = Get-SafeProperty $tbCheck 'State' ''
         $tbErr = Get-SafeProperty $tbCheck 'Error' ''
-        if ($tbState -eq 'AuthenticationExpired') {
+        if ($tbState -eq 'Checking') {
+            $tbAccountText.Text = 'Checking saved connection...'
+            $tbErrorText.Visibility = 'Collapsed'
+        } elseif ($tbState -eq 'AuthenticationExpired') {
             $tbAccountText.Text = 'Session expired. Click Connect to re-authenticate.'
             $tbErrorText.Text = if ($tbErr) { $tbErr } else { 'Session expired.' }
+            $tbErrorText.Visibility = 'Visible'
+        } elseif ($tbState -eq 'Error') {
+            $tbAccountText.Text = 'Could not check saved connection.'
+            $tbErrorText.Text = if ($tbErr) { $tbErr } else { 'Connection check failed.' }
             $tbErrorText.Visibility = 'Visible'
         } else {
             $tbAccountText.Text = 'Not connected'
@@ -1705,8 +1823,13 @@ function Update-AllUIState {
         $tbStorageBar.Visibility = 'Collapsed'
         $tbQuotaText.Visibility = 'Collapsed'
 
-        $tbStatusText.Text = ([string][char]0x25CF + ' Disconnected')
-        $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+        if ($tbState -eq 'Checking') {
+            $tbStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        } else {
+            $tbStatusText.Text = ([string][char]0x25CF + ' Disconnected')
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+        }
 
         $tbActionBtn.Content = 'Connect'
         $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
@@ -2420,48 +2543,86 @@ function Invoke-AutoReconnectWatchdog {
 
 function Invoke-StartupAutoMount {
     if (-not $script:Settings.AutoMountDrives) { return }
-    try {
-        $accounts = Get-CloudAccounts
-        if ($accounts -and $accounts.Count -gt 0) {
-            foreach ($acc in $accounts) {
-                if ($acc.AutoMount) {
-                    try {
-                        if ($acc.ProviderId -eq 'gdrive') {
-                            $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $acc.Id -RemoteName 'gdrive'
-                            Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
-                        } elseif ($acc.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
-                            $tbEnvVars = Get-TeraBoxRcloneEnvironment -AccountId $acc.Id
-                            Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $acc.Id -DriveLetter $acc.DriveLetter -VolumeLabel $acc.DisplayName -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
-                        }
-                    } catch { }
+    if ($script:StartupAutoMountWorker) { return }
+
+    $cacheDirectory = $script:CacheDirectory
+    $script:StartupAutoMountWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $cacheDirectory) -ScriptBlock {
+        param([string]$sourceRoot, [string]$cacheDirectory)
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+        . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+        . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+        . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+
+        $settings = Get-NSCloudDriveSettings
+        if (-not $settings.AutoMountDrives) { return }
+        $results = [System.Collections.Generic.List[object]]::new()
+        $accounts = @(Get-CloudAccounts)
+
+        if ($accounts.Count -gt 0) {
+            foreach ($account in $accounts) {
+                if (-not $account.AutoMount) { continue }
+                try {
+                    $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
+                    if ($status.ProcessRunning) {
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null })
+                        continue
+                    }
+
+                    if ($account.ProviderId -eq 'gdrive') {
+                        $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
+                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null })
+                    } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                        $environment = Get-TeraBoxRcloneEnvironment -AccountId $account.Id
+                        Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null })
+                    }
+                } catch {
+                    $results.Add([pscustomobject]@{
+                        AccountId = $account.Id
+                        State = 'Error'
+                        Error = Format-SanitizedDiagnosticMessage $_.Exception.Message
+                    })
                 }
             }
         } else {
-            # Fallback to default primary providers if no custom accounts configured
-            $gdCheck = Test-GoogleDriveBackendSession
-            if ($gdCheck.IsValid) {
-                $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-                if (-not $gdStatus.IsMounted) {
-                    $envVars = Get-GoogleDriveRcloneEnvironment
-                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -VolumeLabel 'Google Drive' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $envVars | Out-Null
+            # Fallback for legacy single-provider settings.
+            try {
+                $googleCheck = Test-GoogleDriveBackendSession
+                $googleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+                if ($googleCheck.IsValid -and -not $googleStatus.ProcessRunning) {
+                    $environment = Get-GoogleDriveRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
+                        -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
+                        -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
                 }
+                $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = if ($googleCheck.IsValid) { 'Mounted' } else { $googleCheck.State }; Error = $googleCheck.Error })
+            } catch {
+                $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message) })
             }
 
-            $tbCheck = Test-TeraBoxBackendSession
-            if ($tbCheck.IsValid -and (Get-VerifiedRclonePath)) {
-                $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-                if (-not $tbStatus.IsMounted) {
-                    $tbEnvVars = Get-TeraBoxRcloneEnvironment
-                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -VolumeLabel 'TeraBox' -CacheDirectory $script:CacheDirectory -EnvironmentVariables $tbEnvVars | Out-Null
+            try {
+                $teraBoxCheck = Test-TeraBoxBackendSession
+                $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+                if ($teraBoxCheck.IsValid -and (Get-VerifiedRclonePath) -and -not $teraBoxStatus.ProcessRunning) {
+                    $environment = Get-TeraBoxRcloneEnvironment
+                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
+                        -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
+                        -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
                 }
+                $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = if ($teraBoxCheck.IsValid) { 'Mounted' } else { $teraBoxCheck.State }; Error = $teraBoxCheck.Error })
+            } catch {
+                $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message) })
             }
         }
-        if ($window.Dispatcher) {
-            $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{
-                Update-AllUIState
-            }) | Out-Null
-        }
-    } catch { }
+
+        return $results.ToArray()
+    }
 }
 
 $window.Add_Loaded({
@@ -2474,7 +2635,11 @@ $window.Add_Loaded({
     }
     Invoke-MemoryTrim
 
-    # Run auto-mount asynchronously via DispatcherTimer so the UI is immediately visible and responsive in STA runspace
+    try { Start-ProviderStatusRefreshWorker } catch { }
+    try { Start-StartupCacheRecoveryWorker } catch { }
+    Update-AllUIState
+
+    # Start mount reconciliation after the window is visible; the mount itself runs in a background runspace.
     if ($script:Settings.AutoMountDrives) {
         $autoMountTimer = [System.Windows.Threading.DispatcherTimer]::new()
         $autoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
@@ -2534,11 +2699,6 @@ $timer.Add_Tick({
 $timer.Start()
 
 if ($MyInvocation.InvocationName -ne '.') {
-    # Fast initial UI population (takes < 5ms with session caching)
-    Update-AllUIState
-
-    try { Invoke-StartupCacheRecovery -CacheDirectory $script:CacheDirectory | Out-Null } catch { }
-
     Invoke-MemoryTrim
 }
 
