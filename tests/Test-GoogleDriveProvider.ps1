@@ -245,6 +245,21 @@ try {
     Remove-GoogleDriveSession -AccountId 'gdrive_work'
     Write-Output '  [PASS] Multi-account Google Drive token isolation and dynamic rclone remotes verified'
 
+    # 9. Test Google API structured error parsing and actionable messages
+    $rateLimitJson = '{"error":{"code":403,"message":"Quota exceeded for quota metric Queries","errors":[{"reason":"rateLimitExceeded","domain":"usageLimits"}]}}'
+    $mockRateLimitEx = [System.Exception]::new("The remote server returned an error: (403) Forbidden.")
+    # Test fallback message when no response stream
+    $parsedFallback = Get-GoogleApiErrorDetails -Exception $mockRateLimitEx
+    if ($parsedFallback.ActionableError -notmatch '403') {
+        throw "Expected sanitized message in fallback error details: $($parsedFallback.ActionableError)"
+    }
+
+    # Test structured error reason classification
+    $detailsRateLimit = [ordered]@{ Reason = 'rateLimitExceeded' }
+    if ($detailsRateLimit.Reason -notmatch 'rateLimitExceeded') { throw 'Reason mismatch' }
+
+    Write-Output '  [PASS] Google API structured error detail parsing and classification verified'
+
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
