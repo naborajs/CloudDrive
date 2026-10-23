@@ -670,30 +670,125 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
     }
 }
 
-function Invoke-GoogleDriveApiWithRetry([scriptblock]$ApiAction, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
+function Get-GoogleApiErrorDetails($Exception) {
+    $code = $null
+    $message = $null
+    $reason = $null
+    $status = $null
+    $actionableError = $null
+
+    try {
+        $webEx = $null
+        if ($Exception -is [System.Net.WebException]) {
+            $webEx = $Exception
+        } elseif ($Exception.PSObject.Properties['Exception'] -and ($Exception.Exception -is [System.Net.WebException])) {
+            $webEx = $Exception.Exception
+        } elseif ($Exception.PSObject.Properties['InnerException'] -and ($Exception.InnerException -is [System.Net.WebException])) {
+            $webEx = $Exception.InnerException
+        }
+
+        if ($webEx -and $webEx.Response) {
+            $respStream = $webEx.Response.GetResponseStream()
+            if ($respStream) {
+                $reader = [System.IO.StreamReader]::new($respStream)
+                $rawBody = $reader.ReadToEnd()
+                if (-not [string]::IsNullOrWhiteSpace($rawBody)) {
+                    $json = $rawBody | ConvertFrom-Json
+                    if ($json -and $json.PSObject.Properties['error']) {
+                        $err = $json.error
+                        $code = if ($err.PSObject.Properties['code']) { [int]$err.code } else { $null }
+                        $message = if ($err.PSObject.Properties['message']) { [string]$err.message } else { $null }
+                        $status = if ($err.PSObject.Properties['status']) { [string]$err.status } else { $null }
+                        if ($err.PSObject.Properties['errors'] -and $err.errors.Count -gt 0) {
+                            $first = $err.errors[0]
+                            if ($first.PSObject.Properties['reason']) {
+                                $reason = [string]$first.reason
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch { }
+
+    if ($reason -match 'rateLimitExceeded|userRateLimitExceeded') {
+        $actionableError = "Google Drive API rate limit reached on shared rclone client ID (project 202264815644). Limit resets automatically in a few seconds."
+    } elseif ($reason -match 'accessNotConfigured') {
+        $actionableError = "Google Drive API is disabled or not configured in your Google Cloud Project. Please enable it in Google Cloud Console (APIs & Services > Library > Google Drive API)."
+    } elseif ($reason -match 'insufficientPermissions|insufficientFilePermissions') {
+        $actionableError = "Insufficient Google Drive permissions. Reconnect your account and grant drive access permissions on the consent screen."
+    } elseif ($reason -match 'appNotVerified|access_denied') {
+        $actionableError = "Google blocked access because this OAuth client is unverified. Add your Google account as a Test User in the Google Cloud Console OAuth consent screen."
+    } elseif ($message) {
+        $actionableError = (Format-SanitizedDiagnosticMessage $message)
+    } elseif ($Exception) {
+        $exMsg = if ($Exception -is [string]) {
+            $Exception
+        } elseif ($Exception.PSObject.Properties['Exception'] -and $Exception.Exception -and $Exception.Exception.PSObject.Properties['Message']) {
+            [string]$Exception.Exception.Message
+        } elseif ($Exception.PSObject.Properties['Message']) {
+            [string]$Exception.Message
+        } else {
+            [string]$Exception
+        }
+        $actionableError = (Format-SanitizedDiagnosticMessage $exMsg)
+    } else {
+        $actionableError = 'Unknown Google Drive API error.'
+    }
+
+    return [ordered]@{
+        Code = $code
+        Message = $message
+        Reason = $reason
+        Status = $status
+        ActionableError = $actionableError
+    }
+}
+
+function Invoke-GoogleDriveApiWithRetry(
+    [scriptblock]$ApiAction,
+    [hashtable]$TokensOverride = $null,
+    [string]$AccountId = '',
+    [int]$MaxRateLimitRetries = 3
+) {
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     if (-not $tokens -or -not $tokens.access_token) {
         throw 'No Google Drive tokens available.'
     }
 
-    try {
-        return (& $ApiAction $tokens.access_token)
-    } catch {
-        $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
-        $isAuthError = ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials')
+    $retries = 0
+    $delaySeconds = 1.5
 
-        if ($isAuthError -and (-not $TokensOverride) -and $tokens.refresh_token) {
-            # Attempt automatic token refresh
-            $oauthConfig = Get-GoogleOAuthConfig
-            if ($oauthConfig -and $oauthConfig.ClientId) {
-                $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token -AccountId $AccountId
-                if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
-                    # Retry once with newly refreshed access token
-                    return (& $ApiAction $refreshResult.Tokens.access_token)
+    while ($true) {
+        try {
+            return (& $ApiAction $tokens.access_token)
+        } catch {
+            $errDetails = Get-GoogleApiErrorDetails $_
+            $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
+            $isAuthError = ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errDetails.Code -eq 401)
+            $isRateLimit = ($errDetails.Reason -match 'rateLimitExceeded|userRateLimitExceeded' -or $sanitized -match 'rateLimitExceeded' -or $sanitized -match '429')
+
+            if ($isAuthError -and (-not $TokensOverride) -and $tokens.refresh_token) {
+                # Attempt automatic token refresh
+                $oauthConfig = Get-GoogleOAuthConfig
+                if ($oauthConfig -and $oauthConfig.ClientId) {
+                    $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token -AccountId $AccountId
+                    if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
+                        # Retry once with newly refreshed access token
+                        return (& $ApiAction $refreshResult.Tokens.access_token)
+                    }
                 }
             }
+
+            if ($isRateLimit -and ($retries -lt $MaxRateLimitRetries)) {
+                $retries++
+                [System.Threading.Thread]::Sleep([int]($delaySeconds * 1000))
+                $delaySeconds = $delaySeconds * 2
+                continue
+            }
+
+            throw
         }
-        throw
     }
 }
 
@@ -708,31 +803,29 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         }
     }
 
+    # Step 1: Validate token and retrieve user identity via root file metadata
+    $userDisplayName = $null
+    $userEmail = $null
+
     try {
-        $response = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
+        $rootResp = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
             param([string]$accessToken)
             $headers = @{
                 'Authorization' = "Bearer $accessToken"
                 'Accept' = 'application/json'
             }
-            $aboutUrl = "$script:GoogleDriveApiEndpoint/about?fields=user,storageQuota"
-            return (Invoke-RestMethod -Uri $aboutUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop)
+            $rootUrl = "$script:GoogleDriveApiEndpoint/files/root?fields=id,name,owners"
+            return (Invoke-RestMethod -Uri $rootUrl -Headers $headers -Method Get -TimeoutSec 15 -ErrorAction Stop)
         }
 
-        return [ordered]@{
-            IsValid = $true
-            State = 'Connected'
-            Error = $null
-            UserInfo = [ordered]@{
-                DisplayName = $response.user.displayName
-                EmailAddress = $response.user.emailAddress
-                QuotaUsed = [int64]$response.storageQuota.usage
-                QuotaTotal = [int64]$response.storageQuota.limit
-            }
+        if ($rootResp -and $rootResp.PSObject.Properties['owners'] -and $rootResp.owners.Count -gt 0) {
+            $userDisplayName = [string]$rootResp.owners[0].displayName
+            $userEmail = [string]$rootResp.owners[0].emailAddress
         }
     } catch {
+        $errDetails = Get-GoogleApiErrorDetails $_
         $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
-        if ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials') {
+        if ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errDetails.Code -eq 401) {
             return [ordered]@{
                 IsValid = $false
                 State = 'AuthenticationExpired'
@@ -743,8 +836,70 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         return [ordered]@{
             IsValid = $false
             State = 'Error'
-            Error = "Google Drive API verification failed: $sanitized"
+            Error = "Google Drive API verification failed: $($errDetails.ActionableError)"
             UserInfo = $null
+        }
+    }
+
+    # Step 2: Retrieve storage quota (via /about or rclone fallback)
+    $quotaUsed = [int64]0
+    $quotaTotal = [int64]0
+
+    try {
+        $aboutResp = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -MaxRateLimitRetries 1 -ApiAction {
+            param([string]$accessToken)
+            $headers = @{
+                'Authorization' = "Bearer $accessToken"
+                'Accept' = 'application/json'
+            }
+            $aboutUrl = "$script:GoogleDriveApiEndpoint/about?fields=storageQuota"
+            return (Invoke-RestMethod -Uri $aboutUrl -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop)
+        }
+        if ($aboutResp -and $aboutResp.PSObject.Properties['storageQuota'] -and $aboutResp.storageQuota) {
+            if ($aboutResp.storageQuota.PSObject.Properties['usage']) {
+                $quotaUsed = [int64]$aboutResp.storageQuota.usage
+            }
+            if ($aboutResp.storageQuota.PSObject.Properties['limit']) {
+                $quotaTotal = [int64]$aboutResp.storageQuota.limit
+            }
+        }
+    } catch {
+        # If /about is rate limited on shared client ID, fall back to rclone about --json if rclone is available
+        try {
+            $rclone = Find-GoogleRcloneBinary
+            if ($rclone) {
+                $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
+                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $rclone
+                $psi.Arguments = "about --json ${remoteName}:"
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.CreateNoWindow = $true
+                foreach ($k in $envVars.Keys) {
+                    $psi.EnvironmentVariables[$k] = [string]$envVars[$k]
+                }
+                $p = [System.Diagnostics.Process]::Start($psi)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit(5000)
+                if ($p.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($out))) {
+                    $json = $out | ConvertFrom-Json
+                    if ($json.PSObject.Properties['used']) { $quotaUsed = [int64]$json.used }
+                    if ($json.PSObject.Properties['total']) { $quotaTotal = [int64]$json.total }
+                }
+            }
+        } catch { }
+    }
+
+    return [ordered]@{
+        IsValid = $true
+        State = 'Connected'
+        Error = $null
+        UserInfo = [ordered]@{
+            DisplayName = if ($userDisplayName) { $userDisplayName } else { 'Google Drive User' }
+            EmailAddress = if ($userEmail) { $userEmail } else { '' }
+            QuotaUsed = $quotaUsed
+            QuotaTotal = $quotaTotal
         }
     }
 }
@@ -754,6 +909,7 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     if (-not $tokens -or -not $tokens.access_token) {
         return [ordered]@{
             Success = $false
+            ItemCount = 0
             Files = @()
             Error = 'Not connected to Google Drive.'
         }
@@ -771,15 +927,15 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
         }
 
         $items = @()
-        if ($response.files) {
+        if ($response -and $response.PSObject.Properties['files'] -and $response.files) {
             foreach ($f in $response.files) {
-                $isFolder = ($f.mimeType -eq 'application/vnd.google-apps.folder')
-                $items += [ordered]@{
-                    Id = $f.id
-                    Name = $f.name
+                $isFolder = ($f.PSObject.Properties['mimeType'] -and $f.mimeType -eq 'application/vnd.google-apps.folder')
+                $items += [pscustomobject]@{
+                    Id = if ($f.PSObject.Properties['id']) { $f.id } else { '' }
+                    Name = if ($f.PSObject.Properties['name']) { $f.name } else { '' }
                     IsDirectory = $isFolder
-                    Size = $(if ($f.size) { [int64]$f.size } else { 0 })
-                    ModTime = $f.modifiedTime
+                    Size = $(if ($f.PSObject.Properties['size'] -and $f.size) { [int64]$f.size } else { 0 })
+                    ModTime = if ($f.PSObject.Properties['modifiedTime']) { $f.modifiedTime } else { $null }
                 }
             }
         }
@@ -791,10 +947,12 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
             Error = $null
         }
     } catch {
+        $errDetails = Get-GoogleApiErrorDetails $_
         return [ordered]@{
             Success = $false
+            ItemCount = 0
             Files = @()
-            Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message)
+            Error = "Failed to list Google Drive files: $($errDetails.ActionableError)"
         }
     }
 }
