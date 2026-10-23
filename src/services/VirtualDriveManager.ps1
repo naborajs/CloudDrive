@@ -408,12 +408,15 @@ function Start-VirtualDriveMount(
     # If TeraBox is being mounted, start the local CPX WebDAV bridge and configure WebDAV rclone remote
     if ($RemoteName -eq 'terabox' -or $resolvedProvider -eq 'terabox') {
         try {
-            $bridgeStatus = Start-TeraBoxBridge
+            $bridgeStatus = Start-TeraBoxBridge -AccountId $AccountId
             if ($bridgeStatus.Success) {
                 $bridgeEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus.Password -Port $bridgeStatus.Port -RcloneBinary $rclonePath -RemoteName $RemoteName
                 foreach ($k in $bridgeEnv.Keys) {
                     $EnvironmentVariables[$k] = $bridgeEnv[$k]
                 }
+                $remoteKey = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
+                $sessionCookieKey = "RCLONE_CONFIG_${remoteKey}_COOKIE"
+                if ($EnvironmentVariables.ContainsKey($sessionCookieKey)) { $EnvironmentVariables.Remove($sessionCookieKey) }
             }
         } catch {
             throw "Failed to start TeraBox WebDAV bridge: $($_.Exception.Message)"
@@ -539,6 +542,15 @@ function Stop-VirtualDriveMount(
     $lettersToClean = @()
     if (-not [string]::IsNullOrEmpty($AccountId)) {
         $targets += $AccountId
+        if ([string]::IsNullOrWhiteSpace($DriveLetter)) {
+            try {
+                $account = Get-CloudAccount -AccountId $AccountId
+                if ($account -and $account.DriveLetter) {
+                    $ownedLetter = ([string]$account.DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                    $lettersToClean += $ownedLetter
+                }
+            } catch { }
+        }
     } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
         $targets += $ProviderId
     } elseif (-not [string]::IsNullOrEmpty($DriveLetter)) {
@@ -589,19 +601,28 @@ function Stop-VirtualDriveMount(
 
     # If stopping TeraBox, also gracefully terminate TeraBox bridge daemon
     if ($ProviderId -eq 'terabox' -or $AccountId -match 'terabox' -or ($targets -contains 'terabox')) {
-        try { Stop-TeraBoxBridge } catch { }
+        try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
 
     # Clean up any matching orphaned rclone processes
     try {
         $orphans = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '\bmount\b' }
         foreach ($proc in $orphans) {
-            # If stopping a specific provider, only kill matching commandlines
-            if (-not [string]::IsNullOrEmpty($ProviderId)) {
-                if ($proc.CommandLine -match "${ProviderId}:") {
+            # Account removals are scoped to the saved drive letter and provider;
+            # a provider-wide match would terminate every account using that backend.
+            $ownedLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+                $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+            } elseif ($lettersToClean.Count -gt 0) { [string]$lettersToClean[0] } else { '' }
+            if (-not [string]::IsNullOrEmpty($ownedLetter) -and -not [string]::IsNullOrEmpty($ProviderId)) {
+                $targetPattern = "(?i)\bmount\b.*\s+[`"']?${ownedLetter}:\\?[`"']?(\s+|$)"
+                if ($proc.CommandLine -match $targetPattern -and $proc.CommandLine -match "(?i)\b${ProviderId}:") {
                     try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
                 }
-            } else {
+            } elseif ([string]::IsNullOrEmpty($AccountId) -and -not [string]::IsNullOrEmpty($ProviderId)) {
+                if ($proc.CommandLine -match "(?i)\b${ProviderId}:") {
+                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                }
+            } elseif ([string]::IsNullOrEmpty($AccountId) -and [string]::IsNullOrEmpty($ProviderId)) {
                 try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
             }
         }
