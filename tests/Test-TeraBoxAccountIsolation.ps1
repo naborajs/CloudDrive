@@ -32,7 +32,7 @@ try {
 
     $managerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\services\TeraBoxBridgeManager.ps1') -Raw
     $mountSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\services\VirtualDriveManager.ps1') -Raw
-    if ($managerSource -notmatch 'IndexOf\(\$homeDir' -or $managerSource -notmatch 'Get-TeraBoxBridgePort -AccountId \$AccountId') {
+    if ($managerSource -notmatch 'Get-TeraBoxBridgePort -AccountId \$AccountId' -or $managerSource -notmatch '\$expectedHome') {
         throw 'Bridge stop/start must use the matching account home and its deterministic port.'
     }
     if ($mountSource -notmatch 'Start-TeraBoxBridge -AccountId \$AccountId' -or $mountSource -notmatch 'Stop-TeraBoxBridge -AccountId \$AccountId') {
