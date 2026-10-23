@@ -41,9 +41,17 @@ function Find-CpxBinary {
 
 function Get-TeraBoxBridgeHomeDirectory {
     [CmdletBinding()]
-    param()
+    param(
+        [string]$AccountId = ''
+    )
 
-    $homeDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\terabox-bridge'
+    $homeDir = if (-not [string]::IsNullOrEmpty($AccountId) -and $AccountId -ne 'terabox') {
+        $safeAccId = [regex]::Replace($AccountId, '[^a-zA-Z0-9_\-]', '_')
+        Join-Path $env:LOCALAPPDATA "NSCloudDrive\terabox-bridge\$safeAccId"
+    } else {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive\terabox-bridge'
+    }
+
     if (-not (Test-Path -LiteralPath $homeDir)) {
         [void](New-Item -ItemType Directory -Path $homeDir -Force)
     }
@@ -165,6 +173,7 @@ function Start-TeraBoxBridge {
     [CmdletBinding()]
     param(
         [hashtable]$SessionOverride = $null,
+        [string]$AccountId = '',
         [int]$Port = 19191,
         [int]$WaitTimeoutSec = 10
     )
@@ -178,14 +187,14 @@ function Start-TeraBoxBridge {
         $SessionOverride
     } else {
         . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
-        Get-TeraBoxStoredSession
+        Get-TeraBoxStoredSession -AccountId $AccountId
     }
 
     if (-not $session -or -not $session.Secret) {
         throw 'No valid TeraBox session found. Please sign in to TeraBox first.'
     }
 
-    $homeDir = Get-TeraBoxBridgeHomeDirectory
+    $homeDir = Get-TeraBoxBridgeHomeDirectory -AccountId $AccountId
     $secret = Set-TeraBoxBridgeSecrets -Session $session -HomeDirectory $homeDir
 
     # Check if already healthy
@@ -242,6 +251,7 @@ function Start-TeraBoxBridge {
 function Stop-TeraBoxBridge {
     [CmdletBinding()]
     param(
+        [string]$AccountId = '',
         [int]$Port = 19191,
         [string]$BridgePassword = $null
     )
