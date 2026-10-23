@@ -37,21 +37,26 @@ if (Test-DriveLetterAvailable 'C:\' -ne $false -or Test-DriveLetterAvailable 'C:
 }
 Write-Output "  [PASS] Drive letter checks verified (T: available=$tAvail, C: occupied)"
 
-# 4. Test Mount arguments builder
+# 4. Test Mount arguments builder (Read-Write default and Read-Only switch)
 $mountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory 'D:\CloudCache\Test' -ConfigPath ''
 if ($mountArgs[0] -ne 'mount' -or
     $mountArgs[1] -ne 'gdrive:' -or
     $mountArgs[2] -ne 'T:\' -or
-    $mountArgs -notcontains '--read-only' -or
+    $mountArgs -contains '--read-only' -or
     $mountArgs -notcontains '--vfs-cache-mode' -or
     $mountArgs -notcontains 'full' -or
     $mountArgs -notcontains '--network-mode' -or
     $mountArgs -notcontains '--ask-password=false' -or
     $mountArgs -notcontains '--dir-cache-time' -or
     $mountArgs -notcontains '--attr-timeout') {
-    throw "Mount arguments failed verification: $($mountArgs -join ' ')"
+    throw "Mount arguments failed verification (should be read-write by default): $($mountArgs -join ' ')"
 }
-Write-Output '  [PASS] Mount arguments builder verified'
+
+$roMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory 'D:\CloudCache\Test' -ConfigPath '' -ReadOnly
+if ($roMountArgs -notcontains '--read-only') {
+    throw "Read-only mount arguments should contain --read-only flag: $($roMountArgs -join ' ')"
+}
+Write-Output '  [PASS] Mount arguments builder (read-write default & explicit read-only) verified'
 
 # 5. Test initial unmounted status
 $status = Get-VirtualDriveStatus -DriveLetter 'T'
