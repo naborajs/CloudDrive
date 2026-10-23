@@ -26,14 +26,25 @@ function Set-StrictCredentialAcl([string]$Path) {
     try {
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
+        $acl = if ($isDir) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
         $acl.SetAccessRuleProtection($true, $false)
         foreach ($sid in @($userSid, $systemSid)) {
-            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [System.Security.AccessControl.FileSystemRights]::FullControl,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
+            $rule = if ($isDir) {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            } else {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            }
             [void]$acl.AddAccessRule($rule)
         }
         Set-Acl -LiteralPath $Path -AclObject $acl
@@ -828,10 +839,11 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         if ($rclone -and $tokens.refresh_token) {
             try {
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
-                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
+                $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
+                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $safeRemote
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $rclone
-                $psi.Arguments = "about --json ${remoteName}:"
+                $psi.Arguments = "about --json ${safeRemote}:"
                 $psi.UseShellExecute = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError = $true
@@ -847,13 +859,20 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                     $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
                     $quotaUsed = if ($aboutObj.used) { [int64]$aboutObj.used } else { 0L }
 
+                    # Retrieve account metadata from settings if available, else generic fallback
+                    $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Find-CloudAccountById' -ErrorAction SilentlyContinue)) {
+                        Find-CloudAccountById -Id $AccountId
+                    } else { $null }
+                    $fallbackName = if ($acc -and $acc.DisplayName) { [string]$acc.DisplayName } else { 'Google Drive User' }
+                    $fallbackEmail = if ($acc -and $acc.AccountEmail) { [string]$acc.AccountEmail } elseif ($acc -and $acc.Username -and $acc.Username -match '@') { [string]$acc.Username } else { '' }
+
                     return [ordered]@{
                         IsValid = $true
                         State = 'Connected'
                         Error = $null
                         UserInfo = [ordered]@{
-                            DisplayName = 'Bidyutraj Sarkar'
-                            EmailAddress = 'bidyutrajsarkar@gmail.com'
+                            DisplayName = $fallbackName
+                            EmailAddress = $fallbackEmail
                             QuotaUsed = $quotaUsed
                             QuotaTotal = $quotaTotal
                         }
@@ -908,10 +927,11 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             $rclone = Find-GoogleRcloneBinary
             if ($rclone) {
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
-                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
+                $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
+                $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $safeRemote
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = $rclone
-                $psi.Arguments = "about --json ${remoteName}:"
+                $psi.Arguments = "about --json ${safeRemote}:"
                 $psi.UseShellExecute = $false
                 $psi.RedirectStandardOutput = $true
                 $psi.CreateNoWindow = $true
