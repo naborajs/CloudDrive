@@ -24,14 +24,25 @@ function Set-StrictTeraBoxCredentialAcl([string]$Path) {
     try {
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
+        $acl = if ($isDir) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
         $acl.SetAccessRuleProtection($true, $false)
         foreach ($sid in @($userSid, $systemSid)) {
-            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-                $sid,
-                [System.Security.AccessControl.FileSystemRights]::FullControl,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
+            $rule = if ($isDir) {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            } else {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            }
             [void]$acl.AddAccessRule($rule)
         }
         Set-Acl -LiteralPath $Path -AclObject $acl
