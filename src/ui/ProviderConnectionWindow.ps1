@@ -501,51 +501,6 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $tbText.Children.Add((New-UIElement-Label '1024 GB free cloud storage via WebDAV loopback bridge' 12 $p.TextMuted)) | Out-Null
     $tbLeft.Children.Add($tbText) | Out-Null
 
-    $SelectGD = {
-        $script:SelectedProvider = 'gdrive'
-        $addWin.Close()
-        if ($OnProviderSelected) { & $OnProviderSelected 'gdrive' }
-    }
-    $gdBtn.Add_Click($SelectGD)
-    $gdBorder.Add_MouseLeftButtonDown($SelectGD)
-    $listStack.Children.Add($gdBorder) | Out-Null
-
-    # Provider 2: TeraBox
-    $tbBorder = [System.Windows.Controls.Border]::new()
-    $tbBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2B2D31')
-    $tbBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#383A40')
-    $tbBorder.BorderThickness = [System.Windows.Thickness]::new(1)
-    $tbBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
-    $tbBorder.Padding = [System.Windows.Thickness]::new(14)
-    $tbBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
-    $tbBorder.Cursor = [System.Windows.Input.Cursors]::Hand
-
-    $tbDock = [System.Windows.Controls.DockPanel]::new()
-    $tbBorder.Child = $tbDock
-
-    $tbBtn = [System.Windows.Controls.Button]::new()
-    $tbBtn.Content = 'Select'
-    $tbBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
-    $tbBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
-    $tbBtn.Foreground = [System.Windows.Media.Brushes]::White
-    $tbBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
-    $tbBtn.BorderThickness = [System.Windows.Thickness]::new(0)
-    [System.Windows.Controls.DockPanel]::SetDock($tbBtn, 'Right')
-    $tbDock.Children.Add($tbBtn) | Out-Null
-
-    $tbLeft = [System.Windows.Controls.StackPanel]::new()
-    $tbLeft.Orientation = 'Horizontal'
-    $tbDock.Children.Add($tbLeft) | Out-Null
-
-    $tbLogoImg = New-LogoImageControl 'terabox.png' 38 38
-    $tbLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
-    $tbLeft.Children.Add($tbLogoImg) | Out-Null
-
-    $tbText = [System.Windows.Controls.StackPanel]::new()
-    $tbText.Children.Add((New-UIElement-Label 'TeraBox' 15 '#F2F3F5' $true)) | Out-Null
-    $tbText.Children.Add((New-UIElement-Label '1 TB cloud storage with high-speed media streaming' 12 '#949BA4')) | Out-Null
-    $tbLeft.Children.Add($tbText) | Out-Null
-
     $SelectTB = {
         $script:SelectedProvider = 'terabox'
         $addWin.Close()
