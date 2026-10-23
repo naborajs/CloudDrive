@@ -79,8 +79,12 @@ try {
     if ($rcloneEnv['RCLONE_CONFIG_GDRIVE_TYPE'] -ne 'drive') {
         throw 'Expected RCLONE_CONFIG_GDRIVE_TYPE to be drive'
     }
-    if ($rcloneEnv['RCLONE_CONFIG_GDRIVE_SCOPE'] -ne 'drive.readonly') {
-        throw 'Expected RCLONE_CONFIG_GDRIVE_SCOPE to be drive.readonly'
+    if ($rcloneEnv['RCLONE_CONFIG_GDRIVE_SCOPE'] -notin @('drive', 'drive.readonly')) {
+        throw 'Expected RCLONE_CONFIG_GDRIVE_SCOPE to be drive or drive.readonly'
+    }
+    $roEnv = Get-GoogleDriveRcloneEnvironment -Scope 'drive.readonly'
+    if ($roEnv['RCLONE_CONFIG_GDRIVE_SCOPE'] -ne 'drive.readonly') {
+        throw 'Expected explicit read-only scope to be drive.readonly'
     }
     $parsedToken = $rcloneEnv['RCLONE_CONFIG_GDRIVE_TOKEN'] | ConvertFrom-Json
     if ($parsedToken.access_token -ne $testTokens.access_token -or $parsedToken.refresh_token -ne $testTokens.refresh_token) {
