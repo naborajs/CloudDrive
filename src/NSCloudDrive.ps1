@@ -2335,11 +2335,15 @@ $window.Add_Loaded({
     }
     Invoke-MemoryTrim
 
-    # Run auto-mount asynchronously in background so the UI is immediately visible and responsive
+    # Run auto-mount asynchronously via DispatcherTimer so the UI is immediately visible and responsive in STA runspace
     if ($script:Settings.AutoMountDrives) {
-        [System.Threading.Tasks.Task]::Run({
+        $autoMountTimer = [System.Windows.Threading.DispatcherTimer]::new()
+        $autoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $autoMountTimer.Add_Tick({
+            $autoMountTimer.Stop()
             Invoke-StartupAutoMount
-        }) | Out-Null
+        })
+        $autoMountTimer.Start()
     }
 })
 
