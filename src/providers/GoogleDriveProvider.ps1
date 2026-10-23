@@ -881,6 +881,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     # Step 1: Validate token and retrieve user identity via root file metadata
     $userDisplayName = $null
     $userEmail = $null
+    $quotaUsed = [int64]0
+    $quotaTotal = [int64]0
+    $hasQuotaInfo = $false
 
     # Fast-path: check if access token is expired based on obtained_at and expires_in
     $isTokenExpired = $false
@@ -916,6 +919,26 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             if ($rootResp -and $rootResp.PSObject.Properties['owners'] -and $rootResp.owners.Count -gt 0) {
                 $userDisplayName = [string]$rootResp.owners[0].displayName
                 $userEmail = [string]$rootResp.owners[0].emailAddress
+            }
+        } catch { }
+    }
+
+    if (-not $userDisplayName -and -not $userEmail -and (-not $isTokenExpired -or $hasCustomClient)) {
+        try {
+            $aboutResp = Invoke-GoogleDriveApiWithRetry -TokensOverride $TokensOverride -AccountId $AccountId -ApiAction {
+                param([string]$accessToken)
+                $headers = @{ 'Authorization' = "Bearer $accessToken"; 'Accept' = 'application/json' }
+                $aboutUrl = "$script:GoogleDriveApiEndpoint/about?fields=user(displayName,emailAddress,permissionId),storageQuota"
+                return (Invoke-RestMethod -Uri $aboutUrl -Headers $headers -Method Get -TimeoutSec 10 -ErrorAction Stop)
+            }
+            if ($aboutResp -and $aboutResp.user) {
+                $userDisplayName = [string]$aboutResp.user.displayName
+                $userEmail = [string]$aboutResp.user.emailAddress
+                if ($aboutResp.storageQuota) {
+                    if ($aboutResp.storageQuota.limit) { $quotaTotal = [int64]$aboutResp.storageQuota.limit }
+                    $hasQuotaInfo = $true
+                    if ($aboutResp.storageQuota.usage) { $quotaUsed = [int64]$aboutResp.storageQuota.usage }
+                }
             }
         } catch { }
     }
@@ -992,6 +1015,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     }
 
     # Step 2: Retrieve storage quota (via /about or rclone fallback)
+    if (-not $hasQuotaInfo) {
     $quotaUsed = [int64]0
     $quotaTotal = [int64]0
 
@@ -1031,6 +1055,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         } catch { }
     }
 
+    }
     return (& $SetCacheAndReturn ([ordered]@{
         IsValid = $true
         State = 'Connected'
