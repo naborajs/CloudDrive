@@ -100,6 +100,28 @@ function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
     throw 'No available drive letters found on system.'
 }
 
+function Find-ActiveMountProcess([string]$DriveLetter = '') {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return $null }
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $targetPattern = "$letter`:"
+
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue
+        if ($procs) {
+            foreach ($p in $procs) {
+                if ($p.CommandLine -and ($p.CommandLine -match "(?i)\bmount\b.*\b$targetPattern\\?\b")) {
+                    return [ordered]@{
+                        ProcessId = [int]$p.ProcessId
+                        CommandLine = [string]$p.CommandLine
+                        IsReadOnly = ($p.CommandLine -match '--read-only')
+                    }
+                }
+            }
+        }
+    } catch { }
+    return $null
+}
+
 function Get-VirtualDriveStatus(
     [string]$DriveLetter = '',
     [string]$ProviderId = '',
@@ -116,12 +138,24 @@ function Get-VirtualDriveStatus(
     $letter = ''
     if (-not [string]::IsNullOrEmpty($DriveLetter)) {
         $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    } elseif (-not [string]::IsNullOrEmpty($mountKey)) {
-        if ($script:ProviderDriveMapping.ContainsKey($mountKey)) {
-            $letter = $script:ProviderDriveMapping[$mountKey]
-        } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
-            $letter = Get-PreferredDriveLetter $ProviderId
+    } elseif (-not [string]::IsNullOrEmpty($mountKey) -and $script:ProviderDriveMapping.ContainsKey($mountKey)) {
+        $letter = $script:ProviderDriveMapping[$mountKey]
+    } elseif (-not [string]::IsNullOrEmpty($AccountId)) {
+        try {
+            $accs = Get-CloudAccounts
+            $matched = $accs | Where-Object { $_.Id -eq $AccountId } | Select-Object -First 1
+            if ($matched -and $matched.DriveLetter) {
+                $letter = $matched.DriveLetter
+            } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
+                $letter = Get-PreferredDriveLetter $ProviderId
+            } else {
+                $letter = $script:DefaultDriveLetter
+            }
+        } catch {
+            $letter = $script:DefaultDriveLetter
         }
+    } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
+        $letter = Get-PreferredDriveLetter $ProviderId
     } else {
         $letter = $script:DefaultDriveLetter
     }
@@ -129,12 +163,27 @@ function Get-VirtualDriveStatus(
     $driveRoot = "$letter`:\"
     $driveInfo = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -eq $driveRoot }
 
+    $activeProc = Find-ActiveMountProcess -DriveLetter $letter
     $processAlive = $false
-    if (-not [string]::IsNullOrEmpty($mountKey) -and $script:ActiveMountProcesses.ContainsKey($mountKey)) {
+    $procId = $null
+    $isReadOnly = $false
+
+    if ($activeProc) {
+        $processAlive = $true
+        $procId = $activeProc.ProcessId
+        $isReadOnly = $activeProc.IsReadOnly
+        if (-not [string]::IsNullOrEmpty($mountKey)) {
+            $script:ProviderDriveMapping[$mountKey] = $letter
+        }
+    } elseif (-not [string]::IsNullOrEmpty($mountKey) -and $script:ActiveMountProcesses.ContainsKey($mountKey)) {
         $p = $script:ActiveMountProcesses[$mountKey]
-        if ($p -and (-not $p.HasExited)) { $processAlive = $true }
+        if ($p -and (-not $p.HasExited)) {
+            $processAlive = $true
+            $procId = $p.Id
+        }
     } elseif ($script:MountProcess -and (-not $script:MountProcess.HasExited)) {
         $processAlive = $true
+        $procId = $script:MountProcess.Id
     }
 
     if ($driveInfo) {
@@ -148,37 +197,48 @@ function Get-VirtualDriveStatus(
         try { $freeSpace = [int64]$driveInfo.AvailableFreeSpace } catch { }
         try { $totalSize = [int64]$driveInfo.TotalSize } catch { }
 
-        # A drive is only considered mounted by this virtual drive manager if:
-        # 1. An active rclone mount process is running for it, OR
-        # 2. It is a WinFsp/FUSE filesystem created with our provider volume label
+        # A drive is considered mounted if:
+        # 1. An active rclone mount process is running for this drive letter, OR
+        # 2. It is an accessible WinFsp/FUSE/network drive with matching volume label
+        $isAccessible = $false
+        try { $isAccessible = Test-Path -LiteralPath $driveRoot } catch { }
+
         $isManagedMount = $processAlive -or (
-            $format -and ($format -like '*WinFsp*' -or $format -like '*FUSE*') -and
-            ($volumeLabel -in @('Google Drive', 'TeraBox', 'NS Cloud Drive'))
+            $isAccessible -and (
+                ($format -and ($format -like '*WinFsp*' -or $format -like '*FUSE*' -or $format -like '*NTFS*')) -and
+                ($volumeLabel -match '(?i)Google|TeraBox|CloudDrive|Cloud')
+            )
         )
 
         return [ordered]@{
             IsMounted = [bool]$isManagedMount
             ProviderId = $ProviderId
+            AccountId = $AccountId
             DriveLetter = $letter
             DriveRoot = $driveRoot
             VolumeLabel = $volumeLabel
             Format = $format
             FreeSpace = $freeSpace
             TotalSize = $totalSize
+            IsReadOnly = $isReadOnly
             ProcessRunning = $processAlive
+            ProcessId = $procId
         }
     }
 
     return [ordered]@{
         IsMounted = $false
         ProviderId = $ProviderId
+        AccountId = $AccountId
         DriveLetter = $letter
         DriveRoot = $driveRoot
         VolumeLabel = $null
         Format = $null
         FreeSpace = 0
         TotalSize = 0
+        IsReadOnly = $false
         ProcessRunning = $processAlive
+        ProcessId = $procId
     }
 }
 
@@ -187,7 +247,8 @@ function Build-RcloneMountArguments(
     [string]$DriveLetter = $script:DefaultDriveLetter,
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
-    [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf')
+    [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf'),
+    [switch]$ReadOnly = $false
 ) {
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     $driveRoot = "$letter`:\"
@@ -206,8 +267,14 @@ function Build-RcloneMountArguments(
     $args = @(
         'mount',
         "${RemoteName}:",
-        $driveRoot,
-        '--read-only',
+        $driveRoot
+    )
+
+    if ($ReadOnly) {
+        $args += '--read-only'
+    }
+
+    $args += @(
         '--network-mode',
         '--volname', $volName,
         '--cache-dir', $safeCache,
@@ -215,6 +282,7 @@ function Build-RcloneMountArguments(
         '--vfs-cache-max-size', '20G',
         '--vfs-cache-max-age', '24h',
         '--vfs-cache-poll-interval', '1m',
+        '--vfs-write-back', '5s',
         '--dir-cache-time', '5m',
         '--attr-timeout', '1s',
         '--ask-password=false',
@@ -237,6 +305,7 @@ function Start-VirtualDriveMount(
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [hashtable]$EnvironmentVariables = @{},
+    [switch]$ReadOnly = $false,
     [int]$TimeoutSeconds = 15
 ) {
     if (-not (Test-WinFspInstalled)) {
@@ -283,7 +352,7 @@ function Start-VirtualDriveMount(
 
     # Isolated cache directory per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath ''
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -ReadOnly:$ReadOnly
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $rclonePath
@@ -440,4 +509,11 @@ function Get-CacheUsageStatistics([string]$CacheDirectory = $script:DefaultCache
         VolumeFreeBytes = $volumeFreeBytes
         VolumeFreeFormatted = "$([Math]::Round($volumeFreeBytes / 1GB, 2)) GiB"
     }
+}
+
+function Test-VirtualDriveWriteSupported([string]$DriveLetter = '') {
+    $status = Get-VirtualDriveStatus -DriveLetter $DriveLetter
+    if (-not $status.IsMounted) { return $false }
+    if ($status.IsReadOnly) { return $false }
+    return $true
 }
