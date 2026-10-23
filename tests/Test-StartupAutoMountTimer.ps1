@@ -47,6 +47,7 @@ try {
         Pending = [bool]`$script:StartupAutoMountPending
         HasWorker = (`$null -ne `$script:StartupAutoMountWorker)
         DispatchError = `$script:StartupAutoMountError
+        RestoreStage = [string]`$script:StartupAutoMountProgress.Stage
     }
     [System.IO.File]::WriteAllText(`$env:NSCD_TEST_RESULT, (`$result | ConvertTo-Json -Compress))
     `$script:IsExiting = `$true
@@ -72,10 +73,10 @@ try {
     }
 
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-    if ($result.Pending -or $result.DispatchError) {
+    if ($result.Pending -or $result.DispatchError -or $result.RestoreStage -ne 'Recovery checks complete') {
         throw "Startup timer did not complete cleanly: $($result | ConvertTo-Json -Compress)"
     }
-    Write-Output '  [PASS] Startup dispatcher timer clears pending state without a scope error.'
+    Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
 } finally {
     if ($child -and -not $child.HasExited) {
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
