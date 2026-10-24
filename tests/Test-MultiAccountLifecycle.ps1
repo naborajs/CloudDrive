@@ -28,7 +28,9 @@ $nsSourcePath = Join-Path $srcRoot 'NSCloudDrive.ps1'
 $vdSourcePath = Join-Path $srcRoot 'services\VirtualDriveManager.ps1'
 $gdProviderPath = Join-Path $srcRoot 'providers\GoogleDriveProvider.ps1'
 $tbProviderPath = Join-Path $srcRoot 'providers\TeraBoxProvider.ps1'
+$tbBridgeSourcePath = Join-Path $srcRoot 'services\TeraBoxBridgeManager.ps1'
 $pcwSourcePath = Join-Path $srcRoot 'ui\ProviderConnectionWindow.ps1'
+$ctmSourcePath = Join-Path $srcRoot 'services\CloudTransferManager.ps1'
 
 try {
     # --------------------------------------------------------------------------
@@ -268,6 +270,43 @@ try {
         throw 'Card removal no longer cleans up the per-account bridge home directory.'
     }
     Write-Output '  [PASS] Cancelled creation and card-removal cleanup hooks verified'
+
+    # --------------------------------------------------------------------------
+    # 6. Startup-restore worker scope and legacy parity. The legacy single-
+    #    provider fallback inside the worker must resolve the rclone path
+    #    without the UI helper (which is absent in the worker runspace and
+    #    previously killed every TeraBox restore attempt with a
+    #    CommandNotFoundException), and must verify an existing mount exactly
+    #    like the account branch instead of recording a false 'Mounted'.
+    # --------------------------------------------------------------------------
+    $nsAll = Get-Content -LiteralPath $nsSourcePath -Raw
+    $autoMountStart = $nsAll.IndexOf('function Invoke-StartupAutoMount {')
+    $loadedAfter = $nsAll.IndexOf('$window.Add_Loaded({')
+    if ($autoMountStart -lt 0 -or $loadedAfter -lt 0 -or $loadedAfter -le $autoMountStart) {
+        throw 'Could not locate the Invoke-StartupAutoMount region in NSCloudDrive.ps1.'
+    }
+    $autoMountRegion = $nsAll.Substring($autoMountStart, $loadedAfter - $autoMountStart)
+    if ($autoMountRegion -notmatch 'function Get-VerifiedRclonePath') {
+        throw 'The startup auto-mount worker no longer defines a worker-local Get-VerifiedRclonePath resolver.'
+    }
+    if ($autoMountRegion -notmatch "\`$results\.Add\(\[pscustomobject\]@\{ AccountId = 'gdrive'; State = 'ExistingProcess'") {
+        throw 'The legacy Google fallback no longer records a verified existing mount as ExistingProcess.'
+    }
+    if ($autoMountRegion -notmatch ([regex]::Escape("A mount process exists, but its assigned drive is not present."))) {
+        throw 'The legacy fallback no longer refuses success when a mount process lacks its drive letter.'
+    }
+    if ($autoMountRegion -notmatch 'Test-VirtualDriveFilesystem -DriveRoot \$googleStatus\.DriveRoot') {
+        throw 'The legacy Google fallback no longer runs the filesystem health probe on an existing mount.'
+    }
+    $bridgeCapture = Select-String -Path $tbBridgeSourcePath -Pattern ([regex]::Escape('[void](Stop-TeraBoxBridge -Port $Port -AccountId $AccountId -BridgePassword $existingPw)'))
+    if (-not $bridgeCapture) {
+        throw 'Start-TeraBoxBridge again leaks the Stop-TeraBoxBridge sentinel into its result pipeline.'
+    }
+    $ctmDict = Select-String -Path $ctmSourcePath -SimpleMatch -Pattern "`$bridgeStatus['Success']"
+    if (-not $ctmDict) {
+        throw 'CloudTransferManager again reads ordered-dictionary keys as properties instead of with indexing.'
+    }
+    Write-Output '  [PASS] Startup-restore worker scope, legacy parity, and bridge status shape verified'
 
 } finally {
     # Leave the process scope intact for the harness; the stub above was
