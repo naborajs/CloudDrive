@@ -46,9 +46,13 @@ Assert-True ($mainSource -match 'RemoveAt\(0\)') 'Old samples are dropped, not a
 Assert-True ($mainSource -match 'App memory:') 'App memory reported separately'
 Assert-True ($mainSource -match 'Cached files on disk:') 'Cache disk usage reported separately'
 Assert-True ($mainSource -match 'Currently in use / locked by mounts:') 'Locked/in-use cache entries are distinguished from total cache'
-Assert-True ($mainSource -match 'Transfer speeds, bytes transferred, operation durations, and provider latency: Unavailable\.') 'Unmeasurable transfer/latency metrics are Unavailable, not invented'
-Assert-True ($mainSource -match 'do not expose a transfer-statistics endpoint') 'Truthful explanation of why transfer stats are unavailable'
-Assert-True ($mainSource -match 'measuring\.\.\.') 'First sample states measurement is pending instead of showing a fake number'
+Assert-True ($mainSource -match 'Per-operation durations and provider round-trip latency: Unavailable\.') 'Metrics without a measurement channel stay Unavailable'
+Assert-True ($mainSource -match 'do not expose a transfer-statistics endpoint') 'Truthful explanation of why per-operation stats are unavailable'
+Assert-True ($mainSource -match 'Mount process I/O rate \(measured\):') 'I/O rate row is real and labeled as measured'
+Assert-True ($mainSource -match 'I/O totals per mount process \(since process start\):') 'Cumulative per-process I/O totals are reported'
+Assert-True ($mainSource -match 'ReadTransferCount') 'I/O bytes come from real OS process counters'
+Assert-True ($mainSource -match 'AnalyticsIoBaseline') 'I/O rates use a first-seen baseline for between-sample deltas'
+Assert-True ($mainSource -match 'first sample; visible on the next refresh') 'First sample states measurement is pending instead of showing a fake number'
 
 # 7. Per-account health uses the app's own cached truth, not new probing.
 Assert-True ($mainSource -match 'Get-CachedUiDriveStatus -ProviderId \(\[string\]\$acc\.ProviderId\)') 'Per-account health reads the same cached status the UI displays'
