@@ -25,8 +25,15 @@ function Set-StrictTeraBoxCredentialAcl([string]$Path) {
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
         $isDir = (Test-Path -LiteralPath $Path -PathType Container)
-        $acl = if ($isDir) { [System.Security.AccessControl.DirectorySecurity]::new() } else { [System.Security.AccessControl.FileSecurity]::new() }
+        $acl = if ($isDir) {
+            [System.IO.Directory]::GetAccessControl($Path)
+        } else {
+            [System.IO.File]::GetAccessControl($Path)
+        }
         $acl.SetAccessRuleProtection($true, $false)
+        foreach ($existingRule in @($acl.Access)) {
+            [void]$acl.RemoveAccessRuleSpecific($existingRule)
+        }
         foreach ($sid in @($userSid, $systemSid)) {
             $rule = if ($isDir) {
                 [System.Security.AccessControl.FileSystemAccessRule]::new(
@@ -43,10 +50,16 @@ function Set-StrictTeraBoxCredentialAcl([string]$Path) {
                     [System.Security.AccessControl.AccessControlType]::Allow
                 )
             }
-            [void]$acl.AddAccessRule($rule)
+            [void]$acl.SetAccessRule($rule)
         }
-        Set-Acl -LiteralPath $Path -AclObject $acl
-    } catch { }
+        if ($isDir) {
+            [System.IO.Directory]::SetAccessControl($Path, $acl)
+        } else {
+            [System.IO.File]::SetAccessControl($Path, $acl)
+        }
+    } catch {
+        throw "Unable to restrict permissions on the TeraBox credential path '$Path': $($_.Exception.Message)"
+    }
 }
 
 function Get-TeraBoxProviderInfo {
@@ -168,8 +181,8 @@ function Save-TeraBoxSession(
 
     if (-not (Test-Path -LiteralPath $credDir)) {
         New-Item -ItemType Directory -Path $credDir | Out-Null
-        Set-StrictTeraBoxCredentialAcl -Path $credDir
     }
+    Set-StrictTeraBoxCredentialAcl -Path $credDir
 
     $secretToStore = $Secret
     if (-not [string]::IsNullOrEmpty($JsToken) -or
