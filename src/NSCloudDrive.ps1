@@ -11,7 +11,11 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
+Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon); [DllImport("shell32.dll", SetLastError = true)] public static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
+
+try {
+    [NSCloudDrive.Win32]::SetCurrentProcessExplicitAppUserModelID('NSCloud.NSCloudDrive')
+} catch { }
 
 function Invoke-MemoryTrim {
     try {
@@ -704,6 +708,93 @@ $bannerChipsStack.VerticalAlignment = 'Center'
 $bannerGrid.Children.Add($bannerChipsStack) | Out-Null
 
 $content.Children.Add($drivesSummaryBanner) | Out-Null
+
+# ==============================================================================
+# LIVE BACKGROUND TRANSFER ACTIVITY MONITOR
+# ==============================================================================
+# Displays real-time upload progress, real network speed, and countdown ETAs
+# whenever files are staged and actively uploading across network in the background.
+$liveTransferCard = [System.Windows.Controls.Border]::new()
+$liveTransferCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$liveTransferCard.Padding = [System.Windows.Thickness]::new(14, 12, 14, 12)
+$liveTransferCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+$liveTransferCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$liveTransferCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$liveTransferCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+
+$liveTransferMainStack = [System.Windows.Controls.StackPanel]::new()
+$liveTransferCard.Child = $liveTransferMainStack
+
+# Header Row: Icon + File Name + Drive Badge + Live Countdown ETA
+$ltHeaderGrid = [System.Windows.Controls.Grid]::new()
+$ltCol0 = [System.Windows.Controls.ColumnDefinition]::new(); $ltCol0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+$ltCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $ltCol1.Width = [System.Windows.GridLength]::Auto
+$ltHeaderGrid.ColumnDefinitions.Add($ltCol0)
+$ltHeaderGrid.ColumnDefinitions.Add($ltCol1)
+
+$ltLeftStack = [System.Windows.Controls.StackPanel]::new()
+$ltLeftStack.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+$ltLeftStack.VerticalAlignment = 'Center'
+[System.Windows.Controls.Grid]::SetColumn($ltLeftStack, 0)
+
+$ltIcon = New-Label ([char]::ConvertFromUtf32(0x2191)) 13 '#3B82F6' $true
+$ltIcon.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$ltLeftStack.Children.Add($ltIcon) | Out-Null
+
+$liveTransferFileName = New-Label 'Uploading file...' 13 $script:Palette.TextPrimary $true
+$liveTransferFileName.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+$liveTransferFileName.MaxWidth = 360
+$liveTransferFileName.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+$ltLeftStack.Children.Add($liveTransferFileName) | Out-Null
+
+$liveTransferDriveBadge = [System.Windows.Controls.Border]::new()
+$liveTransferDriveBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+$liveTransferDriveBadge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+$liveTransferDriveBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$liveTransferDriveBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$liveTransferDriveBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+$liveTransferDriveBadgeText = New-Label 'T: TeraBox' 11 $script:Palette.TextSecondary $false
+$liveTransferDriveBadge.Child = $liveTransferDriveBadgeText
+$ltLeftStack.Children.Add($liveTransferDriveBadge) | Out-Null
+$ltHeaderGrid.Children.Add($ltLeftStack) | Out-Null
+
+$liveTransferEta = New-Label 'Calculating...' 12 '#3B82F6' $true
+$liveTransferEta.VerticalAlignment = 'Center'
+[System.Windows.Controls.Grid]::SetColumn($liveTransferEta, 1)
+$ltHeaderGrid.Children.Add($liveTransferEta) | Out-Null
+$liveTransferMainStack.Children.Add($ltHeaderGrid) | Out-Null
+
+# Row 2: Smooth Progress Bar
+$liveTransferProgressBar = [System.Windows.Controls.ProgressBar]::new()
+$liveTransferProgressBar.Height = 6
+$liveTransferProgressBar.Margin = [System.Windows.Thickness]::new(0, 8, 0, 8)
+$liveTransferProgressBar.Minimum = 0
+$liveTransferProgressBar.Maximum = 100
+$liveTransferProgressBar.Value = 0
+$liveTransferProgressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
+$liveTransferProgressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$liveTransferProgressBar.BorderThickness = [System.Windows.Thickness]::new(0)
+$liveTransferMainStack.Children.Add($liveTransferProgressBar) | Out-Null
+
+# Row 3: Live Details & Transparent Status
+$ltFooterGrid = [System.Windows.Controls.Grid]::new()
+$ltFCol0 = [System.Windows.Controls.ColumnDefinition]::new(); $ltFCol0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+$ltFCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $ltFCol1.Width = [System.Windows.GridLength]::Auto
+$ltFooterGrid.ColumnDefinitions.Add($ltFCol0)
+$ltFooterGrid.ColumnDefinitions.Add($ltFCol1)
+
+$liveTransferDetails = New-Label 'Uploading • 0 B of 0 B (0%) • 0 B/s (0.0 Mbps)' 11 $script:Palette.TextSecondary $false
+[System.Windows.Controls.Grid]::SetColumn($liveTransferDetails, 0)
+$ltFooterGrid.Children.Add($liveTransferDetails) | Out-Null
+
+$liveTransferNote = New-Label 'Local write complete • Streaming to cloud' 11 $script:Palette.TextSecondary $false
+$liveTransferNote.Opacity = 0.75
+[System.Windows.Controls.Grid]::SetColumn($liveTransferNote, 1)
+$ltFooterGrid.Children.Add($liveTransferNote) | Out-Null
+$liveTransferMainStack.Children.Add($ltFooterGrid) | Out-Null
+
+$content.Children.Add($liveTransferCard) | Out-Null
 
 # Saved accounts are the primary drive list. Provider-only entries are shown
 # afterward only when an active mount cannot be reconciled to a saved account.
@@ -2893,7 +2984,18 @@ function Apply-UITheme([string]$ThemeName) {
     $gdAccountText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     $gdInLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     $gdQuotaText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
-    $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+        if ($null -ne $liveTransferCard) {
+        $liveTransferCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+        $liveTransferCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+        $liveTransferFileName.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        $liveTransferDriveBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        $liveTransferDriveBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+        $liveTransferDriveBadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+        $liveTransferDetails.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+        $liveTransferNote.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+        $liveTransferProgressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    }
+$gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
 
     foreach ($btn in @($gdExplorerBtn, $gdSettingsBtn, $gdUploadBtn, $gdRemoveBtn)) {
         $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
@@ -5835,11 +5937,143 @@ $window.Add_Loaded({
 })
 
 # ==============================================================================
+# ==============================================================================
+# LIVE BACKGROUND TRANSFER ACTIVITY ENGINE
+# ==============================================================================
+$script:LastNotifiedTransferFile = ''
+$script:LastActiveTransferInfo = $null
+$script:LastCompletedTransferTime = [DateTime]::MinValue
+$script:LastTransferCheck = [DateTime]::MinValue
+
+function Format-LocalByteSize([int64]$Bytes) {
+    if ($Bytes -ge 1TB) { return "$([Math]::Round($Bytes / 1TB, 2)) TB" }
+    if ($Bytes -ge 1GB) { return "$([Math]::Round($Bytes / 1GB, 2)) GB" }
+    if ($Bytes -ge 1MB) { return "$([Math]::Round($Bytes / 1MB, 1)) MB" }
+    if ($Bytes -ge 1KB) { return "$([Math]::Round($Bytes / 1KB, 1)) KB" }
+    return "$Bytes B"
+}
+
+function Update-LiveTransferActivity {
+    $now = [DateTime]::UtcNow
+    $interval = if ($script:LastActiveTransferInfo) { 1.5 } else { 3.5 }
+    if (($now - $script:LastTransferCheck).TotalSeconds -lt $interval) { return }
+    $script:LastTransferCheck = $now
+
+    $activeTransfer = $null
+    $activeAccount = $null
+    $activeDrive = $null
+
+    try {
+        $accounts = @(Get-CloudAccounts)
+        foreach ($acc in $accounts) {
+            $letter = [string]$acc.DriveLetter
+            if (-not $letter) { continue }
+            $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
+            if ($vfs.IsActive -and ($vfs.UploadsInProgress -gt 0 -or $vfs.UploadsQueued -gt 0 -or ($vfs.Transferring -and $vfs.Transferring.Count -gt 0))) {
+                $activeTransfer = $vfs
+                $activeAccount = $acc
+                $activeDrive = $letter.ToUpperInvariant().TrimEnd(':')
+                break
+            }
+        }
+    } catch { }
+
+    if ($activeTransfer) {
+        $transferList = @($activeTransfer.Transferring)
+        $t = if ($transferList.Count -gt 0) { $transferList[0] } else { $null }
+
+        $fileName = if ($t -and $t.Name) {
+            [System.IO.Path]::GetFileName($t.Name)
+        } else {
+            'Synchronizing staged files...'
+        }
+
+        $fileSize = if ($t -and $t.Size) { [int64]$t.Size } else { [int64]$activeTransfer.CacheBytesUsed }
+        $bytesTransferred = if ($t -and $t.Bytes) { [int64]$t.Bytes } else { [int64]$activeTransfer.BytesTransferred }
+        $speed = if ($t -and $t.Speed -gt 0) { [double]$t.Speed } else { [double]$activeTransfer.TransferSpeed }
+        $pct = if ($t -and $t.Percentage -gt 0) {
+            [double]$t.Percentage
+        } elseif ($fileSize -gt 0 -and $bytesTransferred -gt 0) {
+            [Math]::Min(100.0, [Math]::Round(($bytesTransferred / [double]$fileSize) * 100.0, 1))
+        } else {
+            0.0
+        }
+        $etaSec = if ($t -and $null -ne $t.Eta) { $t.Eta } else { $null }
+
+        $providerName = if ($activeAccount) { [string]$activeAccount.DisplayName } else { "Drive ${activeDrive}:" }
+        $speedFormatted = Format-TransferThroughput -BytesPerSec $speed
+        $etaFormatted = Format-EtaTimeSpan $etaSec
+        $sizeFormatted = if ($fileSize -gt 0) { Format-LocalByteSize $fileSize } else { '' }
+        $bytesFormatted = if ($bytesTransferred -gt 0) { Format-LocalByteSize $bytesTransferred } else { '0 B' }
+
+        $liveTransferFileName.Text = $fileName
+        $liveTransferDriveBadgeText.Text = "${activeDrive}: • $providerName"
+        $liveTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
+        $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
+
+        $statusPrefix = if ($activeTransfer.UploadsInProgress -gt 0) {
+            "Uploading to Cloud"
+        } else {
+            "Staged on SSD cache • Queued for upload"
+        }
+
+        $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))%) • $speedFormatted"
+        $liveTransferEta.Text = if ($etaSec -gt 0) { "~$etaFormatted remaining" } elseif ($activeTransfer.UploadsQueued -gt 0) { "Starting upload..." } else { "Streaming..." }
+
+        if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Visible) {
+            $liveTransferCard.Visibility = [System.Windows.Visibility]::Visible
+        }
+
+        if ($fileName -and $fileName -ne $script:LastNotifiedTransferFile) {
+            $script:LastNotifiedTransferFile = $fileName
+            try {
+                $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::Info)
+            } catch { }
+        }
+
+        $script:LastActiveTransferInfo = [pscustomobject]@{
+            FileName = $fileName
+            FileSize = $fileSize
+            ProviderName = $providerName
+            Drive = $activeDrive
+            CompletedAt = [DateTime]::UtcNow
+        }
+    } else {
+        if ($script:LastActiveTransferInfo) {
+            $prev = $script:LastActiveTransferInfo
+            $script:LastActiveTransferInfo = $null
+            $script:LastCompletedTransferTime = [DateTime]::UtcNow
+
+            $liveTransferFileName.Text = [string][char]0x2713 + " Completed: $($prev.FileName)"
+            $liveTransferDriveBadgeText.Text = "$($prev.Drive): • $($prev.ProviderName)"
+            $liveTransferProgressBar.Value = 100.0
+            $liveTransferProgressBar.IsIndeterminate = $false
+            $liveTransferDetails.Text = "Verified & safely stored on $($prev.ProviderName). All bytes confirmed remotely."
+            $liveTransferEta.Text = "Finished"
+
+            try {
+                $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
+                $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::Info)
+            } catch { }
+        } elseif ($script:LastCompletedTransferTime -ne [DateTime]::MinValue) {
+            if (([DateTime]::UtcNow - $script:LastCompletedTransferTime).TotalSeconds -ge 6.0) {
+                $script:LastCompletedTransferTime = [DateTime]::MinValue
+                $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+            }
+        } else {
+            if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Collapsed) {
+                $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+            }
+        }
+    }
+}
+
 # BACKGROUND REFRESH AND MEMORY TRIM TIMER
 # ==============================================================================
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
+    Update-LiveTransferActivity
     if ($script:StartupAutoMountPending -and
         -not $script:StartupAutoMountWorker -and
         $script:StartupAutoMountTimer -and
