@@ -170,6 +170,16 @@ function Set-PreferredDriveLetter([string]$ProviderId, [string]$Letter) {
 }
 
 function Get-CloudAccounts {
+    # Short-circuit cache: settings.json is read from disk on every call, so
+    # cache the normalized account list for a short TTL to avoid repeated
+    # file reads during UI refresh ticks. Invalidated by Clear-AccountListCache
+    # after any account mutation.
+    $now = [DateTime]::UtcNow
+    if ($script:AccountListCache -and
+        ($now - $script:AccountListCacheAt).TotalSeconds -lt $script:AccountListCacheTtlSec) {
+        return $script:AccountListCache
+    }
+
     $settings = Get-NSCloudDriveSettings
     $list = @()
     if ($settings.Accounts -and $settings.Accounts.Count -gt 0) {
@@ -192,9 +202,42 @@ function Get-CloudAccounts {
         }
     }
     if ($list.Count -eq 0) {
+        $script:AccountListCache = @()
+        $script:AccountListCacheAt = $now
         return
     }
+    $script:AccountListCache = $list
+    $script:AccountListCacheAt = $now
     return $list
+}
+
+# Cached account list to avoid re-reading settings.json from disk on every
+# timer tick. Invalidated after account mutations and refreshed on a short
+# TTL so UI-visible changes appear within a few seconds. Lives in script
+# scope so both SettingsManager and NSCloudDrive (which dot-sources this
+# file) share the same cache.
+$script:AccountListCache = $null
+$script:AccountListCacheAt = [DateTime]::MinValue
+$script:AccountListCacheTtlSec = 5
+
+function Get-CachedCloudAccounts {
+    $now = [DateTime]::UtcNow
+    if ($script:AccountListCache -and
+        ($now - $script:AccountListCacheAt).TotalSeconds -lt $script:AccountListCacheTtlSec) {
+        return $script:AccountListCache
+    }
+    try {
+        $script:AccountListCache = @(Get-CloudAccounts)
+    } catch {
+        $script:AccountListCache = @()
+    }
+    $script:AccountListCacheAt = $now
+    return $script:AccountListCache
+}
+
+function Clear-AccountListCache {
+    $script:AccountListCache = $null
+    $script:AccountListCacheAt = [DateTime]::MinValue
 }
 
 function Get-CloudAccount([string]$AccountId) {
@@ -262,6 +305,7 @@ function Add-CloudAccount([hashtable]$Account) {
     $accounts += $item
     $settings.Accounts = $accounts
     Set-NSCloudDriveSettings $settings
+    Clear-AccountListCache
     return $item
 }
 
@@ -309,6 +353,7 @@ function Update-CloudAccount([hashtable]$Account) {
     }
     $settings.Accounts = $newAccounts
     Set-NSCloudDriveSettings $settings
+    Clear-AccountListCache
     return $merged
 }
 
@@ -329,6 +374,7 @@ function Remove-CloudAccount([string]$AccountId) {
     if ($found) {
         $settings.Accounts = $accounts
         Set-NSCloudDriveSettings $settings
+        Clear-AccountListCache
     }
     return $found
 }
@@ -350,6 +396,7 @@ function Remove-SeededPlaceholderAccounts {
     if ($changed) {
         $settings.Accounts = $cleaned
         Set-NSCloudDriveSettings $settings
+        Clear-AccountListCache
     }
     return $cleaned
 }
@@ -426,7 +473,14 @@ function Set-WindowsStartupEnabled([bool]$Enable, [string]$ScriptPath = '') {
             (Join-Path $PSScriptRoot '..\NSCloudDrive.ps1')
         }
         $targetScript = [System.IO.Path]::GetFullPath($targetScript)
-        $commandValue = "`"powershell.exe`" -NoProfile -WindowStyle Hidden -STA -File `"$targetScript`" -Minimized"
+        $settings = Get-NSCloudDriveSettings
+        $minParam = if ($settings -and $settings.StartMinimized) { ' -Minimized' } else { '' }
+        $psExe = if (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
+            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        } else {
+            'powershell.exe'
+        }
+        $commandValue = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$targetScript`"$minParam"
         Set-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive' -Value $commandValue -Type String
     } else {
         Remove-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive' -ErrorAction SilentlyContinue
