@@ -161,10 +161,17 @@ try {
     #    not required; same provider is harder) with distinct letters, custom
     #    names, persistent settings store, conflict refusals, and removal.
     # --------------------------------------------------------------------------
-    $savedB = Update-CloudAccount ([ordered]@{ Id = 'life_gd_y'; DisplayName = 'Beta Renamed' }) | Out-Null
+    Update-CloudAccount ([ordered]@{
+        Id = 'life_gd_y'
+        DisplayName = 'Beta Renamed'
+        CacheDirectory = 'C:\NSCD-Lifecycle-Cache-B'
+        CacheMaxGigabytes = 7
+    }) | Out-Null
     $persisted = Get-CloudAccount -AccountId 'life_gd_y'
-    if ($null -eq $persisted -or $persisted.DisplayName -ne 'Beta Renamed') {
-        throw 'Renaming an account did not persist its display name.'
+    if ($null -eq $persisted -or $persisted.DisplayName -ne 'Beta Renamed' -or
+        $persisted.CacheDirectory -ne 'C:\NSCD-Lifecycle-Cache-B' -or
+        $persisted.CacheMaxGigabytes -ne 7) {
+        throw 'Renaming an account or saving its per-drive cache settings did not persist.'
     }
     $allAccounts = Get-CloudAccounts
     if ($allAccounts.Count -ne 2) {
@@ -234,6 +241,11 @@ try {
     if ($builderArgsRw -contains '--read-only') {
         throw 'Build-RcloneMountArguments added --read-only to a read-write mount.'
     }
+    $builderArgsWithAccountCache = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'Y' -CacheMaxGigabytes 7
+    $cacheLimitIndex = $builderArgsWithAccountCache.IndexOf('--vfs-cache-max-size')
+    if ($cacheLimitIndex -lt 0 -or $builderArgsWithAccountCache[$cacheLimitIndex + 1] -ne '7G') {
+        throw 'Build-RcloneMountArguments did not apply the selected account''s VFS cache limit.'
+    }
 
     $nsReadOnlySites = (Select-String -Path $nsSourcePath -Pattern ([regex]::Escape('-ReadOnly:$([bool]$account.ReadOnly)')))
     if (@($nsReadOnlySites).Count -ne 4) {
@@ -269,14 +281,47 @@ try {
     if (-not $cancelGd -or -not $cancelTb) {
         throw 'Refused or cancelled account creation no longer cleans up the provider session.'
     }
-    $nsRemovalCleanup = Select-String -Path $nsSourcePath -Pattern ([regex]::Escape('Get-TeraBoxBridgeHomeDirectory -AccountId ([string]$currAcc.Id)'))
+    $nsRemovalCleanup = Select-String -Path $nsSourcePath -Pattern ([regex]::Escape('Get-TeraBoxBridgeHomeDirectory -AccountId $request.AccountId'))
     if (-not $nsRemovalCleanup) {
         throw 'Card removal no longer cleans up the per-account bridge home directory.'
+    }
+    if (-not (Select-String -Path $nsSourcePath -SimpleMatch -Pattern 'Join-Path $request.CacheDirectory $request.AccountId')) {
+        throw 'Account removal no longer cleans the cache under that account''s configured cache base.'
     }
     Write-Output '  [PASS] Cancelled creation and card-removal cleanup hooks verified'
 
     # --------------------------------------------------------------------------
-    # 6. Startup-restore worker scope and legacy parity. The legacy single-
+    # 6. Disconnect must be backgrounded, scoped to the selected identity, and
+    #    reflected in the UI only after process and drive removal are verified.
+    # --------------------------------------------------------------------------
+    $nsSource = Get-Content -LiteralPath $nsSourcePath -Raw
+    $disconnectRegion = [regex]::Match($nsSource, '(?ms)function Start-ScopedDriveDisconnect\(.*?function Start-ProviderStatusRefreshWorker').Value
+    if (-not $disconnectRegion -or
+        $disconnectRegion -notmatch 'Start-NSBackgroundOperation' -or
+        $disconnectRegion -notmatch 'Stop-VirtualDriveMount -ProviderId \$providerId -AccountId \$accountId -DriveLetter \$driveLetter' -or
+        $disconnectRegion -notmatch '\$status\.ProcessRunning -or \$status\.IsMounted' -or
+        $disconnectRegion -notmatch 'Get-SafeProperty \$result ''Verified'' \$false') {
+        throw 'Selected-account disconnect is not asynchronous and verified before completion.'
+    }
+    if ($nsSource -notmatch 'Get-CloudAccount -AccountId \(\[string\]\$sender\.Tag\)' -or
+        $nsSource -notmatch '(?s)\$mountOptionsChanged = .*?\$previous\.CacheDirectory .*?\$savedAcc\.CacheMaxGigabytes' -or
+        $nsSource -notmatch '\$restoredAccount\.OpenExplorerOnMount') {
+        throw 'Drive actions and saved mount options are not bound to the selected account.'
+    }
+    if ($nsSource -notmatch 'CacheDirectory \$accountCacheDirectory -CacheMaxGigabytes \$accountCacheMaxGigabytes') {
+        throw 'Startup and reconnect mount workers do not use the selected account''s effective cache settings.'
+    }
+    $settingsModalSource = Get-Content -LiteralPath $pcwSourcePath -Raw
+    if ($settingsModalSource -notmatch 'CacheDirectory = \$cacheDirectory' -or
+        $settingsModalSource -notmatch 'CacheMaxGigabytes = \$cacheMaxGigabytes' -or
+        $settingsModalSource -notmatch 'VerticalScrollBarVisibility = ''Auto''') {
+        throw 'Drive settings must persist cache values and keep all options reachable in the scrollable modal.'
+    }
+    Write-Output '  [PASS] Selected-account disconnect is asynchronous, scoped, and verified before UI completion'
+    Write-Output '  [PASS] Per-account cache settings save and trigger remount when changed'
+
+    # --------------------------------------------------------------------------
+    # 7. Startup-restore worker scope and legacy parity. The legacy single-
     #    provider fallback inside the worker must resolve the rclone path
     #    without the UI helper (which is absent in the worker runspace and
     #    previously killed every TeraBox restore attempt with a
