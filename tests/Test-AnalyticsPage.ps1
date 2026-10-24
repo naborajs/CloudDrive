@@ -10,14 +10,31 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 Assert-True ($mainSource -match 'function Show-AnalyticsView') 'Analytics view is reachable'
 Assert-True ($mainSource -match '\$navAnalyticsItem\.Button\.Add_Click\(\{ Show-AnalyticsView \}\)') 'Analytics navigation is wired'
-Assert-True ($mainSource -match '\$script:AnalyticsSampler\.Interval = \[TimeSpan\]::FromSeconds\(5\)') 'Lightweight resource samples are five seconds apart'
-Assert-True ($mainSource -match '(?ms)if \(\$script:CurrentView -ne ''Analytics''\) \{\s+\$script:AnalyticsSampler\.Stop\(\)') 'Sampler stops when the page is no longer active'
+Assert-True ($mainSource -match 'function Start-AnalyticsCollection') 'On-demand collection function exists'
+Assert-True ($mainSource -match 'function Stop-AnalyticsCollection') 'On-demand collection cleanup exists'
+Assert-True ($mainSource -match 'analyticsGetAnalyticsBtn') 'Get Analytics button exists'
+Assert-True ($mainSource -match 'analyticsRefreshAnalyticsBtn') 'Refresh Analytics button exists'
 
+# Analytics must NOT auto-start on navigation - no sampler timer, no automatic collection
+Assert-True ($mainSource -notmatch '\$script:AnalyticsSampler') 'No AnalyticsSampler timer (no automatic polling)'
+Assert-True ($mainSource -notmatch 'Start-AnalyticsSampling') 'No automatic sampling start'
+Assert-True ($mainSource -notmatch 'Show-AnalyticsView[\s\S]*?Start-AnalyticsSampling') 'Show-AnalyticsView does not start automatic collection'
+
+# Navigation away from Analytics stops collection work
 foreach ($fn in @('Show-DisksView', 'Show-OptionsView', 'Show-HelpView', 'Show-LogsView')) {
-    $pattern = 'function ' + $fn + ' \{[\s\S]?[\s\S]*?\$script:AnalyticsSampler\.Stop\(\)[\s\S]?[\s\S]*?Stop-AnalyticsStorageWorker'
-    Assert-True ($mainSource -match $pattern) "$fn stops analytics sampling and quota work"
+    $pattern = 'function ' + $fn + ' \{[\s\S]*?Stop-AnalyticsCollection'
+    Assert-True ($mainSource -match $pattern) "$fn stops analytics collection on navigation away"
 }
 
+# In-progress guard prevents overlapping requests
+Assert-True ($mainSource -match '\$script:AnalyticsCollectionInProgress') 'Collection in-progress guard exists'
+Assert-True ($mainSource -match 'if \(\$script:AnalyticsCollectionInProgress\) \{ return \}') 'Overlapping collection requests are rejected'
+
+# Collection status elements exist
+Assert-True ($mainSource -match '\$analyticsCollectionStatus') 'Collection status display exists'
+Assert-True ($mainSource -match '\$analyticsCollectionErrors') 'Collection errors display exists'
+
+# Dashboard content
 Assert-True ($mainSource -match '\$analyticsAccounts = New-AnalyticsRow') 'Dashboard reports total cloud accounts'
 Assert-True ($mainSource -match '\$analyticsMounts = New-AnalyticsRow') 'Dashboard reports active mounted drives'
 Assert-True ($mainSource -match 'App RAM:') 'Dashboard reports app RAM when measurable'
@@ -28,7 +45,7 @@ Assert-True ($mainSource -match 'ProgressBar\]::new\(\)') 'Storage usage is draw
 Assert-True ($mainSource -match 'ResponseMilliseconds = \[int\]\$responseTimer\.ElapsedMilliseconds') 'Provider response times are measured around real quota checks'
 Assert-True ($mainSource -match 'Email = \$email[\s\S]{0,200}DriveLetter = \[string\]\$account\.DriveLetter') 'Each storage row keeps provider identity and drive assignment together'
 Assert-True ($mainSource -match 'IdentityVerified') 'Google storage is accepted only with a verified identity'
-Assert-True ($mainSource -match 'Used and remaining storage: Unavailable') 'Unverified or missing storage is displayed as unavailable'
+Assert-True ($mainSource -match 'Storage: Not yet collected') 'Storage shows not-yet-collected state initially'
 Assert-True ($mainSource -match '\$total -le 0 -or \$used -lt 0') 'Missing provider quota is not presented as a fabricated zero'
 Assert-True ($mainSource -match 'Start-NSBackgroundOperation.*AnalyticsStorageWorker|AnalyticsStorageWorker = Start-NSBackgroundOperation') 'Provider quota checks run off the dispatcher'
 $analyticsMetrics = [regex]::Match($mainSource, '(?s)function Update-AnalyticsMetrics \{.*?function Get-AnalyticsCpuPercent').Value
@@ -44,4 +61,9 @@ Assert-True ($mainSource.Contains('$analyticsDarkPalette = $p.Name -in @(''PureB
 Assert-True ($mainSource.Contains('[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)') -and $mainSource.Contains('Active mounted drives: $($mountedDriveLetters.Count).')) 'Mounted-drive analytics counts unique drive letters across saved and legacy mounts'
 Assert-True ($mainSource -notmatch 'Get-Random') 'No synthetic resource or storage values are generated'
 
-Write-Output '  [PASS] Analytics dashboard contract verified (mocked/structural; no real provider quota call performed).'
+# Collection is time-stamped and duration-tracked
+Assert-True ($mainSource -match '\$script:AnalyticsLastCollectionTime') 'Collection timestamp is recorded'
+Assert-True ($mainSource -match '\$script:AnalyticsLastCollectionDurationMs') 'Collection duration is recorded'
+Assert-True ($mainSource -match 'Stopwatch') 'Stopwatch is used to measure collection duration'
+
+Write-Output '  [PASS] Analytics dashboard contract verified (on-demand, no automatic polling; mocked/structural; no real provider quota call performed).'
