@@ -90,17 +90,14 @@ function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue 
 function Get-TeraBoxStoredSession([string]$AccountId = '') {
     $credPath = Get-TeraBoxCredentialFilePath -AccountId $AccountId
     if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
-        # Fallback to default if account-specific file does not exist
-        if (-not [string]::IsNullOrEmpty($AccountId) -and $AccountId -ne 'terabox') {
-            $defaultPath = Get-TeraBoxCredentialFilePath
-            if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
-                $credPath = $defaultPath
-            } else {
-                return $null
-            }
-        } else {
-            return $null
-        }
+        # Account-scoped reads must NEVER silently fall back to the shared
+        # legacy session file: it belongs to the legacy TeraBox connection
+        # and can hold a DIFFERENT TeraBox user's cookie. Reading it here
+        # would validate, mount, and show that other user's files under
+        # this account's id, drive letter, and display name. A missing
+        # account-specific file is a clean "no session for this account"
+        # answer; consumers report a sign-in requirement for it.
+        return $null
     }
 
     try {
@@ -445,7 +442,12 @@ function Test-TeraBoxBackendSession(
                 if ($null -ne $errno -and [int]$errno -eq 0) {
                     $baseUrl = $switchedBaseUrl
                     try {
-                        Save-TeraBoxSession -Type $session.Type -Secret $session.Secret -JsToken $session.JsToken -BaseUrl $baseUrl -UserAgent $activeUserAgent
+                        # Persist the host fix under THIS account's id. Saving
+                        # without an AccountId would write this account's
+                        # metadata into the legacy single-account session file
+                        # and silently switch that connection's identity to
+                        # this account's user.
+                        Save-TeraBoxSession -Type $session.Type -Secret $session.Secret -JsToken $session.JsToken -BaseUrl $baseUrl -UserAgent $activeUserAgent -AccountId $AccountId
                     } catch { }
                 }
             }
