@@ -20,8 +20,17 @@ $managerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\servi
 if ($managerSource -notmatch 'Test-VirtualDriveFilesystem -DriveRoot \$driveRoot -TimeoutSeconds 10' -or $managerSource -notmatch 'FilesystemVerified = \$true') {
     throw 'The mount launcher must verify directory enumeration before returning success.'
 }
+$timeoutBranch = [regex]::Match($managerSource, "(?s)if \(\`$filesystemCheck\.State -eq 'Timeout'\) \{.*?\}").Value
+if (-not $timeoutBranch -or
+    $timeoutBranch -notmatch 'remains running' -or
+    $timeoutBranch -match 'Stop-VirtualDriveMount') {
+    throw 'A slow root probe must report unverified readiness without terminating the newly started mount process.'
+}
+if ($managerSource -notmatch 'Find-ActiveMountProcess -DriveLetter \$letter -MountKey \$mountKey') {
+    throw 'Drive status must verify the process belongs to the selected account/provider namespace.'
+}
 if ($managerSource -notmatch 'already in use\. Choose another letter') {
     throw 'An occupied explicitly assigned drive letter must produce a conflict instead of silently changing letters.'
 }
 
-Write-Output '  [PASS] Filesystem root listing is bounded and required for mount success; invalid probe inputs and explicit drive-letter conflicts are rejected.'
+Write-Output '  [PASS] New mounts require a successful root probe, slow probes preserve the process, and explicit drive-letter conflicts are rejected.'
