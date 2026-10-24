@@ -175,10 +175,48 @@ function Test-CacheDirectorySafety {
 # SAFE CACHE CLEANUP & LRU SIZE ENFORCEMENT
 # ==============================================================================
 
+function Get-ManagedCacheDirectories {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CacheDirectory,
+        [string[]]$MountCacheDirectories = @()
+    )
+
+    $managedDirectoryPattern = '^(?:gdrive|terabox)(?:_[A-Za-z0-9_-]{1,128})?$'
+    $targets = [System.Collections.Generic.List[string]]::new()
+    if ($MountCacheDirectories.Count -gt 0) {
+        foreach ($directory in $MountCacheDirectories) {
+            if ([string]::IsNullOrWhiteSpace($directory)) { continue }
+            $mountKey = [System.IO.Path]::GetFileName($directory.TrimEnd('\', '/'))
+            if ($mountKey -notmatch $managedDirectoryPattern) {
+                throw 'Refusing cache operation for a directory outside an account cache namespace.'
+            }
+            if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
+            $targetInfo = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+            if (($targetInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing cache operation on a reparse-point account cache path: $directory"
+            }
+            $targets.Add($targetInfo.FullName)
+        }
+    } elseif (Test-Path -LiteralPath $CacheDirectory -PathType Container) {
+        foreach ($directory in Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction Stop) {
+            if ($directory.Name -notmatch $managedDirectoryPattern) { continue }
+            if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing cache operation on a reparse-point account cache path: $($directory.FullName)"
+            }
+            $targets.Add($directory.FullName)
+        }
+    }
+
+    return ,$targets.ToArray()
+}
+
 function Invoke-SafeCacheCleanup {
     [CmdletBinding()]
     param(
         [string]$CacheDirectory = '',
+        [string[]]$MountCacheDirectories = @(),
         [int64]$TargetMaxBytes = -1L,
         [int]$MaxAgeHours = 0,
         [switch]$Force
@@ -192,7 +230,8 @@ function Invoke-SafeCacheCleanup {
         }
     }
 
-    if (-not (Test-Path -LiteralPath $CacheDirectory)) {
+    $managedDirectories = @(Get-ManagedCacheDirectories -CacheDirectory $CacheDirectory -MountCacheDirectories $MountCacheDirectories)
+    if ($managedDirectories.Count -eq 0) {
         return [ordered]@{
             CleanedBytes = 0L
             CleanedFiles = 0
@@ -200,15 +239,17 @@ function Invoke-SafeCacheCleanup {
             SkippedInUseBytes = 0L
             RemainingBytes = 0L
             UnmountRequired = $false
+            Errors = @()
         }
     }
 
-    $allFiles = @()
-    try {
-        $allFiles = Get-ChildItem -LiteralPath $CacheDirectory -Recurse -File -Force -ErrorAction SilentlyContinue
-    } catch { }
+    $allFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($managedDirectory in $managedDirectories) {
+        Get-ChildItem -LiteralPath $managedDirectory -Recurse -File -Force -ErrorAction Stop |
+            ForEach-Object { $allFiles.Add($_) }
+    }
 
-    if (-not $allFiles -or $allFiles.Count -eq 0) {
+    if ($allFiles.Count -eq 0) {
         return [ordered]@{
             CleanedBytes = 0L
             CleanedFiles = 0
@@ -216,6 +257,7 @@ function Invoke-SafeCacheCleanup {
             SkippedInUseBytes = 0L
             RemainingBytes = 0L
             UnmountRequired = $false
+            Errors = @()
         }
     }
 
@@ -223,6 +265,9 @@ function Invoke-SafeCacheCleanup {
     $cleanedFiles = 0
     $skippedInUseCount = 0
     $skippedInUseBytes = 0L
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $totalBytes = 0L
+    foreach ($file in $allFiles) { $totalBytes += [int64]$file.Length }
 
     $evictableCandidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $nowUtc = [DateTime]::UtcNow
@@ -245,7 +290,9 @@ function Invoke-SafeCacheCleanup {
                     $cleanedBytes += $len
                     $cleanedFiles++
                     continue
-                } catch { }
+                } catch {
+                    $errors.Add("Could not remove cache file '$($f.FullName)': $($_.Exception.Message)")
+                }
             }
         }
 
@@ -257,7 +304,9 @@ function Invoke-SafeCacheCleanup {
                 $cleanedBytes += $len
                 $cleanedFiles++
                 continue
-            } catch { }
+            } catch {
+                $errors.Add("Could not remove cache file '$($f.FullName)': $($_.Exception.Message)")
+            }
         }
 
         $evictableCandidates.Add($f)
@@ -281,21 +330,30 @@ function Invoke-SafeCacheCleanup {
                     $cleanedBytes += $len
                     $cleanedFiles++
                     $currentTotal -= $len
-                } catch { }
+                } catch {
+                    $errors.Add("Could not remove cache file '$($item.FullName)': $($_.Exception.Message)")
+                }
             }
         }
     }
 
     # Clean up empty subdirectories
-    try {
-        Get-ChildItem -LiteralPath $CacheDirectory -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+    foreach ($managedDirectory in $managedDirectories) {
+        Get-ChildItem -LiteralPath $managedDirectory -Recurse -Directory -Force -ErrorAction Stop |
             Sort-Object -Property { $_.FullName.Length } -Descending |
-            Where-Object { (Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0 } |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    } catch { }
+            ForEach-Object {
+                $directory = $_
+                if (@(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop).Count -eq 0) {
+                    try {
+                        Remove-Item -LiteralPath $directory.FullName -Force -ErrorAction Stop
+                    } catch {
+                        $errors.Add("Could not remove empty cache directory '$($directory.FullName)': $($_.Exception.Message)")
+                    }
+                }
+            }
+    }
 
-    # Compute remaining bytes
-    $remaining = (Get-DetailedCacheStatistics -CacheDirectory $CacheDirectory).TotalSizeBytes
+    $remaining = [Math]::Max(0L, $totalBytes - $cleanedBytes)
 
     return [ordered]@{
         CleanedBytes = $cleanedBytes
@@ -304,6 +362,7 @@ function Invoke-SafeCacheCleanup {
         SkippedInUseBytes = $skippedInUseBytes
         RemainingBytes = $remaining
         UnmountRequired = ($skippedInUseCount -gt 0)
+        Errors = @($errors.ToArray())
     }
 }
 
@@ -323,24 +382,7 @@ function Invoke-StartupCacheRecovery {
         $CacheDirectory = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
     }
 
-    $managedDirectoryPattern = '^(?:gdrive|terabox)(?:_[A-Za-z0-9_-]{1,128})?$'
-    $recoveryTargets = [System.Collections.Generic.List[string]]::new()
-    if ($MountCacheDirectories.Count -gt 0) {
-        foreach ($directory in $MountCacheDirectories) {
-            if ([string]::IsNullOrWhiteSpace($directory)) { continue }
-            $mountKey = [System.IO.Path]::GetFileName($directory.TrimEnd('\', '/'))
-            if ($mountKey -notmatch $managedDirectoryPattern) {
-                throw "Refusing cache recovery for a directory outside an account cache namespace."
-            }
-            $recoveryTargets.Add($directory)
-        }
-    } elseif (Test-Path -LiteralPath $CacheDirectory -PathType Container) {
-        foreach ($directory in Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction Stop) {
-            if ($directory.Name -match $managedDirectoryPattern) {
-                $recoveryTargets.Add($directory.FullName)
-            }
-        }
-    }
+    $recoveryTargets = @(Get-ManagedCacheDirectories -CacheDirectory $CacheDirectory -MountCacheDirectories $MountCacheDirectories)
 
     $recoveredFiles = 0
     $recoveredBytes = 0L
