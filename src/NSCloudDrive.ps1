@@ -69,6 +69,7 @@ $script:ReconnectWorkerAccountId = ''
 $script:ReconnectWorkerProgress = $null
 $script:AccountMountStates = @{}
 $script:PendingManualMountAccountIds = [System.Collections.Generic.Queue[string]]::new()
+$script:ManualMountRequests = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 # Legacy (no saved account) provider-card mounts run off the UI thread. One
 # worker per provider prevents duplicate mounts; states drive the status pill.
 $script:LegacyMountWorkers = @{}
@@ -483,6 +484,7 @@ $addDiskBtn.Add_Click({
             $created = Connect-NewCloudAccount -Owner $window -ProviderId $selected
             if ($created) {
                 try {
+                    $null = $script:ManualMountRequests.Add([string]$created.Id)
                     Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
                     Update-AllUIState
                     Invoke-MemoryTrim
@@ -2682,6 +2684,15 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
             return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $mountState }
         }
         if ($mountState -and $mountState.State -in @('Error', 'AuthRequired')) {
+            $snapshot = $script:ProviderStatusSnapshot
+            $accountStatuses = Get-SafeProperty $snapshot 'AccountStatuses' $null
+            if ($accountStatuses -and $accountStatuses.ContainsKey($AccountId)) {
+                $liveStatus = Ensure-UiDriveStatusShape $accountStatuses[$AccountId]
+                if ($liveStatus.ProcessRunning -and $liveStatus.IsMounted) {
+                    $liveStatus['MountState'] = $mountState
+                    return $liveStatus
+                }
+            }
             $letter = if ($DriveLetter) { $DriveLetter } else { [string]$mountState.DriveLetter }
             return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $mountState }
         }
@@ -2706,6 +2717,15 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
                     IsReadOnly = [bool](Get-SafeProperty $cachedStatus 'IsReadOnly' $false)
                     ProcessId = Get-SafeProperty $cachedStatus 'ProcessId' $null
                     MountState = $legacyState
+                }
+            }
+            if ($legacyState -and $legacyState.State -in @('Error', 'AuthRequired')) {
+                $snapshot = $script:ProviderStatusSnapshot
+                $cachedStatus = if ($providerKey -eq 'gdrive' -and $snapshot) { $snapshot.GoogleStatus } elseif ($providerKey -eq 'terabox' -and $snapshot) { $snapshot.TeraBoxStatus } else { $null }
+                $liveStatus = Ensure-UiDriveStatusShape $cachedStatus
+                if ($liveStatus -and $liveStatus.ProcessRunning -and $liveStatus.IsMounted) {
+                    $liveStatus['MountState'] = $legacyState
+                    return $liveStatus
                 }
             }
         }
@@ -3054,8 +3074,8 @@ function Complete-AvailableStartupWorkers {
                 $resultError = Get-SafeProperty $result 'Error' $null
                 $resultDriveLetter = [string](Get-SafeProperty $result 'DriveLetter' '')
                 $script:AccountMountStates[$key] = [ordered]@{
-                    State = if ($resultState -in @('Mounted', 'ExistingProcess')) { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } else { $resultState }
-                    Stage = if ($resultState -in @('Mounted', 'ExistingProcess')) { 'Filesystem verified' } else { 'Startup restore finished' }
+                    State = if ($resultState -in @('Mounted', 'ExistingProcess', 'FilesystemUnverified')) { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } else { $resultState }
+                    Stage = if ($resultState -eq 'FilesystemUnverified') { 'Existing mount retained; filesystem root check timed out' } elseif ($resultState -eq 'ExistingProcess') { 'Existing mount process and drive detected; filesystem root not probed' } elseif ($resultState -eq 'Mounted') { 'Filesystem verified' } else { 'Startup restore finished' }
                     Error = if ($resultError) { [string]$resultError } else { $null }
                     DriveLetter = $resultDriveLetter
                     StartedAt = $null
@@ -3067,20 +3087,15 @@ function Complete-AvailableStartupWorkers {
                 try {
                     $restoreSeverity = 'Info'
                     if ($resultState -eq 'Error') { $restoreSeverity = 'Error' }
+                    elseif ($resultState -eq 'FilesystemUnverified') { $restoreSeverity = 'Warning' }
                     elseif ($resultState -eq 'AuthRequired') { $restoreSeverity = 'Warning' }
                     $restoreRecovered = if ($resultState -in @('Mounted', 'ExistingProcess')) { $true } elseif ($resultState -eq 'Error') { $false } else { $null }
                     Write-NSCloudLog -Severity $restoreSeverity -AccountId $key -Operation 'startup-restore' `
                         -Message ("Account restore finished: $resultState$(if ($resultDriveLetter) { " on ${resultDriveLetter}:" })$(if ($resultError) { " - $resultError" })") `
                         -Recovered $restoreRecovered
                 } catch { }
-                if ($resultState -in @('Mounted', 'ExistingProcess')) {
+                if ($resultState -in @('Mounted', 'ExistingProcess', 'FilesystemUnverified')) {
                     Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter $resultDriveLetter
-                }
-                if ($resultState -eq 'Mounted' -and $resultDriveLetter) {
-                    $restoredAccount = Get-CloudAccount -AccountId $key
-                    if ($restoredAccount -and $restoredAccount.OpenExplorerOnMount) {
-                        Start-ExplorerWindow ($resultDriveLetter + ':\')
-                    }
                 }
             }
             if ($completed.HadErrors) {
@@ -3108,8 +3123,8 @@ function Complete-AvailableStartupWorkers {
                 $resultDriveLetter = [string](Get-SafeProperty $result 'DriveLetter' '')
                 if ($key -notlike '__*') {
                     $script:AccountMountStates[$key] = [ordered]@{
-                        State = if ($resultState -eq 'Mounted') { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } elseif ($resultState -eq 'AuthRequired') { 'AuthRequired' } else { $resultState }
-                        Stage = if ($resultState -eq 'Mounted') { 'Filesystem verified' } elseif ($resultState -eq 'AuthRequired') { 'Sign-in required' } else { 'Mount attempt finished' }
+                        State = if ($resultState -in @('Mounted', 'ExistingProcess')) { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } elseif ($resultState -eq 'AuthRequired') { 'AuthRequired' } else { $resultState }
+                        Stage = if ($resultState -eq 'Mounted') { 'Filesystem verified' } elseif ($resultState -eq 'ExistingProcess') { 'Existing mount process and drive detected; filesystem root not re-probed' } elseif ($resultState -eq 'AuthRequired') { 'Sign-in required' } else { 'Mount attempt finished' }
                         Error = if ($resultError) { [string]$resultError } else { $null }
                         DriveLetter = $resultDriveLetter
                         StartedAt = $null
@@ -3127,14 +3142,16 @@ function Complete-AvailableStartupWorkers {
                         -Message ("Reconnect attempt finished: $resultState$(if ($resultDriveLetter) { " on ${resultDriveLetter}:" })$(if ($resultError) { " - $resultError" })") `
                         -Recovered $reconRecovered
                 } catch { }
-                if ($resultState -eq 'Mounted') {
+                if ($resultState -in @('Mounted', 'ExistingProcess')) {
                     Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter $resultDriveLetter
-                    $restoredAccount = Get-CloudAccount -AccountId $key
-                    if ($restoredAccount -and $restoredAccount.OpenExplorerOnMount -and $resultDriveLetter) {
+                    $selectedAccount = if ($resultState -eq 'Mounted') { Get-CloudAccount -AccountId $key } else { $null }
+                    if ($resultState -eq 'Mounted' -and $script:ManualMountRequests.Contains($key) -and
+                        $selectedAccount -and $selectedAccount.OpenExplorerOnMount -and $resultDriveLetter) {
                         Start-ExplorerWindow ($resultDriveLetter + ':\')
                     }
                 }
-                if ($resultState -eq 'Mounted' -or $resultState -eq 'Connected') {
+                $null = $script:ManualMountRequests.Remove($key)
+                if ($resultState -in @('Mounted', 'ExistingProcess', 'Connected')) {
                     $script:ReconnectFailCount[$key] = 0
                     $script:ReconnectNextAllowed.Remove($key)
                 } elseif ($resultState -eq 'Error') {
@@ -3805,6 +3822,7 @@ function Update-AllUIState {
                 if ($selectedStatus.IsMounted) {
                     [void](Start-ScopedDriveDisconnect -ProviderId ([string]$selectedAccount.ProviderId) -AccountId ([string]$selectedAccount.Id) -DriveLetter ([string]$selectedAccount.DriveLetter))
                 } else {
+                    $null = $script:ManualMountRequests.Add([string]$selectedAccount.Id)
                     Invoke-AutoReconnectWatchdog -AccountId ([string]$selectedAccount.Id)
                 }
                 Update-AllUIState
@@ -4593,10 +4611,12 @@ function Invoke-AutoReconnectWatchdog {
                 if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Checking existing mount'; $mountProgress.DriveLetter = [string]$account.DriveLetter }
                 try {
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
-                    if ($status.IsMounted) {
-                        $health = Test-VirtualDriveFilesystem -DriveRoot $status.DriveRoot -TimeoutSeconds 10
-                        if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
-                        [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
+                    if ($status.ProcessRunning) {
+                        if ($status.IsMounted) {
+                            [pscustomobject]@{ WorkerKey = $key; State = 'ExistingProcess'; HealthCheck = 'NotProbed'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
+                        } else {
+                            [pscustomobject]@{ WorkerKey = $key; State = 'Error'; FailureCount = [int]($failureCounts[$key] + 1); NextAllowed = $now.AddSeconds(30); Error = 'The account mount process is still running, but its drive letter is not present. It was not restarted.'; DriveLetter = $account.DriveLetter }
+                        }
                         continue
                     }
 
@@ -4768,7 +4788,18 @@ function Invoke-StartupAutoMount {
                     if ($status.ProcessRunning) {
                         if (-not $status.IsMounted) { throw 'A mount process exists, but its assigned drive is not present.' }
                         $health = Test-VirtualDriveFilesystem -DriveRoot $status.DriveRoot -TimeoutSeconds 10
-                        if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
+                        if (-not $health.Success) {
+                            if ($health.State -eq 'Timeout') {
+                                $results.Add([pscustomobject]@{
+                                    AccountId = $account.Id
+                                    State = 'FilesystemUnverified'
+                                    Error = "The existing mount process and drive were retained; the root check timed out: $($health.Error)"
+                                    DriveLetter = [string]$account.DriveLetter
+                                })
+                                continue
+                            }
+                            throw "Existing mount is not responsive: $($health.Error)"
+                        }
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                         continue
                     }
