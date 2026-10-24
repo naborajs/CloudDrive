@@ -1720,6 +1720,18 @@ $logsAccountCombo.Width = 220
 $logsAccountCombo.SelectedIndex = 0
 $logsFilterStack.Children.Add($logsAccountCombo) | Out-Null
 
+$logsSearchLabel = New-Label 'Search:' 11 $script:Palette.TextSecondary
+$logsSearchLabel.VerticalAlignment = 'Center'
+$logsSearchLabel.Margin = [System.Windows.Thickness]::new(14, 0, 6, 0)
+$logsFilterStack.Children.Add($logsSearchLabel) | Out-Null
+
+$logsSearchBox = [System.Windows.Controls.TextBox]::new()
+$logsSearchBox.Width = 150
+$logsSearchBox.Height = 26
+$logsSearchBox.VerticalContentAlignment = 'Center'
+$logsSearchBox.ToolTip = 'Search the current log page'
+$logsFilterStack.Children.Add($logsSearchBox) | Out-Null
+
 # Event list card
 $logsListCard = [System.Windows.Controls.Border]::new()
 $logsListCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
@@ -1787,6 +1799,7 @@ $script:LogsPageOffset = 0
 $script:LogsPageSize = 200
 $script:LogsHasOlderEntries = $false
 $script:LogsFilterUpdateInProgress = $false
+$script:LogsSearchText = ''
 $script:LogsLoadOperation = $null
 $script:LogsLoadStartedAt = $null
 $script:LogsLoadTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -1836,6 +1849,8 @@ function Render-LogsViewContent {
                 $id = ([string]$entry.accountId).Trim()
                 if ($label -ne $accountSel -and $id -ne $accountSel) { continue }
             }
+            if ($script:LogsSearchText -and
+                (Format-LogsEntryLine $entry).IndexOf($script:LogsSearchText, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
             $filtered.Add($entry)
         } catch { }
     }
@@ -2613,6 +2628,10 @@ $backFromLogsBtn.Add_Click({ Show-DisksView })
 
 $logsSeverityCombo.Add_SelectionChanged({ if (-not $script:LogsFilterUpdateInProgress) { Render-LogsViewContent } })
 $logsAccountCombo.Add_SelectionChanged({ if (-not $script:LogsFilterUpdateInProgress) { Render-LogsViewContent } })
+$logsSearchBox.Add_TextChanged({
+    $script:LogsSearchText = [string]$logsSearchBox.Text
+    Render-LogsViewContent
+})
 
 function Clear-NSCloudLogsFolder {
     Stop-LogsViewLoad
