@@ -80,8 +80,8 @@ function Invoke-StartupAutoMount {
 `$script:ProviderStatusSnapshot = [pscustomobject]@{ GoogleStatus = `$incompleteStatus }
 `$cachedStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
 if (-not `$cachedStatus.Contains('MountState') -or `$null -ne `$cachedStatus['MountState'] -or
-    -not `$cachedStatus.Contains('IsReadOnly') -or `$cachedStatus['IsReadOnly']) {
-    throw 'An incomplete provider status was not normalized with safe MountState and IsReadOnly defaults.'
+    -not `$cachedStatus.Contains('IsReadOnly') -or `$null -ne `$cachedStatus['IsReadOnly']) {
+    throw 'An incomplete provider status was not normalized with safe MountState and unavailable IsReadOnly values.'
 }
 Update-AllUIState
 `$script:StartupAutoMountPending = `$true
@@ -176,7 +176,7 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     }
     if ($result.Pending -or $result.HasWorker -or $result.DispatchError -or $result.RestoreStage -ne 'Recovery checks complete' -or
         -not $result.CachedStatusHasMountState -or $null -ne $result.CachedStatusMountState -or
-        -not $result.CachedStatusHasReadOnly -or $result.CachedStatusReadOnly) {
+        -not $result.CachedStatusHasReadOnly -or $null -ne $result.CachedStatusReadOnly) {
         throw "Startup timer did not complete cleanly: $($result | ConvertTo-Json -Compress)"
     }
     if ($result.TeraBoxProgress -notmatch '^Validating TeraBox session \(0:25\)$' -or
