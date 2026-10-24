@@ -180,11 +180,15 @@ function Get-CloudAccountTransferRemoteEnvironment {
         $gEnv = Get-GoogleDriveRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias
         return $gEnv
     } elseif ($providerId -eq 'terabox') {
+        # Dictionary-style access: the bridge status is an ordered dictionary
+        # and carries no 'Error' key on the success path, so StrictMode
+        # property access of a missing key would throw and mask the real
+        # bridge failure instead of reporting it.
         $bridgeStatus = Start-TeraBoxBridge
-        if (-not $bridgeStatus.Success) {
-            throw "Failed to start TeraBox loopback WebDAV bridge for transfer: $($bridgeStatus.Error)"
+        if (-not ($bridgeStatus -is [System.Collections.IDictionary] -and $bridgeStatus['Success'])) {
+            throw "Failed to start TeraBox loopback WebDAV bridge for transfer: $(if ($bridgeStatus -is [System.Collections.IDictionary]) { [string]$bridgeStatus['Error'] } else { 'unexpected bridge status' })"
         }
-        $tbEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus.Password -Port $bridgeStatus.Port -RcloneBinary $rclonePath -RemoteName $RemoteAlias
+        $tbEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus['Password'] -Port $bridgeStatus['Port'] -RcloneBinary $rclonePath -RemoteName $RemoteAlias
         return $tbEnv
     } else {
         throw "Unsupported provider for cloud transfer: $providerId"
