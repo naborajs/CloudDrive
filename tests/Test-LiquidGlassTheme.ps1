@@ -29,6 +29,7 @@ Assert-True ($mainSource -match 'Translucent Liquid Glass') 'Theme selector adve
 Assert-True ($mainSource -match 'DWMWA_SYSTEMBACKDROP_TYPE = 38') 'Engine uses DWM system backdrop attribute 38 (Windows 11)'
 Assert-True ($mainSource -match 'DWMSBT_TRANSIENTWINDOW = 3') 'Backdrop mode is transient acrylic'
 Assert-True ($mainSource -match 'ACCENT_ENABLE_ACRYLICBLURBEHIND = 4') 'Engine uses the acrylic blur-behind (Windows 10 1803+)'
+Assert-True ($mainSource -match 'DwmExtendFrameIntoClientArea') 'Windows 10 acrylic extends through the WPF client area'
 Assert-True ($mainSource -match 'ACCENT_DISABLED = 0') 'Accent teardown policy exists'
 Assert-True ($mainSource -match 'CompilationResource|CompositionTarget\.BackgroundColor = \[System\.Windows\.Media\.Colors\]::Transparent') 'Engine makes the WPF buffer transparent while glass is active'
 Assert-True ($mainSource -match 'HwndSource\]::FromHwnd') 'Presentation source is resolved from the HWND (works pre-show)'
@@ -46,6 +47,9 @@ Assert-True ($mainSource -match 'Neither path took effect') 'Failed enable tears
 Assert-True ($mainSource -match '\$p\.Name -eq ''?Translucent'' -and \(Get-GlassSupported\)') 'Glass engages only for Translucent on a supported build'
 Assert-True ($mainSource -match 'Disable-GlassBackdrop \$window') 'Switching to another theme tears the glass effect down'
 Assert-True ($mainSource -match '\$glassActive\) \{[\s\S]{0,400}WindowGlassBg') 'Softened fill is applied only after a successful glass enable'
+Assert-True ($mainSource -match 'SidebarGlassBg' -and $mainSource -match 'CardGlassBg') 'Active glass reduces opacity across navigation and dashboard surfaces'
+$modalSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ui\ProviderConnectionWindow.ps1') -Raw
+Assert-True ($modalSource -match 'function Enable-ModalGlassBackdrop' -and ([regex]::Matches($modalSource, 'Enable-ModalGlassBackdrop \$(?:cfgWin|setWin|addWin|setupWin|diagWindow|win)')).Count -ge 7) 'Translucent glass is applied to the modal windows'
 
 # ---- 5. Functional round-trip of the real engine in an STA child ----
     $sandbox = Join-Path $env:TEMP ('NSCloudDrive_GlassProbe_' + [guid]::NewGuid().ToString('N'))
