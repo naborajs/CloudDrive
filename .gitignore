@@ -21,3 +21,5 @@
 /rclone.exe
 /rclone.build.json
 /scratch/
+*.old
+*.tmp
