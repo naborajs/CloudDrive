@@ -26,6 +26,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-EmbeddedBrowserWindow.ps1'),
     (Join-Path $PSScriptRoot 'Test-MultiAccountIsolation.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxAccountIsolation.ps1'),
+    (Join-Path $PSScriptRoot 'Test-MultiAccountLifecycle.ps1'),
     (Join-Path $PSScriptRoot 'Test-ExplorerIntegration.ps1'),
     (Join-Path $PSScriptRoot 'Test-ThemesAndAccountCustomization.ps1'),
     (Join-Path $PSScriptRoot 'Test-CloudTransferManager.ps1'),
