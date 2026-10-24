@@ -144,7 +144,7 @@ try {
     }
     [void](Add-CloudAccount $work)
 
-    $currentAccs = Get-CloudAccounts
+    $currentAccs = @(Get-CloudAccounts)
     if ($currentAccs.Count -ne 2) { throw "Expected 2 accounts, found $($currentAccs.Count)" }
 
     $foundWork = Get-CloudAccount 'gdrive_work'
@@ -164,7 +164,7 @@ try {
 
     $removed = Remove-CloudAccount 'gdrive_personal'
     if (-not $removed) { throw 'Expected Remove-CloudAccount to return true for existing account' }
-    $remaining = Get-CloudAccounts
+    $remaining = @(Get-CloudAccounts)
     if ($remaining.Count -ne 1 -or $remaining[0].Id -ne 'gdrive_work') {
         throw 'Expected exactly 1 remaining account (gdrive_work)'
     }
