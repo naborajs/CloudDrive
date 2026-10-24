@@ -10,6 +10,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-BackgroundOperationManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-StartupAutoMountTimer.ps1'),
     (Join-Path $PSScriptRoot 'Test-LiquidGlassTheme.ps1'),
+    (Join-Path $PSScriptRoot 'Test-LogsPage.ps1'),
     (Join-Path $PSScriptRoot 'Test-GoogleAccountCreationRecovery.ps1'),
     (Join-Path $PSScriptRoot 'Test-AnalyticsPage.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxProvider.ps1'),
