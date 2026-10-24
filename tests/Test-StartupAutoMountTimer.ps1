@@ -118,10 +118,21 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-application'
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-taskbar'
 `$window.WindowState = [System.Windows.WindowState]::Minimized
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-state'
+`$logsNavigationError = `$null
+try {
+    Show-LogsView
+    Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'logs-view-shown'
+} catch {
+    `$logsNavigationError = [string]`$_.Exception.Message
+}
 `$probe = [System.Windows.Threading.DispatcherTimer]::new()
-`$probe.Interval = [TimeSpan]::FromSeconds(3)
+`$probe.Interval = [TimeSpan]::FromSeconds(5)
 `$probe.Add_Tick({
     `$probe.Stop()
+    `$logsLoadCompletedBeforeNavigation = (`$null -eq `$script:LogsLoadOperation)
+    `$logsStatusBeforeNavigation = [string]`$logsStatusLine.Text
+    `$logsTextBeforeNavigation = [string]`$logsTextBox.Text
+    Show-DisksView
     `$result = [ordered]@{
         Pending = [bool]`$script:StartupAutoMountPending
         HasWorker = (`$null -ne `$script:StartupAutoMountWorker)
@@ -135,6 +146,11 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-state'
         CachedStatusMountState = `$cachedStatus['MountState']
         CachedStatusHasReadOnly = `$cachedStatus.Contains('IsReadOnly')
         CachedStatusReadOnly = `$cachedStatus['IsReadOnly']
+        LogsNavigationError = `$logsNavigationError
+        LogsLoadCompleted = `$logsLoadCompletedBeforeNavigation
+        LogsViewCollapsedAfterNavigation = (`$logsView.Visibility -eq [System.Windows.Visibility]::Collapsed)
+        LogsStatus = `$logsStatusBeforeNavigation
+        LogsText = `$logsTextBeforeNavigation
     }
     [System.IO.File]::WriteAllText(`$env:NSCD_TEST_RESULT, (`$result | ConvertTo-Json -Compress))
     Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'probe-tick'
@@ -183,6 +199,11 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
         $result.GoogleProgress -notmatch '^Waiting for Google Drive restore \(0:25\)$') {
         throw "Startup restore labels do not isolate the active provider or preserve overall elapsed time: $($result | ConvertTo-Json -Compress)"
     }
+    if ($result.LogsNavigationError -or -not $result.LogsLoadCompleted -or
+        -not $result.LogsViewCollapsedAfterNavigation -or
+        $result.LogsStatus -match 'failed|timed out') {
+        throw "Logs navigation or bounded background loading did not complete cleanly: $($result | ConvertTo-Json -Compress)"
+    }
     $waitStart = [regex]::Match([string]$result.DispatcherWaitStart, '\((\d+):(\d{2})\)$')
     $waitAfter = [regex]::Match([string]$result.DispatcherWaitAfter, '\((\d+):(\d{2})\)$')
     if (-not $waitStart.Success -or -not $waitAfter.Success) {
@@ -196,6 +217,7 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     Write-Output '  [PASS] Startup dispatcher wait timer advances before the worker starts.'
     Write-Output '  [PASS] Restore status is provider-specific and its elapsed time is monotonic across stages.'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
+    Write-Output '  [PASS] Logs loads in the isolated WPF dispatcher and navigation away completes cleanly.'
 } finally {
     if ($child -and -not $child.HasExited) {
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
