@@ -178,6 +178,9 @@ function Get-MainThemePalette([string]$ThemeName) {
             return @{
                 Name = 'Translucent'
                 WindowBg = '#13161CE6'
+                # Softer fill used only when a real acrylic backdrop is active,
+                # so the Windows-composed blur shows through the window surface.
+                WindowGlassBg = '#161B2A55'
                 SidebarBg = '#0E1117D8'
                 SidebarBorder = '#1E2433C0'
                 CardBg = '#1A1E29CC'
@@ -923,7 +926,7 @@ $themeStack.Children.Add($rbThemePureBlack) | Out-Null
 
 $rbThemeTranslucent = [System.Windows.Controls.RadioButton]::new()
 $rbThemeTranslucent.GroupName = 'ThemeSelection'
-$rbThemeTranslucent.Content = 'Translucent (Dark acrylic glass appearance)'
+$rbThemeTranslucent.Content = 'Translucent Liquid Glass (Acrylic blur where Windows supports it)'
 $rbThemeTranslucent.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $rbThemeTranslucent.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $themeStack.Children.Add($rbThemeTranslucent) | Out-Null
@@ -1627,6 +1630,203 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
 }
 
 # ==============================================================================
+# LIQUID GLASS BACKDROP ENGINE (only engages on supported Windows builds)
+# ==============================================================================
+# Real acrylic glass via Windows composition, not a recolored panel:
+#  - Windows 11 (build 22000+): DWM system backdrop, attribute 38
+#    (DWMWA_SYSTEMBACKDROP_TYPE, transient-acrylic value 3).
+#  - Windows 10 1803+ (build 17134): the composition accent policy with
+#    ACCENT_ENABLE_ACRYLICBLURBEHIND (4) and a dark tint layered between the
+#    blur and the WPF buffer.
+#  - Both paths make the WPF surface itself transparent (HwndSource
+#    CompositionTarget.BackgroundColor); window fills, sidebar, and cards keep
+#    semi-alpha tints so the blur shows through while text contrast holds.
+# Everything fails closed: an unsupported build, a missing compositor, or any
+# exception silently falls back to the plain translucent palette (the previous
+# appearance), and Pure Black / Pure White never enable the effect at all.
+if (-not ('NSCloudGlassInterop' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class NSCloudGlassInterop
+{
+    internal const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    internal const int DWMSBT_NONE = 1;
+    internal const int DWMSBT_TRANSIENTWINDOW = 3;
+
+    public const int WCA_ACCENT_POLICY = 19;
+    public const int ACCENT_DISABLED = 0;
+    public const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
+
+    // Dark slate tint (approximately #730F1622, ~45% alpha) painted between the
+    // acrylic blur and the WPF surface on Windows 10 so light backgrounds do
+    // not wash out the UI.
+    private const uint AcrylicGradient = 0x730F1622u;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ACCENT_POLICY
+    {
+        public int AccentState;
+        public uint AccentFlags;
+        public uint GradientColor;
+        public uint AnimationId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWCOMPOSITIONATTRIBDATA
+    {
+        public int Attrib;
+        public IntPtr Data;
+        public uint SizeOfData;
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowCompositionAttribute(IntPtr hwnd, ref WINDOWCOMPOSITIONATTRIBDATA data);
+
+    private static void ApplyAccentPolicy(IntPtr hwnd, int accentState)
+    {
+        var policy = new ACCENT_POLICY();
+        policy.AccentState = accentState;
+        policy.AccentFlags = 2;
+        policy.GradientColor = AcrylicGradient;
+        policy.AnimationId = 0;
+
+        var data = new WINDOWCOMPOSITIONATTRIBDATA();
+        data.Attrib = WCA_ACCENT_POLICY;
+
+        IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(ACCENT_POLICY)));
+        try
+        {
+            Marshal.StructureToPtr(policy, ptr, false);
+            data.Data = ptr;
+            data.SizeOfData = (uint)Marshal.SizeOf(typeof(ACCENT_POLICY));
+            SetWindowCompositionAttribute(hwnd, ref data);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(ptr);
+        }
+    }
+
+    // Returns true when the DWM reported success for the Win11 backdrop path.
+    public static bool SetSystemBackdrop(IntPtr hwnd, int backdrop)
+    {
+        if (hwnd == IntPtr.Zero) { return false; }
+        int value = backdrop;
+        return DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref value, 4) == 0;
+    }
+
+    // Returns true when the Win10 acrylic blur-behind was applied without error.
+    public static bool EnableAcrylic(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) { return false; }
+        try { ApplyAccentPolicy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND); return true; }
+        catch (DllNotFoundException) { return false; }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+
+    // Fully tears the composition effect down (both the Win11 backdrop and any
+    // Win10 accent policy), regardless of which path produced it.
+    public static void Disable(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) { return; }
+        try { SetSystemBackdrop(hwnd, DWMSBT_NONE); } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+        try { ApplyAccentPolicy(hwnd, ACCENT_DISABLED); } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+}
+
+$script:GlassState = @{ Active = $false; Supported = $null; OriginalColor = $null }
+
+function Get-GlassSupported {
+    # Cached: OS build capability never changes within a session. Any failure
+    # probing the version (or an exotic build) conservatively reports false so
+    # callers keep the plain translucent look.
+    if ($null -ne $script:GlassState.Supported) { return $script:GlassState.Supported }
+    $supported = $false
+    try {
+        $build = [System.Environment]::OSVersion.Version.Build
+        if ($build -ge 17134) { $supported = $true }   # Windows 10 1803+ / 11
+    } catch { }
+    $script:GlassState.Supported = $supported
+    return $supported
+}
+
+function Enable-GlassBackdrop([System.Windows.Window]$Window) {
+    # Returns $true when a real composition effect was applied; $false means a
+    # caller must stay with the plain fallback palette.
+    if ($null -eq $Window) { return $false }
+    try {
+        $helper = [System.Windows.Interop.WindowInteropHelper]::new($Window)
+        $hwnd = $helper.Handle
+        if ($hwnd -eq [IntPtr]::Zero) {
+            # EnsureHandle returns the created HWND; capture it so it never
+            # leaks into the function's pipeline output.
+            $hwnd = $helper.EnsureHandle()
+        }
+        if ($hwnd -eq [IntPtr]::Zero) { return $false }
+        $hwnd = [IntPtr]$hwnd
+
+        # FromHwnd resolves the presentation source reliably even for a window
+        # that has never been shown; FromVisual only works post-show.
+        $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
+        if (-not $src -or -not $src.CompositionTarget) { return $false }
+
+        # Preserve the pre-glass render color exactly once, so disabling later
+        # restores the previous appearance rather than guessing a default.
+        if ($script:GlassState.OriginalColor -eq $null) {
+            $script:GlassState.OriginalColor = $src.CompositionTarget.BackgroundColor
+        }
+        $src.CompositionTarget.BackgroundColor = [System.Windows.Media.Colors]::Transparent
+
+        $applied = [NSCloudGlassInterop]::SetSystemBackdrop($hwnd, 3)   # transient acrylic (Win11)
+        if (-not $applied) {
+            $applied = [NSCloudGlassInterop]::EnableAcrylic($hwnd)       # accent blur (Win10 1803+)
+        }
+        if (-not $applied) {
+            # Neither path took effect; if this is a retry after a previous
+            # success, first tear the effect down so we never half-enable.
+            [NSCloudGlassInterop]::Disable($hwnd)
+            $script:GlassState.Active = $false
+            return $false
+        }
+
+        $script:GlassState.Active = $true
+        return $true
+    } catch {
+        try {
+            $helper = [System.Windows.Interop.WindowInteropHelper]::new($Window)
+            [NSCloudGlassInterop]::Disable($helper.Handle)
+        } catch { }
+        $script:GlassState.Active = $false
+        return $false
+    }
+}
+
+function Disable-GlassBackdrop([System.Windows.Window]$Window) {
+    if ($null -eq $Window) { return }
+    try {
+        $hwnd = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
+        [NSCloudGlassInterop]::Disable($hwnd)
+
+        $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
+        if ($src -and $src.CompositionTarget) {
+            if ($script:GlassState.OriginalColor -ne $null) {
+                $src.CompositionTarget.BackgroundColor = $script:GlassState.OriginalColor
+            } else {
+                $src.CompositionTarget.BackgroundColor = [System.Windows.Media.Colors]::Black   # opaque default
+            }
+        }
+    } catch { }
+    $script:GlassState.Active = $false
+}
+
+# ==============================================================================
 # THEME APPLICATION ENGINE
 # ==============================================================================
 function Apply-UITheme([string]$ThemeName) {
@@ -1752,6 +1952,21 @@ function Apply-UITheme([string]$ThemeName) {
     }
     foreach ($arow in @($analyticsAppRam, $analyticsAppCpu, $analyticsMountRam, $analyticsMountCpu, $analyticsSysNote, $analyticsCacheUsed, $analyticsCacheActive, $analyticsCacheLimit, $analyticsCacheFree, $analyticsAccounts, $analyticsMounts, $analyticsHealth, $analyticsRetries)) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    }
+
+    # Liquid glass backdrop: real Windows-composed acrylic for the Translucent
+    # theme only, torn down when switching to any other theme. Unsupported
+    # builds or any failure keep the plain translucent fallback set above.
+    $glassActive = $false
+    if ($p.Name -eq 'Translucent' -and (Get-GlassSupported)) {
+        $glassActive = Enable-GlassBackdrop $window
+    } elseif ($script:GlassState.Active) {
+        Disable-GlassBackdrop $window
+    }
+    if ($glassActive) {
+        # Softened window fill so the acrylic blur shows through; sidebar,
+        # cards, and inputs keep their stronger tints for contrast.
+        $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowGlassBg)
     }
 
     Update-NavActiveState
