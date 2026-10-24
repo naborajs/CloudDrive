@@ -4379,6 +4379,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     $app.Add_DispatcherUnhandledException({
         param($sender, $e)
         $msg = if ($e.Exception) { Format-SanitizedDiagnosticMessage $e.Exception.Message } else { 'Unknown dispatcher error' }
+        try {
+            Add-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs\startup-restore.jsonl') -Value ("{\""timestampUtc\"":\""" + [DateTime]::UtcNow.ToString('o') + "\"",\""event\"":\""debug_dispatcher_exception\"",\""message\"":\""" + ($msg -replace '\""', "'") + "\""}") -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch { }
         [System.Diagnostics.Debug]::WriteLine("NSCloudDrive Dispatcher Exception: $msg")
         $e.Handled = $true
     })
@@ -4387,6 +4390,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         $app.Run()
     } else {
         $window.Show()
+        try {
+            Add-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs\startup-restore.jsonl') -Value ("{\""timestampUtc\"":\""" + [DateTime]::UtcNow.ToString('o') + "\"",\""event\"":\""debug_window_shown\""}") -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch { }
         $window.Activate() | Out-Null
         try {
             $wshell = New-Object -ComObject WScript.Shell
