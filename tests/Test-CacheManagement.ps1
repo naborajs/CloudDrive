@@ -124,13 +124,19 @@ $recDir = Join-Path ([System.IO.Path]::GetTempPath()) ('recovery_test_' + [Guid]
 [System.IO.Directory]::CreateDirectory($recDir) | Out-Null
 
 try {
-    $fPartial = Join-Path $recDir 'stream.partial'
-    $fRcloneTmp = Join-Path $recDir 'chunk.rclone-tmp'
-    $fLegit = Join-Path $recDir 'persisted_document.pdf'
+    $mountCacheDir = Join-Path $recDir 'gdrive_testaccount'
+    $unmanagedDir = Join-Path $recDir 'Documents'
+    [System.IO.Directory]::CreateDirectory($mountCacheDir) | Out-Null
+    [System.IO.Directory]::CreateDirectory($unmanagedDir) | Out-Null
+    $fPartial = Join-Path $mountCacheDir 'stream.partial'
+    $fRcloneTmp = Join-Path $mountCacheDir 'chunk.rclone-tmp'
+    $fLegit = Join-Path $mountCacheDir 'persisted_document.pdf'
+    $fUserTemporary = Join-Path $unmanagedDir 'draft.tmp'
 
     [System.IO.File]::WriteAllText($fPartial, 'incomplete')
     [System.IO.File]::WriteAllText($fRcloneTmp, 'temp_buffer')
     [System.IO.File]::WriteAllText($fLegit, 'valid_document')
+    [System.IO.File]::WriteAllText($fUserTemporary, 'user_data')
 
     $recRes = Invoke-StartupCacheRecovery -CacheDirectory $recDir
     if ($recRes.RecoveredFiles -ne 2) {
@@ -142,7 +148,10 @@ try {
     if (-not (Test-Path $fLegit)) {
         throw "Legitimate file was accidentally removed by startup recovery!"
     }
-    Write-Output '  [PASS] Startup recovery of orphaned partial files verified'
+    if (-not (Test-Path $fUserTemporary)) {
+        throw 'Startup recovery must not remove temporary-looking files outside managed account cache directories'
+    }
+    Write-Output '  [PASS] Startup recovery is limited to managed account cache directories'
 } finally {
     Remove-Item -Recurse -Force $recDir -ErrorAction SilentlyContinue
 }
