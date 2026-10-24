@@ -60,6 +60,9 @@ $script:StartupCacheRecoveryWorker = $null
 $script:StartupAutoMountWorker = $null
 $script:StartupAutoMountTimer = $null
 $script:StartupAutoMountError = $null
+$script:AccountCardsSignature = ''
+$script:AnalyticsStorageRecords = @()
+$script:BitmapImageCache = @{}
 $script:ReconnectWorker = $null
 $script:ReconnectWorkerAccountId = ''
 $script:ReconnectWorkerProgress = $null
@@ -70,7 +73,14 @@ $script:PendingManualMountAccountIds = [System.Collections.Generic.Queue[string]
 $script:LegacyMountWorkers = @{}
 $script:LegacyMountStates = @{}
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
-$script:StartupAutoMountProgress = [hashtable]::Synchronized(@{ Stage = 'Waiting for startup dispatcher'; ProviderId = ''; DriveLetter = ''; StartedAt = $null })
+$script:StartupAutoMountProgress = [hashtable]::Synchronized(@{
+    Stage = 'Waiting for startup dispatcher'
+    ProviderId = ''
+    DriveLetter = ''
+    AccountId = ''
+    StartedAt = $null
+    StageStartedAt = $null
+})
 $script:LastStartupAutoMountLogKey = ''
 
 # Enforce single instance when launched as standalone application
@@ -124,6 +134,10 @@ function Get-VerifiedRclonePath {
 }
 
 function Get-WpfBitmapImage([string]$Path) {
+    $cacheKey = [System.IO.Path]::GetFullPath($Path)
+    if ($script:BitmapImageCache.ContainsKey($cacheKey)) {
+        return $script:BitmapImageCache[$cacheKey]
+    }
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         try {
             $bmp = [System.Windows.Media.Imaging.BitmapImage]::new()
@@ -132,6 +146,7 @@ function Get-WpfBitmapImage([string]$Path) {
             $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
             $bmp.EndInit()
             $bmp.Freeze()
+            $script:BitmapImageCache[$cacheKey] = $bmp
             return $bmp
         } catch { }
     }
@@ -390,7 +405,7 @@ $navTopStack.Children.Add($navDisksItem.Button) | Out-Null
 $navOptionsItem = New-NavButton ([string][char]0x2699) 'Options' $false
 $navTopStack.Children.Add($navOptionsItem.Button) | Out-Null
 
-$navAnalyticsItem = New-NavButton ([string]([char]0x2581 + '' + [char]0x2584 + '' + [char]0x2588)) 'Analytics' $false
+$navAnalyticsItem = New-NavButton ([string][char]0x2197) 'Analytics' $false
 $navTopStack.Children.Add($navAnalyticsItem.Button) | Out-Null
 
 $navLogsItem = New-NavButton ([string][char]0x2261) 'Logs' $false
@@ -1318,6 +1333,7 @@ $resourceCard = New-AnalyticsCard 'App resources (live)'
 $analyticsContent.Children.Add($resourceCard.Card) | Out-Null
 $analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: measuring...'
 $analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: measuring...'
+$analyticsNetwork = New-AnalyticsRow $resourceCard.Stack 'Transfer speed: Unavailable (no active transfer telemetry).'
 
 $script:AnalyticsCpuBaseline = @{}
 $script:AnalyticsStorageWorker = $null
@@ -1350,7 +1366,14 @@ function Set-AnalyticsStorageDisplay([object[]]$StorageRecords) {
     foreach ($record in $validRecords) {
         $row = [System.Windows.Controls.StackPanel]::new()
         $row.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
-        $label = New-Label ("{0}: {1} used of {2}" -f $record.Name, (Format-AnalyticsBytes ([int64]$record.UsedBytes)), (Format-AnalyticsBytes ([int64]$record.TotalBytes))) 11 $script:Palette.TextSecondary
+        $identity = [System.Collections.Generic.List[string]]::new()
+        if ($record.ProviderId) { $identity.Add([string]$record.ProviderId) }
+        if ($record.Name) { $identity.Add([string]$record.Name) }
+        if ($record.Email) { $identity.Add([string]$record.Email) }
+        if ($record.DriveLetter) { $identity.Add(([string]$record.DriveLetter).TrimEnd(':') + ':') }
+        if ($null -ne $record.ResponseMilliseconds) { $identity.Add("$($record.ResponseMilliseconds) ms response") }
+        $accountLabel = if ($identity.Count -gt 0) { [string]::Join(' | ', $identity) } else { 'Verified account' }
+        $label = New-Label ("{0}`n{1} used of {2}" -f $accountLabel, (Format-AnalyticsBytes ([int64]$record.UsedBytes)), (Format-AnalyticsBytes ([int64]$record.TotalBytes))) 11 $script:Palette.TextSecondary
         $row.Children.Add($label) | Out-Null
         $bar = [System.Windows.Controls.ProgressBar]::new()
         $bar.Height = 7
@@ -1381,27 +1404,46 @@ function Start-AnalyticsStorageWorker {
 
         $records = [System.Collections.Generic.List[object]]::new()
         $errors = [System.Collections.Generic.List[string]]::new()
+        $verifiedAccountCount = 0
         $accounts = @(Get-CloudAccounts)
+        $savedAccountCount = $accounts.Count
         if ($accounts.Count -eq 0) {
             $accounts = @(
-                [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive' },
-                [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox' }
+                [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'gdrive') },
+                [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') }
             )
         }
         foreach ($account in $accounts) {
             try {
+                $responseTimer = [System.Diagnostics.Stopwatch]::StartNew()
                 $check = if ($account.ProviderId -eq 'gdrive') {
                     Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
                 } elseif ($account.ProviderId -eq 'terabox') {
                     Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
                 } else { $null }
+                $responseTimer.Stop()
                 if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
                 if ($account.ProviderId -eq 'gdrive' -and -not (Get-SafeProperty $check 'IdentityVerified' $false)) { continue }
+                $verifiedAccountCount++
                 $total = [int64](Get-SafeProperty $check.UserInfo 'QuotaTotal' (Get-SafeProperty $check.UserInfo 'QuotaTotalBytes' 0))
                 $used = [int64](Get-SafeProperty $check.UserInfo 'QuotaUsed' (Get-SafeProperty $check.UserInfo 'QuotaUsedBytes' -1))
                 if ($total -le 0 -or $used -lt 0) { continue }
+                $providerName = if ($account.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+                $verifiedName = if ($account.ProviderId -eq 'gdrive') {
+                    [string](Get-SafeProperty $check.UserInfo 'DisplayName' '')
+                } else {
+                    [string](Get-SafeProperty $check.UserInfo 'UserName' '')
+                }
+                $email = [string](Get-SafeProperty $check.UserInfo 'EmailAddress' '')
+                if (-not $verifiedName) { $verifiedName = [string]$account.DisplayName }
+                if (-not $email) { $email = [string]$account.AccountEmail }
                 $records.Add([pscustomobject]@{
-                    Name = [string]$account.DisplayName
+                    AccountId = [string]$account.Id
+                    ProviderId = $providerName
+                    Name = $verifiedName
+                    Email = $email
+                    DriveLetter = [string]$account.DriveLetter
+                    ResponseMilliseconds = [int]$responseTimer.ElapsedMilliseconds
                     UsedBytes = $used
                     TotalBytes = $total
                 })
@@ -1409,7 +1451,11 @@ function Start-AnalyticsStorageWorker {
                 $errors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
             }
         }
-            return [pscustomobject]@{ Records = @($records.ToArray()); Errors = @($errors.ToArray()) }
+            return [pscustomobject]@{
+                Records = @($records.ToArray())
+                Errors = @($errors.ToArray())
+                AccountCount = if ($savedAccountCount -gt 0) { $savedAccountCount } else { $verifiedAccountCount }
+            }
         }
     } catch {
         $script:AnalyticsStorageWorker = $null
@@ -1428,9 +1474,10 @@ function Stop-AnalyticsStorageWorker {
 function Update-AnalyticsMetrics {
     if ($script:CurrentView -ne 'Analytics') { return }
     $nowUtc = [DateTime]::UtcNow
+    $accounts = @()
     try {
         $accounts = @(Get-CloudAccounts)
-        $analyticsAccounts.Text = "Cloud accounts: $($accounts.Count)."
+        $analyticsAccounts.Text = "Saved cloud accounts: $($accounts.Count)."
         $mounted = 0
         foreach ($account in $accounts) {
             $letter = ([string]$account.DriveLetter).TrimEnd(':').TrimEnd('\')
@@ -1449,14 +1496,19 @@ function Update-AnalyticsMetrics {
         $analyticsMounts.Text = 'Active mounted drives: Unavailable.'
     }
 
+    $appProc = $null
     try {
-        $appProc = Get-Process -Id $PID -ErrorAction Stop
+        $appProc = [System.Diagnostics.Process]::GetCurrentProcess()
         $cpuPct = Get-AnalyticsCpuPercent -Process $appProc -Now $nowUtc -Cores ([Math]::Max(1, [System.Environment]::ProcessorCount))
-        $analyticsAppRam.Text = "App RAM: $([Math]::Round($appProc.WorkingSet64 / 1MB, 1)) MB working set."
+        $workingSetMb = [Math]::Round($appProc.WorkingSet64 / 1MB, 1)
+        $privateMb = [Math]::Round($appProc.PrivateMemorySize64 / 1MB, 1)
+        $analyticsAppRam.Text = "App RAM: $workingSetMb MB working set; $privateMb MB private memory."
         $analyticsAppCpu.Text = if ($null -ne $cpuPct) { "App CPU: $cpuPct% of all logical cores." } else { 'App CPU: sampling; value appears on the next refresh.' }
     } catch {
         $analyticsAppRam.Text = 'App RAM: Unavailable.'
         $analyticsAppCpu.Text = 'App CPU: Unavailable.'
+    } finally {
+        if ($appProc) { $appProc.Dispose() }
     }
 
     if (-not $script:AnalyticsStorageWorker) { Start-AnalyticsStorageWorker }
@@ -1473,6 +1525,10 @@ function Update-AnalyticsMetrics {
                     $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider returned no quota data).'
                     $analyticsStorageChart.Children.Clear()
                 } else {
+                    $script:AnalyticsStorageRecords = @($storageResult.Records)
+                    if ($accounts.Count -eq 0) {
+                        $analyticsAccounts.Text = "Cloud accounts: $($storageResult.AccountCount) verified legacy provider session(s)."
+                    }
                     Set-AnalyticsStorageDisplay @($storageResult.Records)
                     if ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -gt 0) {
                         $analyticsStorageSummary.Text += " Some provider checks were unavailable: $($storageResult.Errors[0])"
@@ -2325,7 +2381,7 @@ function Apply-UITheme([string]$ThemeName) {
     foreach ($atitle in @($overviewCard.Title, $storageCard.Title, $resourceCard.Title)) {
         $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
-    foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsAccounts, $analyticsMounts)) {
+    foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsNetwork, $analyticsAccounts, $analyticsMounts)) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
 
@@ -2424,7 +2480,7 @@ function Update-CacheUsageDisplay {
         $mbInUse = [Math]::Round($st.InUseBytes / 1MB, 1)
         $gbFree = [Math]::Round($st.DriveFreeBytes / 1GB, 1)
         $osNotice = if ($st.IsSystemDrive) { " (OS Drive Warning)" } else { "" }
-        $cacheUsageLabel.Text = "Total: $mbTotal MB ($($st.TotalFileCount) files) â€¢ In-Use: $mbInUse MB ($($st.InUseCount) locked) â€¢ Free on $($st.DriveLetter): $gbFree GB$osNotice"
+        $cacheUsageLabel.Text = "Total: $mbTotal MB ($($st.TotalFileCount) files) | In use: $mbInUse MB ($($st.InUseCount) locked) | Free on $($st.DriveLetter): $gbFree GB$osNotice"
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
     } catch { }
 }
@@ -2781,22 +2837,29 @@ function Write-StartupAutoMountProgressLog {
     if (-not $progress -or -not $progress.Stage) { return }
     $providerId = if ($progress.ProviderId -in @('gdrive', 'terabox')) { [string]$progress.ProviderId } else { '' }
     $driveLetter = if ([string]$progress.DriveLetter -match '^[A-Za-z]$') { ([string]$progress.DriveLetter).ToUpperInvariant() } else { '' }
-    $key = "$($progress.Stage)|$providerId|$driveLetter"
+    $accountId = if ($progress.AccountId) { [string]$progress.AccountId } else { '' }
+    $key = "$($progress.Stage)|$providerId|$driveLetter|$accountId"
     if ($key -eq $script:LastStartupAutoMountLogKey) { return }
     $script:LastStartupAutoMountLogKey = $key
     if ($script:Settings.DiagnosticLogging -eq 'Off') { return }
 
     $elapsedMilliseconds = 0
+    $totalElapsedMilliseconds = 0
     if ($progress.StartedAt) {
-        $elapsedMilliseconds = [Math]::Max(0, [int64]([DateTime]::UtcNow - [DateTime]$progress.StartedAt).TotalMilliseconds)
+        $totalElapsedMilliseconds = [Math]::Max(0, [int64]([DateTime]::UtcNow - [DateTime]$progress.StartedAt).TotalMilliseconds)
+    }
+    if ($progress.StageStartedAt) {
+        $elapsedMilliseconds = [Math]::Max(0, [int64]([DateTime]::UtcNow - [DateTime]$progress.StageStartedAt).TotalMilliseconds)
     }
     $entry = [ordered]@{
         timestampUtc = [DateTime]::UtcNow.ToString('o')
         event = 'startup_restore_stage'
         stage = [string]$progress.Stage
         providerId = $providerId
+        accountId = $accountId
         driveLetter = $driveLetter
         elapsedMilliseconds = $elapsedMilliseconds
+        totalElapsedMilliseconds = $totalElapsedMilliseconds
     }
     try {
         $logDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
@@ -2813,15 +2876,48 @@ function Write-StartupAutoMountProgressLog {
     try {
         $stage = [string]$progress.Stage
         $severity = if ($stage -match '(?i)failed|could not|not responsive') { 'Error' } else { 'Info' }
-        Write-NSCloudLog -Severity $severity -Provider $providerId -Operation 'startup-restore' `
+        Write-NSCloudLog -Severity $severity -Provider $providerId -AccountId $accountId -Operation 'startup-restore' `
             -Message ("Startup restore stage: $stage$(if ($driveLetter) { " ($driveLetter`:)" })") `
             -DurationMilliseconds ([int]$elapsedMilliseconds) `
             -Recovered $(if ($stage -eq 'Recovery checks complete') { $true } else { $null })
     } catch { }
 }
 
+function Get-StartupRestoreDisplay([string]$ProviderId, [string]$DriveLetter, [string]$AccountId = '') {
+    if (-not ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)) { return $null }
+    $progress = $script:StartupAutoMountProgress
+    $activeProvider = [string]$progress.ProviderId
+    $activeDrive = [string]$progress.DriveLetter
+    $activeAccount = [string]$progress.AccountId
+    $isCurrentStage = $false
+    if ($AccountId -and $activeAccount) {
+        $isCurrentStage = $AccountId -eq $activeAccount
+    } elseif ($activeProvider) {
+        $isCurrentStage = ($ProviderId -eq $activeProvider) -and
+            (-not $activeDrive -or -not $DriveLetter -or $DriveLetter.TrimEnd(':') -eq $activeDrive.TrimEnd(':'))
+    } else {
+        $isCurrentStage = $true
+    }
+    $elapsedFrom = if ($isCurrentStage -and $progress.StageStartedAt) {
+        [DateTime]$progress.StageStartedAt
+    } elseif ($progress.StartedAt) {
+        [DateTime]$progress.StartedAt
+    } elseif ($script:StartupAutoMountWorker) {
+        [DateTime]$script:StartupAutoMountWorker.StartedAt
+    } else {
+        [DateTime]::UtcNow
+    }
+    $elapsed = [DateTime]::UtcNow - $elapsedFrom
+    $elapsedText = ([int][Math]::Floor($elapsed.TotalMinutes)).ToString() + ':' + $elapsed.Seconds.ToString('00')
+    if (-not $isCurrentStage) {
+        $providerLabel = if ($ProviderId -eq 'gdrive') { 'Google Drive' } elseif ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'saved drives' }
+        return "Waiting for $providerLabel restore ($elapsedText)"
+    }
+    $stage = if ($progress.Stage) { [string]$progress.Stage } else { 'Preparing saved drives' }
+    return "$stage ($elapsedText)"
+}
+
 function Update-AllUIState {
-    if ($script:IsConnecting) { return }
 
     Complete-AvailableStartupWorkers
     Write-StartupAutoMountProgressLog
@@ -2853,26 +2949,30 @@ function Update-AllUIState {
         $statusSnapshot = $script:ProviderStatusSnapshot
     }
     $restoreInProgress = [bool]($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)
-    $restoreStateLabel = 'Preparing saved drives...'
-    if ($restoreInProgress) {
-        $restoreStartedAt = if ($script:StartupAutoMountProgress.StartedAt) { [DateTime]$script:StartupAutoMountProgress.StartedAt } elseif ($script:StartupAutoMountWorker) { [DateTime]$script:StartupAutoMountWorker.StartedAt } else { [DateTime]::UtcNow }
-        $restoreElapsed = [DateTime]::UtcNow - $restoreStartedAt
-        $elapsedMinutes = [int][Math]::Floor($restoreElapsed.TotalMinutes)
-        $elapsedText = $elapsedMinutes.ToString() + ':' + $restoreElapsed.Seconds.ToString('00')
-        $restoreStage = if ($script:StartupAutoMountProgress.Stage) { [string]$script:StartupAutoMountProgress.Stage } else { 'Preparing saved drives' }
-        $restoreStateLabel = if ($restoreElapsed.TotalSeconds -ge 60) { "Taking longer than expected - $restoreStage ($elapsedText)" } elseif ($restoreElapsed.TotalSeconds -ge 30) { "Still working - $restoreStage ($elapsedText)" } else { "$restoreStage ($elapsedText)" }
-    }
-    $checkingState = if ($restoreInProgress) { 'Mounting' } else { 'Checking' }
-    $checkingResult = [ordered]@{
+    $gdRestoreStateLabel = Get-StartupRestoreDisplay -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter
+    $tbRestoreStateLabel = Get-StartupRestoreDisplay -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter
+    $progressProvider = [string]$script:StartupAutoMountProgress.ProviderId
+    $gdCheckingState = if ($restoreInProgress -and (-not $progressProvider -or $progressProvider -eq 'gdrive')) { 'Mounting' } else { 'Checking' }
+    $tbCheckingState = if ($restoreInProgress -and (-not $progressProvider -or $progressProvider -eq 'terabox')) { 'Mounting' } else { 'Checking' }
+    $gdCheckingResult = [ordered]@{
         IsValid = $false
-        State = $checkingState
+        State = $gdCheckingState
+        Error = $null
+        UserInfo = $null
+    }
+    $tbCheckingResult = [ordered]@{
+        IsValid = $false
+        State = $tbCheckingState
         Error = $null
         UserInfo = $null
     }
 
     # 1. Google Drive State
-    $gdCheck = if ($statusSnapshot) { $statusSnapshot.GoogleCheck } else { $checkingResult }
+    $gdCheck = if ($statusSnapshot) { $statusSnapshot.GoogleCheck } else { $gdCheckingResult }
     $gdStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
+    if ($gdCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $gdCheck 'IsValid' $false)) {
+        $gdCheck = $gdCheckingResult
+    }
 
     if ($gdCheck.IsValid) {
         $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
@@ -2921,6 +3021,15 @@ function Update-AllUIState {
             $gdLetterCombo.IsEnabled = $false
             $gdExplorerBtn.IsEnabled = $true
             $gdUploadBtn.IsEnabled = $true
+        } elseif ($gdRestoreStateLabel) {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $gdRestoreStateLabel)
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.Content = 'Restoring...'
+            $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.IsEnabled = $false
+            $gdLetterCombo.IsEnabled = $false
+            $gdExplorerBtn.IsEnabled = $false
+            $gdUploadBtn.IsEnabled = $false
         } elseif ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Mounting') {
             $gdStatusText.Text = ([string][char]0x25CF + ' ' + [string]$gdStatus.MountState.Stage)
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
@@ -2953,7 +3062,7 @@ function Update-AllUIState {
         $gdState = Get-SafeProperty $gdCheck 'State' ''
         $gdErr = Get-SafeProperty $gdCheck 'Error' ''
         if ($gdState -eq 'Mounting') {
-            $gdAccountText.Text = $restoreStateLabel
+            $gdAccountText.Text = $gdRestoreStateLabel
             $gdErrorText.Visibility = 'Collapsed'
         } elseif ($gdState -eq 'Checking') {
             $gdAccountText.Text = 'Checking saved connection...'
@@ -2975,7 +3084,7 @@ function Update-AllUIState {
         $gdQuotaText.Visibility = 'Collapsed'
 
         if ($gdState -eq 'Mounting') {
-            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $restoreStateLabel)
+            $gdStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $gdRestoreStateLabel)
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } elseif ($gdState -eq 'Checking') {
             $gdStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
@@ -2993,8 +3102,11 @@ function Update-AllUIState {
     }
 
     # 2. TeraBox State
-    $tbCheck = if ($statusSnapshot) { $statusSnapshot.TeraBoxCheck } else { $checkingResult }
+    $tbCheck = if ($statusSnapshot) { $statusSnapshot.TeraBoxCheck } else { $tbCheckingResult }
     $tbStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
+    if ($tbCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $tbCheck 'IsValid' $false)) {
+        $tbCheck = $tbCheckingResult
+    }
 
     if ($tbCheck.IsValid) {
         $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
@@ -3041,6 +3153,15 @@ function Update-AllUIState {
             $tbLetterCombo.IsEnabled = $false
             $tbExplorerBtn.IsEnabled = $true
             $tbUploadBtn.IsEnabled = $true
+        } elseif ($tbRestoreStateLabel) {
+            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $tbRestoreStateLabel)
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.Content = 'Restoring...'
+            $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.IsEnabled = $false
+            $tbLetterCombo.IsEnabled = $false
+            $tbExplorerBtn.IsEnabled = $false
+            $tbUploadBtn.IsEnabled = $false
         } elseif ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Mounting') {
             $tbStatusText.Text = ([string][char]0x25CF + ' ' + [string]$tbStatus.MountState.Stage)
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
@@ -3073,7 +3194,7 @@ function Update-AllUIState {
         $tbState = Get-SafeProperty $tbCheck 'State' ''
         $tbErr = Get-SafeProperty $tbCheck 'Error' ''
         if ($tbState -eq 'Mounting') {
-            $tbAccountText.Text = $restoreStateLabel
+            $tbAccountText.Text = $tbRestoreStateLabel
             $tbErrorText.Visibility = 'Collapsed'
         } elseif ($tbState -eq 'Checking') {
             $tbAccountText.Text = 'Checking saved connection...'
@@ -3095,7 +3216,7 @@ function Update-AllUIState {
         $tbQuotaText.Visibility = 'Collapsed'
 
         if ($tbState -eq 'Mounting') {
-            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $restoreStateLabel)
+            $tbStatusText.Text = ([string][char]0x25CF + ' Restoring drive - ' + $tbRestoreStateLabel)
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         } elseif ($tbState -eq 'Checking') {
             $tbStatusText.Text = ([string][char]0x25CF + ' Checking connection...')
@@ -3116,7 +3237,6 @@ function Update-AllUIState {
     $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheck.State -ne 'Checking' -and -not (Test-LegacyMountBusy 'terabox'))
 
     # 3. Dynamic Multi-Account Cards
-    $accountsStack.Children.Clear()
     $allAccounts = @()
     try {
         $rawAccs = Get-CloudAccounts
@@ -3129,9 +3249,47 @@ function Update-AllUIState {
         }
     } catch { }
 
+    $hasSavedGoogleAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'gdrive' }).Count -gt 0
+    $hasSavedTeraBoxAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'terabox' }).Count -gt 0
+    $gdCard.Visibility = if ($hasSavedGoogleAccounts) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+    $tbCard.Visibility = if ($hasSavedTeraBoxAccounts) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+
+    $cardSignatureItems = [System.Collections.Generic.List[object]]::new()
+    foreach ($account in $allAccounts) {
+        $status = Get-CachedUiDriveStatus -AccountId ([string]$account.Id) -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter)
+        $mountState = if ($status.MountState) { $status.MountState } elseif ($script:AccountMountStates.ContainsKey([string]$account.Id)) { $script:AccountMountStates[[string]$account.Id] } else { $null }
+        $progress = $script:StartupAutoMountProgress
+        if ($script:StartupAutoMountWorker -and $progress.AccountId -eq [string]$account.Id) {
+            $mountState = [ordered]@{
+                State = 'Mounting'
+                Stage = [string]$progress.Stage
+                StartedAt = if ($progress.StageStartedAt) { [DateTime]$progress.StageStartedAt } else { [DateTime]::UtcNow }
+                Error = $null
+            }
+        }
+        $storageRecord = @($script:AnalyticsStorageRecords | Where-Object { $_.AccountId -eq [string]$account.Id } | Select-Object -First 1)
+        $cardSignatureItems.Add([pscustomobject]@{
+            Id = [string]$account.Id
+            ProviderId = [string]$account.ProviderId
+            DisplayName = [string]$account.DisplayName
+            Email = [string]$account.AccountEmail
+            DriveLetter = [string]$account.DriveLetter
+            IsMounted = [bool]$status.IsMounted
+            IsReadOnly = [bool]$status.IsReadOnly
+            MountState = if ($mountState) { [string]$mountState.State + '|' + [string]$mountState.Stage + '|' + [string]$mountState.Error } else { '' }
+            MountElapsedBucket = if ($mountState -and $mountState.StartedAt) { [int][Math]::Floor(([DateTime]::UtcNow - [DateTime]$mountState.StartedAt).TotalSeconds / 5) } else { 0 }
+            StorageUsed = if ($storageRecord.Count -gt 0) { [int64]$storageRecord[0].UsedBytes } else { -1 }
+            StorageTotal = if ($storageRecord.Count -gt 0) { [int64]$storageRecord[0].TotalBytes } else { -1 }
+            ResponseMs = if ($storageRecord.Count -gt 0) { [int]$storageRecord[0].ResponseMilliseconds } else { -1 }
+        })
+    }
+    $accountCardsSignature = $script:Palette.Name + '|' + (ConvertTo-Json -InputObject @($cardSignatureItems.ToArray()) -Depth 4 -Compress)
+    $refreshAccountCards = $accountCardsSignature -ne $script:AccountCardsSignature
+    if ($refreshAccountCards) {
+        $accountsStack.Children.Clear()
     if ($allAccounts -and $allAccounts.Count -gt 0) {
         $p = $script:Palette
-        $secLabel = New-Label 'ADDITIONAL CONNECTED DRIVES' 11 $p.TextSecondary $true
+        $secLabel = New-Label 'SAVED CLOUD ACCOUNTS' 11 $p.TextSecondary $true
         $secLabel.Margin = [System.Windows.Thickness]::new(2, 6, 0, 8)
         $accountsStack.Children.Add($secLabel) | Out-Null
 
@@ -3163,6 +3321,9 @@ function Update-AllUIState {
             [System.Windows.Controls.Grid]::SetColumn($aInfoStack, 1)
             $aGrid.Children.Add($aInfoStack) | Out-Null
 
+            $aProviderName = if ($acc.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+            $aProviderLabel = New-Label $aProviderName 11 $p.TextMuted $true
+            $aInfoStack.Children.Add($aProviderLabel) | Out-Null
             $aName = New-Label $acc.DisplayName 15 $p.TextPrimary $true
             $aInfoStack.Children.Add($aName) | Out-Null
 
@@ -3170,6 +3331,17 @@ function Update-AllUIState {
             $aEmail = New-Label $aEmailText 11 $p.TextSecondary
             $aEmail.Margin = [System.Windows.Thickness]::new(0, 1, 0, 6)
             $aInfoStack.Children.Add($aEmail) | Out-Null
+            $aStorageRecord = @($script:AnalyticsStorageRecords | Where-Object { $_.AccountId -eq [string]$acc.Id } | Select-Object -First 1)
+            $aStorageText = if ($aStorageRecord.Count -gt 0) {
+                $quota = $aStorageRecord[0]
+                $freeBytes = [Math]::Max([int64]0, ([int64]$quota.TotalBytes - [int64]$quota.UsedBytes))
+                "Storage: $(Format-AnalyticsBytes ([int64]$quota.UsedBytes)) used / $(Format-AnalyticsBytes $freeBytes) free | $($quota.ResponseMilliseconds) ms response"
+            } else {
+                'Storage: open Analytics to check verified quota'
+            }
+            $aStorage = New-Label $aStorageText 11 $p.TextSecondary
+            $aStorage.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+            $aInfoStack.Children.Add($aStorage) | Out-Null
 
             $aActionRow = [System.Windows.Controls.StackPanel]::new()
             $aActionRow.Orientation = 'Horizontal'
@@ -3178,6 +3350,14 @@ function Update-AllUIState {
 
             $aStatus = Get-CachedUiDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId -DriveLetter $acc.DriveLetter
             $aMountState = if ($aStatus.MountState) { $aStatus.MountState } elseif ($script:AccountMountStates.ContainsKey([string]$acc.Id)) { $script:AccountMountStates[[string]$acc.Id] } else { $null }
+            if ($script:StartupAutoMountWorker -and $script:StartupAutoMountProgress.AccountId -eq [string]$acc.Id) {
+                $aMountState = [ordered]@{
+                    State = 'Mounting'
+                    Stage = [string]$script:StartupAutoMountProgress.Stage
+                    StartedAt = if ($script:StartupAutoMountProgress.StageStartedAt) { [DateTime]$script:StartupAutoMountProgress.StageStartedAt } else { [DateTime]::UtcNow }
+                    Error = $null
+                }
+            }
 
             $aBtn = [System.Windows.Controls.Button]::new()
             $aBtn.Padding = [System.Windows.Thickness]::new(16, 5, 16, 5)
@@ -3345,6 +3525,8 @@ function Update-AllUIState {
 
             $accountsStack.Children.Add($aCard) | Out-Null
         }
+    }
+        $script:AccountCardsSignature = $accountCardsSignature
     }
 }
 
@@ -4139,10 +4321,20 @@ function Invoke-StartupAutoMount {
     $script:StartupAutoMountProgress.Stage = 'Loading saved account settings'
     $script:StartupAutoMountProgress.ProviderId = ''
     $script:StartupAutoMountProgress.DriveLetter = ''
+    $script:StartupAutoMountProgress.AccountId = ''
     $script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow
+    $script:StartupAutoMountProgress.StageStartedAt = [DateTime]::UtcNow
     $script:StartupAutoMountWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $cacheDirectory, $script:StartupAutoMountProgress) -ScriptBlock {
         param([string]$sourceRoot, [string]$cacheDirectory, [hashtable]$progress)
         $ErrorActionPreference = 'Stop'
+        function Set-StartupRestoreProgress {
+            param([hashtable]$Progress, [string]$Stage, [string]$ProviderId = '', [string]$DriveLetter = '', [string]$AccountId = '')
+            $Progress.Stage = $Stage
+            $Progress.ProviderId = $ProviderId
+            $Progress.DriveLetter = $DriveLetter
+            $Progress.AccountId = $AccountId
+            $Progress.StageStartedAt = [DateTime]::UtcNow
+        }
         . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
         . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
         . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
@@ -4164,17 +4356,15 @@ function Invoke-StartupAutoMount {
         $settings = Get-NSCloudDriveSettings
         if (-not $settings.AutoMountDrives) { return }
         $results = [System.Collections.Generic.List[object]]::new()
-        $progress.Stage = 'Loading saved accounts'
+        Set-StartupRestoreProgress -Progress $progress -Stage 'Loading saved accounts'
         $accounts = @(Get-CloudAccounts)
-        $progress.Stage = 'Checking saved mount state'
+        Set-StartupRestoreProgress -Progress $progress -Stage 'Checking saved mount state'
 
         if ($accounts.Count -gt 0) {
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
                 try {
-                    $progress.ProviderId = [string]$account.ProviderId
-                    $progress.DriveLetter = [string]$account.DriveLetter
-                    $progress.Stage = "Checking existing $($account.DriveLetter): mount"
+                    Set-StartupRestoreProgress -Progress $progress -Stage "Checking existing $($account.DriveLetter): mount" -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.ProcessRunning) {
                         if (-not $status.IsMounted) { throw 'A mount process exists, but its assigned drive is not present.' }
@@ -4185,18 +4375,18 @@ function Invoke-StartupAutoMount {
                     }
 
                     if ($account.ProviderId -eq 'gdrive') {
-                        $progress.Stage = 'Validating Google Drive session'
+                        Set-StartupRestoreProgress -Progress $progress -Stage 'Validating Google Drive session' -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
-                        $progress.Stage = "Starting $($account.DriveLetter): Google Drive mount (up to 90s)"
+                        Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
-                        $progress.Stage = 'Validating TeraBox session'
+                        Set-StartupRestoreProgress -Progress $progress -Stage 'Validating TeraBox session' -ProviderId 'terabox' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         $environment = Get-TeraBoxRcloneEnvironment -AccountId $account.Id
-                        $progress.Stage = "Starting $($account.DriveLetter): TeraBox mount (up to 90s)"
+                        Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): TeraBox mount (up to 90s)" -ProviderId 'terabox' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
@@ -4230,9 +4420,8 @@ function Invoke-StartupAutoMount {
             # path that records 'Mounted', and an invalid session records its
             # true state (including 'AuthRequired') instead of a false success.
             try {
-                $progress.ProviderId = 'gdrive'
-                $progress.DriveLetter = [string](Get-PreferredDriveLetter 'gdrive')
-                $progress.Stage = 'Validating Google Drive session'
+                $googleDriveLetter = [string](Get-PreferredDriveLetter 'gdrive')
+                Set-StartupRestoreProgress -Progress $progress -Stage 'Validating Google Drive session' -ProviderId 'gdrive' -DriveLetter $googleDriveLetter
                 $googleCheck = Test-GoogleDriveBackendSession
                 $googleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
                 if ($googleCheck.IsValid) {
@@ -4243,7 +4432,7 @@ function Invoke-StartupAutoMount {
                         $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$googleStatus.DriveLetter })
                     } else {
                         $environment = Get-GoogleDriveRcloneEnvironment
-                        $progress.Stage = "Starting $($progress.DriveLetter): Google Drive mount (up to 90s)"
+                        Set-StartupRestoreProgress -Progress $progress -Stage "Starting $googleDriveLetter`: Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter $googleDriveLetter
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
                             -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -4257,9 +4446,8 @@ function Invoke-StartupAutoMount {
             }
 
             try {
-                $progress.ProviderId = 'terabox'
-                $progress.DriveLetter = [string](Get-PreferredDriveLetter 'terabox')
-                $progress.Stage = 'Validating TeraBox session'
+                $teraBoxDriveLetter = [string](Get-PreferredDriveLetter 'terabox')
+                Set-StartupRestoreProgress -Progress $progress -Stage 'Validating TeraBox session' -ProviderId 'terabox' -DriveLetter $teraBoxDriveLetter
                 $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
                 if ($teraBoxStatus.ProcessRunning) {
                     # Same parity rules as gdrive: an existing process must hold
@@ -4275,7 +4463,7 @@ function Invoke-StartupAutoMount {
                         $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = [string]$teraBoxCheck.State; Error = $teraBoxCheck.Error; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
                     } else {
                         $environment = Get-TeraBoxRcloneEnvironment
-                        $progress.Stage = "Starting $($progress.DriveLetter): TeraBox mount (up to 90s)"
+                        Set-StartupRestoreProgress -Progress $progress -Stage "Starting $teraBoxDriveLetter`: TeraBox mount (up to 90s)" -ProviderId 'terabox' -DriveLetter $teraBoxDriveLetter
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
                             -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
                             -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
@@ -4291,7 +4479,7 @@ function Invoke-StartupAutoMount {
             }
         }
 
-        $progress.Stage = 'Recovery checks complete'
+        Set-StartupRestoreProgress -Progress $progress -Stage 'Recovery checks complete'
         return $results.ToArray()
     }
 }
@@ -4342,7 +4530,8 @@ $timer.Add_Tick({
     }
 
     if ($window.IsVisible) {
-        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 4) {
+        $refreshInterval = if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker) { 1 } else { 4 }
+        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge $refreshInterval) {
             Update-AllUIState
             $script:LastFullUpdate = [DateTime]::UtcNow
         }
