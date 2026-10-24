@@ -12,6 +12,17 @@ New-Item -ItemType Directory -Path $globalSandboxDir | Out-Null
 $env:LOCALAPPDATA = $globalSandboxDir
 
 try {
+    $aclFailureReported = $false
+    try {
+        Set-StrictTeraBoxCredentialAcl -Path (Join-Path $globalSandboxDir 'missing-credential-path')
+    } catch {
+        $aclFailureReported = $_.Exception.Message -match 'Unable to restrict permissions on the TeraBox credential path'
+    }
+    if (-not $aclFailureReported) {
+        throw 'TeraBox credential ACL failures must be reported rather than silently ignored'
+    }
+    Write-Output '  [PASS] Credential ACL failures are reported explicitly'
+
     # 1. Test metadata
     $info = Get-TeraBoxProviderInfo
     if ($info.Id -ne 'terabox') { throw "Expected provider ID 'terabox', found $($info.Id)" }
@@ -28,6 +39,18 @@ try {
     # 3. Test DPAPI session save and load in sandbox
     $testSecret = 'synthetic_test_secret_value'
     Save-TeraBoxSession -Type 'web-session' -Secret $testSecret
+    $teraBoxCredentialPath = Get-TeraBoxCredentialFilePath
+    $teraBoxCredentialAcl = [System.IO.File]::GetAccessControl($teraBoxCredentialPath)
+    $teraBoxCredentialRules = @($teraBoxCredentialAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    $expectedTeraBoxSids = @(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+        'S-1-5-18'
+    )
+    if (-not $teraBoxCredentialAcl.AreAccessRulesProtected -or
+        @($teraBoxCredentialRules | Where-Object { $_.IdentityReference.Value -notin $expectedTeraBoxSids -or $_.AccessControlType -ne 'Allow' }).Count -gt 0 -or
+        $teraBoxCredentialRules.Count -ne 2) {
+        throw 'TeraBox credential file ACL must be protected and allow only the current user and SYSTEM.'
+    }
     $loaded = Get-TeraBoxStoredSession
     if (-not $loaded) { throw 'Failed to load saved session' }
     if ($loaded.Type -ne 'web-session') { throw "Session type mismatch: $($loaded.Type)" }
@@ -52,13 +75,18 @@ try {
     Write-Output '  [PASS] DPAPI session with jsToken and custom origin save and load verified'
 
     # 4. Test account scope evaluation
+    function Test-TeraBoxBackendSession(
+        [hashtable]$SessionOverride = $null,
+        [string]$AccountId = '',
+        [switch]$Force = $false
+    ) {
+        return [ordered]@{ IsValid = $false; State = 'Error'; Error = 'Synthetic offline session validation.'; UserInfo = $null }
+    }
     $webScope = Test-TeraBoxAccountScope -SessionOverride @{ Type = 'web-session'; Secret = 'dummy' }
-    # Note: because 'dummy' fails validation against real network, scope is unknown
     if ($webScope.ScopeVerified) {
-        # If network unexpectedly succeeded with dummy
-        throw 'Dummy secret unexpectedly passed network validation'
+        throw 'An invalid test session unexpectedly received a verified scope.'
     } else {
-        Write-Output '  [PASS] Unverified session correctly rejected for scope'
+        Write-Output '  [PASS] Mocked invalid session is rejected for scope'
     }
 
     # 5. Test rclone environment variable construction
@@ -90,8 +118,9 @@ try {
 
     # 6. Test manual session setter fails closed on invalid credentials
     $manualRes = Set-TeraBoxManualSession -SessionSecret 'invalid_test_secret_123'
+    Remove-Item Function:\Test-TeraBoxBackendSession -ErrorAction SilentlyContinue
     if ($manualRes.Success -ne $false) { throw 'Expected invalid manual session to fail closed' }
-    Write-Output '  [PASS] Manual session validation fails closed on invalid credentials'
+    Write-Output '  [PASS] Manual session validation fails closed with a mocked offline provider'
 
     # 7. Test Get-SafeProperty and strict mode resilience on API response shapes
     $jsonObj = ConvertFrom-Json '{"errno":0,"uk":123456789,"request_id":"test-req-1"}'
