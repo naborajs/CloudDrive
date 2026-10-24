@@ -305,8 +305,21 @@ try {
     }
     if ($nsSource -notmatch 'Get-CloudAccount -AccountId \(\[string\]\$sender\.Tag\)' -or
         $nsSource -notmatch '(?s)\$mountOptionsChanged = .*?\$previous\.CacheDirectory .*?\$savedAcc\.CacheMaxGigabytes' -or
-        $nsSource -notmatch '\$restoredAccount\.OpenExplorerOnMount') {
+        $nsSource -notmatch '(?s)\$script:ManualMountRequests\.Contains\(\$key\).*?\$selectedAccount\.OpenExplorerOnMount') {
         throw 'Drive actions and saved mount options are not bound to the selected account.'
+    }
+    $completionStart = $nsSource.IndexOf('function Complete-AvailableStartupWorkers {')
+    $reconnectStart = $nsSource.IndexOf('if ($script:ReconnectWorker -and', $completionStart)
+    $legacyCompletionStart = $nsSource.IndexOf('Complete-AvailableLegacyMountWorkers', $reconnectStart)
+    if ($completionStart -lt 0 -or $reconnectStart -lt 0 -or $legacyCompletionStart -le $reconnectStart) {
+        throw 'Could not locate startup and reconnect completion paths for Explorer launch checks.'
+    }
+    $startupCompletion = $nsSource.Substring($completionStart, $reconnectStart - $completionStart)
+    $reconnectCompletion = $nsSource.Substring($reconnectStart, $legacyCompletionStart - $reconnectStart)
+    if ($startupCompletion -match 'Start-ExplorerWindow' -or
+        $reconnectCompletion -notmatch '\$script:ManualMountRequests\.Contains\(\$key\)' -or
+        $nsSource -notmatch '\$script:ManualMountRequests\.Add\(\[string\]\$selectedAccount\.Id\)') {
+        throw 'Automatic mount restoration must not open Explorer; only a successful user-requested account mount may honor the preference.'
     }
     if ($nsSource -notmatch 'CacheDirectory \$accountCacheDirectory -CacheMaxGigabytes \$accountCacheMaxGigabytes') {
         throw 'Startup and reconnect mount workers do not use the selected account''s effective cache settings.'
@@ -325,8 +338,8 @@ try {
     #    provider fallback inside the worker must resolve the rclone path
     #    without the UI helper (which is absent in the worker runspace and
     #    previously killed every TeraBox restore attempt with a
-    #    CommandNotFoundException), and must verify an existing mount exactly
-    #    like the account branch instead of recording a false 'Mounted'.
+    # CommandNotFoundException), and preserve existing mounts when a root
+    # probe times out rather than triggering a duplicate mount.
     # --------------------------------------------------------------------------
     $nsAll = Get-Content -LiteralPath $nsSourcePath -Raw
     $autoMountStart = $nsAll.IndexOf('function Invoke-StartupAutoMount {')
@@ -345,7 +358,21 @@ try {
         throw 'The legacy fallback no longer refuses success when a mount process lacks its drive letter.'
     }
     if ($autoMountRegion -notmatch 'Test-VirtualDriveFilesystem -DriveRoot \$googleStatus\.DriveRoot') {
-        throw 'The legacy Google fallback no longer runs the filesystem health probe on an existing mount.'
+        throw 'The legacy Google fallback no longer runs its bounded filesystem health probe on an existing mount.'
+    }
+    $managerSource = Get-Content -LiteralPath $vdSourcePath -Raw
+    if ($managerSource -notmatch 'function Test-MountProcessOwnership' -or
+        $managerSource -notmatch 'rclone-'' \+ \[regex\]::Escape\(\$MountKey\)' -or
+        $managerSource -match '\[string\]::IsNullOrEmpty\(\$AccountId\) -and \$script:MountProcess') {
+        throw 'Live mount processes are not bound to their account/provider log namespace.'
+    }
+    $ownedH = Test-MountProcessOwnership -CommandLine 'rclone mount gdrive: H: --log-file "C:\NSCloudDrive\logs\rclone-gdrive_alpha.log"' -DriveLetter 'H' -MountKey 'gdrive_alpha'
+    $wrongGoogleIdentity = Test-MountProcessOwnership -CommandLine 'rclone mount gdrive: H: --log-file "C:\NSCloudDrive\logs\rclone-gdrive_beta.log"' -DriveLetter 'H' -MountKey 'gdrive_alpha'
+    $wrongLetter = Test-MountProcessOwnership -CommandLine 'rclone mount gdrive: G: --log-file "C:\NSCloudDrive\logs\rclone-gdrive_alpha.log"' -DriveLetter 'H' -MountKey 'gdrive_alpha'
+    $legacyG = Test-MountProcessOwnership -CommandLine 'rclone mount gdrive: G: --log-file "C:\NSCloudDrive\logs\rclone-gdrive.log"' -DriveLetter 'G' -MountKey 'gdrive'
+    $legacyT = Test-MountProcessOwnership -CommandLine 'rclone mount terabox: T: --log-file "C:\NSCloudDrive\logs\rclone-terabox.log"' -DriveLetter 'T' -MountKey 'terabox'
+    if (-not $ownedH -or $wrongGoogleIdentity -or $wrongLetter -or -not $legacyG -or -not $legacyT) {
+        throw 'Google account, legacy Google, and TeraBox process ownership checks are not isolated.'
     }
     $bridgeCapture = Select-String -Path $tbBridgeSourcePath -Pattern ([regex]::Escape('[void](Stop-TeraBoxBridge -Port $Port -AccountId $AccountId -BridgePassword $existingPw)'))
     if (-not $bridgeCapture) {
