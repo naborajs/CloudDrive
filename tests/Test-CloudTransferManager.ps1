@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Write-Output 'Testing Cloud Transfer Manager and Streaming Relay...'
@@ -61,6 +61,12 @@ $gAcc = @{
     ProviderId = 'gdrive'
     DisplayName = 'Test Google Drive'
 }
+Save-GoogleDriveTokens @{
+    access_token = 'ya29.test_access_token'
+    refresh_token = '1//test_refresh_token'
+    token_type = 'Bearer'
+    expiry = '2030-01-01T00:00:00Z'
+} -AccountId $gAcc.Id
 $tAcc = @{
     Id = 'test_terabox_transfer'
     ProviderId = 'terabox'
@@ -94,6 +100,7 @@ if ($revSrcEnv['RCLONE_CONFIG_SRC_REVERSE_TYPE'] -ne 'webdav' -or $revDstEnv['RC
     throw "Reverse direction remote environment configuration failed"
 }
 Write-Output '  [PASS] Reverse-direction (TeraBox to Google Drive) remote configuration verified'
+Remove-Item -LiteralPath (Get-GoogleCredentialFilePath -AccountId $gAcc.Id) -Force -ErrorAction SilentlyContinue
 
 # 5. Test Live Streaming Transfer between Local Test Roots (Verifying Transfer Lifecycle, Pause, Resume, Stop)
 Write-Output '  -> Testing streaming transfer execution, progress polling, and cancellation...'
