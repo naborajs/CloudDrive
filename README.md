@@ -20,6 +20,41 @@
 - **Account isolation**: Synthetic tests cover separate IDs, token files, and settings. Two real Google accounts and concurrent TeraBox sessions have not been tested.
 - **Resource usage**: The app has no verified idle RAM/CPU baseline or performance target. See the read-only [resource snapshot script](tests/Benchmark-ResourceUsage.ps1).
 
+## Engineering Knowledge Base
+
+For implementation details and verified debugging history, start with the
+[engineering architecture](docs/engineering/ARCHITECTURE.md). The knowledge
+base also includes the [Google Drive multi-account lifecycle](docs/engineering/GOOGLE_DRIVE_MULTI_ACCOUNT.md),
+[incident and fix evidence](docs/engineering/INCIDENTS_AND_FIXES.md),
+[TeraBox troubleshooting](docs/engineering/TERABOX_TROUBLESHOOTING.md), and
+[testing and validation limits](docs/engineering/TESTING_AND_VALIDATION.md).
+The reusable coding-agent workflow is
+[`ns-clouddrive-debugging`](.github/skills/ns-clouddrive-debugging/SKILL.md);
+it requires future agents to read the relevant documentation and regression
+tests before revisiting a known issue.
+
+Compact source map:
+
+- `src/NSCloudDrive.ps1`: WPF app, startup, status, UI, Analytics, Logs.
+- `src/providers/`: Google Drive and TeraBox authentication/provider adapters.
+- `src/services/`: settings, rclone/WinFsp mounts, bridge, cache, background
+  operations, Explorer integration, and transfers.
+- `src/ui/ProviderConnectionWindow.ps1`: account creation and settings flow.
+- `tests/`: PowerShell unit, mocked, structural, isolated WPF, and
+  provider/mount-oriented tests; read a test before running it.
+
+Run a focused synthetic account regression from the repository root:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AccountCreationSaveFlow.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-GoogleAccountCreationRecovery.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-StartupAutoMountTimer.ps1
+```
+
+These tests do not prove live concurrent Google mounts or concurrent TeraBox
+support. Review [testing and validation](docs/engineering/TESTING_AND_VALIDATION.md)
+before running provider- or mount-oriented suites.
+
 ---
 
 ## Architecture & Technology Stack
