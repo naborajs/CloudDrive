@@ -215,6 +215,116 @@ function Format-SanitizedDiagnosticMessage([string]$Message) {
     return $sanitized
 }
 
+# ==============================================================================
+# SHARED APPLICATION LOG (bounded JSONL store; safe to call from any runspace)
+# ==============================================================================
+# Both the UI runspaces and the background mount workers dot-source this file,
+# so the shared log lives here. Every message passes through
+# Format-SanitizedDiagnosticMessage BEFORE the file is touched: authorization
+# codes, tokens, passwords, session cookies, and similar secrets are redacted
+# on disk, not just on screen. The store is bounded (2 MB rotate, at most two
+# files) so a long session cannot grow logs without limit.
+$script:ApplicationLogRotateBytes = 2MB
+$script:ApplicationLogCheckState = @{ Setting = $null; ReadAt = [DateTime]::MinValue }
+
+function Get-ApplicationLogSettingEnabled {
+    # 'Normal' is the default; 'Off' disables log writes. The setting file is
+    # small, so reads are rate-limited (5 s) instead of cached forever so that
+    # a settings edit is honored quickly without per-write file parsing.
+    try {
+        if (([DateTime]::UtcNow - $script:ApplicationLogCheckState.ReadAt).TotalSeconds -lt 5 -and $null -ne $script:ApplicationLogCheckState.Setting) {
+            return $script:ApplicationLogCheckState.Setting
+        }
+        $settingsPath = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\settings.json'
+        $enabled = $true
+        if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+            $raw = [System.IO.File]::ReadAllText($settingsPath)
+            $matchOn = [regex]::Match($raw, '"DiagnosticLogging"\s*:\s*"([^"]*)"')
+            if ($matchOn.Success -and $matchOn.Groups[1].Value -eq 'Off') { $enabled = $false }
+        }
+        $script:ApplicationLogCheckState.Setting = $enabled
+        $script:ApplicationLogCheckState.ReadAt = [DateTime]::UtcNow
+        return $enabled
+    } catch {
+        return $true   # fail open for logging capability; never in a hot loop
+    }
+}
+
+function Get-ApplicationLogFilePath {
+    return (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs') 'application.jsonl')
+}
+
+function Write-NSCloudLog {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('Info', 'Warning', 'Error')]
+        [string]$Severity = 'Info',
+        [string]$Provider = '',
+        [string]$AccountId = '',
+        [string]$AccountLabel = '',
+        [string]$Operation = '',
+        [int]$DurationMilliseconds = -1,
+        [string]$Message = '',
+        $Recovered = $null                        # $true / $false / $null (unknown)
+    )
+
+    try {
+        if (-not (Get-ApplicationLogSettingEnabled)) { return }
+
+        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+        $logPath = Get-ApplicationLogFilePath
+
+        # Bounded storage: rotate once, keeping only the predecessor file.
+        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+            try {
+                $info = [System.IO.FileInfo]::new($logPath)
+                if ($info.Length -gt $script:ApplicationLogRotateBytes) {
+                    Move-Item -LiteralPath $logPath -Destination ($logPath + '.1') -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+
+        $entry = [ordered]@{
+            timestampUtc   = [DateTime]::UtcNow.ToString('o')
+            severity       = $Severity
+            provider       = $Provider
+            accountId      = $AccountId
+            accountLabel   = $AccountLabel
+            operation      = $Operation
+            durationMs     = if ($DurationMilliseconds -ge 0) { [int]$DurationMilliseconds } else { [int]-1 }
+            message        = (Format-SanitizedDiagnosticMessage $Message)
+            recovered      = if ($null -eq $Recovered) { $null } else { [bool]$Recovered }
+        }
+        [System.IO.File]::AppendAllText($logPath, (($entry | ConvertTo-Json -Compress) + [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+    } catch { }
+}
+
+function Read-ApplicationLogEntries([int]$MaxEntries = 800) {
+    # Returns the newest-at-end parsed tail of the shared log. Unparseable
+    # lines (partial writes) are skipped, never used to fail the reader.
+    $entries = [System.Collections.Generic.List[object]]::new()
+    try {
+        $logPath = Get-ApplicationLogFilePath
+        if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return $entries }
+        $lines = [System.IO.File]::ReadAllLines($logPath)
+        $start = 0
+        if ($lines.Count -gt $MaxEntries) { $start = $lines.Count - $MaxEntries }
+        for ($i = $start; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try {
+                # enforce the bound again after parsing in case of sparse lines
+                if ($entries.Count -ge $MaxEntries) { $entries.RemoveAt(0) }
+                $entries.Add(($line | ConvertFrom-Json))
+            } catch { }
+        }
+    } catch { }
+    return $entries
+}
+
 function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue = $null) {
     if ($null -eq $Object) { return $DefaultValue }
     if ($Object -is [System.Collections.IDictionary]) {
