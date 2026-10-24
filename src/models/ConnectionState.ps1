@@ -306,22 +306,20 @@ function Read-ApplicationLogEntries([int]$MaxEntries = 800) {
     # Returns the newest-at-end parsed tail of the shared log. Unparseable
     # lines (partial writes) are skipped, never used to fail the reader.
     $entries = [System.Collections.Generic.List[object]]::new()
-    try {
-        $logPath = Get-ApplicationLogFilePath
-        if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return $entries }
-        $lines = [System.IO.File]::ReadAllLines($logPath)
-        $start = 0
-        if ($lines.Count -gt $MaxEntries) { $start = $lines.Count - $MaxEntries }
-        for ($i = $start; $i -lt $lines.Count; $i++) {
-            $line = $lines[$i]
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            try {
-                # enforce the bound again after parsing in case of sparse lines
-                if ($entries.Count -ge $MaxEntries) { $entries.RemoveAt(0) }
-                $entries.Add(($line | ConvertFrom-Json))
-            } catch { }
-        }
-    } catch { }
+    $logPath = Get-ApplicationLogFilePath
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return $entries }
+    $lines = [System.IO.File]::ReadAllLines($logPath)
+    $start = 0
+    if ($lines.Count -gt $MaxEntries) { $start = $lines.Count - $MaxEntries }
+    for ($i = $start; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+            # Enforce the entry bound again after parsing in case of sparse lines.
+            if ($entries.Count -ge $MaxEntries) { $entries.RemoveAt(0) }
+            $entries.Add(($line | ConvertFrom-Json))
+        } catch { }
+    }
     return $entries
 }
 
