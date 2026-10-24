@@ -11,7 +11,7 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
+Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
 
 function Invoke-MemoryTrim {
     try {
@@ -155,6 +155,28 @@ function Get-WpfBitmapImage([string]$Path) {
     return $null
 }
 
+function Get-AppNotifyIcon([string]$Path) {
+    $bitmap = $null
+    $iconHandle = [IntPtr]::Zero
+    try {
+        $bitmap = [System.Drawing.Bitmap]::new($Path)
+        $iconHandle = $bitmap.GetHicon()
+        return [System.Drawing.Icon]::FromHandle($iconHandle).Clone()
+    } finally {
+        if ($iconHandle -ne [IntPtr]::Zero) {
+            [NSCloudDrive.Win32]::DestroyIcon($iconHandle) | Out-Null
+        }
+        if ($bitmap) { $bitmap.Dispose() }
+    }
+}
+
+function Dispose-AppNotifyIcon {
+    if ($script:CustomNotifyIcon) {
+        $script:CustomNotifyIcon.Dispose()
+        $script:CustomNotifyIcon = $null
+    }
+}
+
 function Start-ExplorerWindow([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
     try {
@@ -281,12 +303,12 @@ function New-AccountDiskIcon([string]$ProviderId) {
     }
 
     # Overlay badge in lower right
-    $provLogoPath = if ($ProviderId -eq 'gdrive') {
-        Join-Path $PSScriptRoot '..\assets\logos\googledrive.png'
-    } else {
-        Join-Path $PSScriptRoot '..\assets\logos\terabox.png'
+    $provLogoPath = switch ([string]$ProviderId) {
+        'gdrive' { Join-Path $PSScriptRoot '..\assets\logos\googledrive.png'; break }
+        'terabox' { Join-Path $PSScriptRoot '..\assets\logos\terabox.png'; break }
+        default { $null }
     }
-    $provBmp = Get-WpfBitmapImage $provLogoPath
+    $provBmp = if ($provLogoPath) { Get-WpfBitmapImage $provLogoPath } else { $null }
     if ($provBmp) {
         $badgeBorder = [System.Windows.Controls.Border]::new()
         $badgeBorder.Width = 22
@@ -530,7 +552,12 @@ $disksView.Children.Add($mainScroll) | Out-Null
 $content = [System.Windows.Controls.StackPanel]::new()
 $mainScroll.Content = $content
 
-# --- Providers Container (Grid required by regression test suite) ---
+# Saved accounts are the primary drive list. Provider-only entries are shown
+# afterward only when an active mount cannot be reconciled to a saved account.
+$accountsStack = [System.Windows.Controls.StackPanel]::new()
+$content.Children.Add($accountsStack) | Out-Null
+
+# --- Provider recovery container (Grid required by regression test suite) ---
 $providersGrid = [System.Windows.Controls.Grid]::new()
 $providersGrid.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
 $rowGd = [System.Windows.Controls.RowDefinition]::new()
@@ -540,9 +567,6 @@ $rowTb.Height = [System.Windows.GridLength]::Auto
 $providersGrid.RowDefinitions.Add($rowGd)
 $providersGrid.RowDefinitions.Add($rowTb)
 $content.Children.Add($providersGrid) | Out-Null
-
-$accountsStack = [System.Windows.Controls.StackPanel]::new()
-$content.Children.Add($accountsStack) | Out-Null
 
 $driveLetters = @('D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z')
 
@@ -2085,15 +2109,21 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
         $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
         $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
         $mountInfo = [ordered]@{}
-        $mountInfo['Google Drive'] = if ($gdStatus.IsMounted) { "Mounted ($($gdStatus.DriveLetter):)" } else { 'Disconnected' }
-        $mountInfo['TeraBox'] = if ($tbStatus.IsMounted) { "Mounted ($($tbStatus.DriveLetter):)" } else { 'Disconnected' }
 
-        $accounts = Get-CloudAccounts
+        $accounts = @(Get-CloudAccounts)
         if ($accounts) {
             foreach ($acc in $accounts) {
-                if ($acc.Id -notlike 'test_*' -and $acc.AccountEmail -notin @('personal@gmail.com', 'work@company.com', 'terabox_user')) {
-                    $st = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
-                    $mountInfo["Account ($($acc.DisplayName))"] = if ($st.IsMounted) { "Mounted ($($st.DriveLetter):)" } else { 'Disconnected' }
+                $st = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
+                $mountInfo["Account ($($acc.DisplayName))"] = if ($st.IsMounted) { "Mounted ($($st.DriveLetter):)" } else { 'Disconnected' }
+            }
+        }
+        foreach ($providerStatus in @($gdStatus, $tbStatus)) {
+            if ($providerStatus.IsMounted) {
+                $ownsDrive = @($accounts | Where-Object {
+                    ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq ([string]$providerStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+                }).Count -gt 0
+                if (-not $ownsDrive) {
+                    $mountInfo["Unregistered mount ($($providerStatus.DriveLetter):)"] = 'Recovery required'
                 }
             }
         }
@@ -2759,7 +2789,12 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
             $accountStatuses = Get-SafeProperty $snapshot 'AccountStatuses' $null
             if ($accountStatuses -and $accountStatuses.ContainsKey($AccountId)) {
                 $liveStatus = Ensure-UiDriveStatusShape $accountStatuses[$AccountId]
-                if ($liveStatus.ProcessRunning -and $liveStatus.IsMounted) {
+                $reportedAccountId = [string](Get-SafeProperty $liveStatus 'AccountId' '')
+                $reportedLetter = ([string]$liveStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+                $expectedLetter = if ($DriveLetter) { ([string]$DriveLetter).TrimEnd(':').TrimEnd('\') } else { ([string]$mountState.DriveLetter).TrimEnd(':').TrimEnd('\') }
+                $statusMatchesAccount = (-not $reportedAccountId -or [string]::Equals($reportedAccountId, $AccountId, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                    (-not $expectedLetter -or -not $reportedLetter -or [string]::Equals($expectedLetter, $reportedLetter, [System.StringComparison]::OrdinalIgnoreCase))
+                if ($liveStatus.ProcessRunning -and $liveStatus.IsMounted -and $statusMatchesAccount) {
                     $liveStatus['MountState'] = $mountState
                     return $liveStatus
                 }
@@ -2805,15 +2840,57 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
     if ($snapshot) {
         $accountStatuses = Get-SafeProperty $snapshot 'AccountStatuses' $null
         if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $accountStatuses -and $accountStatuses.ContainsKey($AccountId)) {
-            return (Ensure-UiDriveStatusShape $accountStatuses[$AccountId])
+            $accountStatus = Ensure-UiDriveStatusShape $accountStatuses[$AccountId]
+            $reportedAccountId = [string](Get-SafeProperty $accountStatus 'AccountId' '')
+            $reportedLetter = ([string]$accountStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+            $expectedLetter = ([string]$DriveLetter).TrimEnd(':').TrimEnd('\')
+            if (($reportedAccountId -and -not [string]::Equals($reportedAccountId, $AccountId, [System.StringComparison]::OrdinalIgnoreCase)) -or
+                ($expectedLetter -and $reportedLetter -and -not [string]::Equals($expectedLetter, $reportedLetter, [System.StringComparison]::OrdinalIgnoreCase))) {
+                $unmappedLetter = if ($expectedLetter) { $expectedLetter } else { $reportedLetter }
+                return [ordered]@{
+                    IsMounted = $false
+                    ProcessRunning = $false
+                    DriveLetter = $unmappedLetter
+                    DriveRoot = if ($unmappedLetter) { "$unmappedLetter`:\" } else { '' }
+                    IsReadOnly = $false
+                    ProcessId = $null
+                    MountState = $accountStatus.MountState
+                }
+            }
+            return $accountStatus
+        }
+        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+            $savedAccount = Get-CloudAccount -AccountId $AccountId
+            $letter = if ($DriveLetter) { ([string]$DriveLetter).TrimEnd(':').TrimEnd('\') } elseif ($savedAccount) { ([string]$savedAccount.DriveLetter).TrimEnd(':').TrimEnd('\') } else { '' }
+            return [ordered]@{
+                IsMounted = $false
+                ProcessRunning = $false
+                DriveLetter = $letter
+                DriveRoot = if ($letter) { "$letter`:\" } else { '' }
+                IsReadOnly = $false
+                ProcessId = $null
+                MountState = $null
+            }
         }
         $statusProperty = if ($ProviderId -eq 'gdrive') { 'GoogleStatus' } elseif ($ProviderId -eq 'terabox') { 'TeraBoxStatus' } else { '' }
         $providerStatus = if ($statusProperty) { Get-SafeProperty $snapshot $statusProperty $null } else { $null }
         if ($providerStatus) { return (Ensure-UiDriveStatusShape $providerStatus) }
     }
 
-    $letter = if ($DriveLetter) { $DriveLetter } elseif ($ProviderId -eq 'gdrive') { $script:GDriveLetter } else { $script:TeraBoxLetter }
-    return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $null }
+    $savedAccount = if (-not [string]::IsNullOrWhiteSpace($AccountId)) { Get-CloudAccount -AccountId $AccountId } else { $null }
+    $letter = if ($DriveLetter) {
+        $DriveLetter
+    } elseif ($savedAccount) {
+        [string]$savedAccount.DriveLetter
+    } elseif (-not [string]::IsNullOrWhiteSpace($AccountId)) {
+        ''
+    } elseif ($ProviderId -eq 'gdrive') {
+        $script:GDriveLetter
+    } else {
+        $script:TeraBoxLetter
+    }
+    $driveRoot = if ($letter) { "$letter`:\" } else { '' }
+    return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = $driveRoot; IsReadOnly = $false; ProcessId = $null; MountState = $null }
 }
 
 function Start-ScopedDriveDisconnect(
@@ -3346,11 +3423,7 @@ function Update-AllUIState {
     $statusSnapshot = $script:ProviderStatusSnapshot
     $allAccounts = @()
     try {
-        foreach ($account in @(Get-CloudAccounts)) {
-            if ($account.Id -notlike 'test_*' -and $account.AccountEmail -notin @('personal@gmail.com', 'work@company.com', 'terabox_user')) {
-                $allAccounts += $account
-            }
-        }
+        $allAccounts = @(Get-CloudAccounts)
     } catch { }
     $hasSavedGoogleAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'gdrive' }).Count -gt 0
     $hasSavedTeraBoxAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'terabox' }).Count -gt 0
@@ -3396,6 +3469,18 @@ function Update-AllUIState {
     # 1. Google Drive State
     $gdCheck = Get-SafeProperty $statusSnapshot 'GoogleCheck' $gdCheckingResult
     $gdStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
+    $gdDriveLetter = ([string]$gdStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+    $accountUiStatuses = @{}
+    foreach ($account in $allAccounts) {
+        $accountUiStatuses[[string]$account.Id] = Get-CachedUiDriveStatus `
+            -AccountId ([string]$account.Id) -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter)
+    }
+    $googleDriveHasSavedAccount = @($allAccounts | Where-Object {
+        $_.ProviderId -eq 'gdrive' -and
+        $accountUiStatuses[[string]$_.Id].IsMounted -and
+        ([string]$accountUiStatuses[[string]$_.Id].DriveLetter).TrimEnd(':').TrimEnd('\') -eq $gdDriveLetter
+    }).Count -gt 0
+    $hasActiveLegacyGoogle = [bool]$gdStatus.IsMounted -and -not $googleDriveHasSavedAccount
     if ($gdCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $gdCheck 'IsValid' $false)) {
         $gdCheck = $gdCheckingResult
     }
@@ -3407,13 +3492,15 @@ function Update-AllUIState {
         $emailAddr = if ($gdUserInfo) { Get-SafeProperty $gdUserInfo 'EmailAddress' '' } else { '' }
         $userDisplay = if ($dispName) { $dispName } else { $emailAddr }
         $googleIdentityVerified = [bool](Get-SafeProperty $gdCheck 'IdentityVerified' $false)
-        if ($hasSavedGoogleAccounts -and -not $googleIdentityVerified) {
-            $userDisplay = 'Google Drive (legacy connection)'
+        if ($hasActiveLegacyGoogle) {
+            $userDisplay = 'Google Drive - recovery needed'
             $emailAddr = ''
+            $gdUserInfo = $null
+            $googleIdentityVerified = $false
         } elseif (-not $userDisplay -or $userDisplay -eq 'Google Drive User') {
             if (-not $hasSavedGoogleAccounts) {
                 try {
-                    $accs = Get-CloudAccounts
+                    $accs = @(Get-CloudAccounts)
                     $primaryGd = $accs | Where-Object { $_.ProviderId -eq 'gdrive' } | Select-Object -First 1
                     if ($primaryGd) {
                         if ($primaryGd.DisplayName) { $userDisplay = $primaryGd.DisplayName }
@@ -3430,8 +3517,8 @@ function Update-AllUIState {
         $gdNameLabel.Text = $userDisplay
         $gdAccountText.Text = if ($emailAddr) {
             $emailAddr
-        } elseif ($hasSavedGoogleAccounts -and -not $googleIdentityVerified) {
-            'Identity not verified for this connection'
+        } elseif ($hasActiveLegacyGoogle) {
+            'This mounted drive is not linked to a saved account.'
         } else {
             'Connected'
         }
@@ -3449,7 +3536,7 @@ function Update-AllUIState {
             $gdStorageBar.Value = [Math]::Min(100, [Math]::Max(0, $pct))
             $gdStorageBar.Visibility = 'Visible'
             $gdQuotaText.Text = if ($hasSavedGoogleAccounts -and -not $googleIdentityVerified) {
-                "Legacy session: $freeTb TB free of $totalTb TB"
+                "Unregistered session: $freeTb TB free of $totalTb TB"
             } else {
                 "$freeTb TB free of $totalTb TB"
             }
@@ -3514,7 +3601,7 @@ function Update-AllUIState {
             $gdUploadBtn.IsEnabled = $false
         }
     } else {
-        $gdNameLabel.Text = if ($hasSavedGoogleAccounts -and $gdStatus.IsMounted) { 'Google Drive (legacy connection)' } else { 'Google Drive' }
+        $gdNameLabel.Text = if ($hasActiveLegacyGoogle) { 'Google Drive - recovery needed' } else { 'Google Drive' }
         $gdState = Get-SafeProperty $gdCheck 'State' ''
         $gdErr = Get-SafeProperty $gdCheck 'Error' ''
         if ($gdState -eq 'Mounting') {
@@ -3575,6 +3662,13 @@ function Update-AllUIState {
     # 2. TeraBox State
     $tbCheck = Get-SafeProperty $statusSnapshot 'TeraBoxCheck' $tbCheckingResult
     $tbStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
+    $tbDriveLetter = ([string]$tbStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+    $teraBoxDriveHasSavedAccount = @($allAccounts | Where-Object {
+        $_.ProviderId -eq 'terabox' -and
+        $accountUiStatuses[[string]$_.Id].IsMounted -and
+        ([string]$accountUiStatuses[[string]$_.Id].DriveLetter).TrimEnd(':').TrimEnd('\') -eq $tbDriveLetter
+    }).Count -gt 0
+    $hasActiveLegacyTeraBox = [bool]$tbStatus.IsMounted -and -not $teraBoxDriveHasSavedAccount
     if ($tbCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $tbCheck 'IsValid' $false)) {
         $tbCheck = $tbCheckingResult
     }
@@ -3584,10 +3678,15 @@ function Update-AllUIState {
     if ($tbCheckIsValid) {
         $tbUName = if ($tbUserInfo) { Get-SafeProperty $tbUserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
         $tbDisplayName = 'TeraBox'
+        if ($hasActiveLegacyTeraBox) {
+            $tbDisplayName = 'TeraBox - recovery needed'
+            $tbUName = 'This mounted drive is not linked to a saved account.'
+            $tbUserInfo = $null
+        }
         if ($tbUName -eq 'TeraBox User') {
             if (-not $hasSavedTeraBoxAccounts) {
                 try {
-                    $accs = Get-CloudAccounts
+                    $accs = @(Get-CloudAccounts)
                     $primaryTb = $accs | Where-Object { $_.ProviderId -eq 'terabox' } | Select-Object -First 1
                     if ($primaryTb) {
                         if ($primaryTb.DisplayName) { $tbDisplayName = $primaryTb.DisplayName }
@@ -3595,9 +3694,9 @@ function Update-AllUIState {
                     }
                 } catch { }
             }
-            if ($hasSavedTeraBoxAccounts) {
-                $tbDisplayName = 'TeraBox (legacy connection)'
-                $tbUName = 'Identity unavailable for this mount'
+            if ($hasActiveLegacyTeraBox) {
+                $tbDisplayName = 'TeraBox - recovery needed'
+                $tbUName = 'This mounted drive is not linked to a saved account.'
             }
         }
         $tbNameLabel.Text = $tbDisplayName
@@ -3607,7 +3706,11 @@ function Update-AllUIState {
         $tbTotal = if ($tbUserInfo) { [int64](Get-SafeProperty $tbUserInfo 'QuotaTotal' (Get-SafeProperty $tbUserInfo 'QuotaTotalBytes' 0)) } else { 0L }
         $tbUsed = if ($tbUserInfo) { [int64](Get-SafeProperty $tbUserInfo 'QuotaUsed' (Get-SafeProperty $tbUserInfo 'QuotaUsedBytes' 0)) } else { 0L }
 
-        if ($tbTotal -gt 0) {
+        if ($hasActiveLegacyTeraBox) {
+            $tbStorageBar.Visibility = 'Collapsed'
+            $tbQuotaText.Text = 'Storage: unavailable until this mount is identified.'
+            $tbQuotaText.Visibility = 'Visible'
+        } elseif ($tbTotal -gt 0) {
             $freeBytes = [Math]::Max(0L, ($tbTotal - $tbUsed))
             $freeGb = [Math]::Round($freeBytes / 1GB, 1)
             $totalGb = [Math]::Round($tbTotal / 1GB, 0)
@@ -3678,7 +3781,7 @@ function Update-AllUIState {
             $tbUploadBtn.IsEnabled = $false
         }
     } else {
-        $tbNameLabel.Text = if ($hasSavedTeraBoxAccounts -and $tbStatus.IsMounted) { 'TeraBox (legacy connection)' } else { 'TeraBox' }
+        $tbNameLabel.Text = if ($hasActiveLegacyTeraBox) { 'TeraBox - recovery needed' } else { 'TeraBox' }
         $tbState = Get-SafeProperty $tbCheck 'State' ''
         $tbErr = Get-SafeProperty $tbCheck 'Error' ''
         if ($tbState -eq 'Mounting') {
@@ -3742,22 +3845,14 @@ function Update-AllUIState {
     $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and -not ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Disconnecting') -and ($tbCheckState -ne 'Checking' -or $tbStatus.IsMounted) -and -not (Test-LegacyMountBusy 'terabox'))
 
     # 3. Dynamic Multi-Account Cards
-    $gdDriveLetter = ([string]$gdStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
-    $tbDriveLetter = ([string]$tbStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
-    $googleDriveHasSavedAccount = @($allAccounts | Where-Object {
-        $_.ProviderId -eq 'gdrive' -and ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $gdDriveLetter
-    }).Count -gt 0
-    $teraBoxDriveHasSavedAccount = @($allAccounts | Where-Object {
-        $_.ProviderId -eq 'terabox' -and ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $tbDriveLetter
-    }).Count -gt 0
-    $hasActiveLegacyGoogle = [bool]$gdStatus.IsMounted -and -not $googleDriveHasSavedAccount
-    $hasActiveLegacyTeraBox = [bool]$tbStatus.IsMounted -and -not $teraBoxDriveHasSavedAccount
-    $gdCard.Visibility = if ($hasSavedGoogleAccounts -and -not $hasActiveLegacyGoogle) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
-    $tbCard.Visibility = if ($hasSavedTeraBoxAccounts -and -not $hasActiveLegacyTeraBox) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+    $showGoogleRecovery = $hasActiveLegacyGoogle -or ($gdStatus.MountState -and $gdStatus.MountState.State -in @('Mounting', 'Disconnecting', 'Error', 'AuthRequired'))
+    $showTeraBoxRecovery = $hasActiveLegacyTeraBox -or ($tbStatus.MountState -and $tbStatus.MountState.State -in @('Mounting', 'Disconnecting', 'Error', 'AuthRequired'))
+    $gdCard.Visibility = if ($showGoogleRecovery) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+    $tbCard.Visibility = if ($showTeraBoxRecovery) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
 
     $cardSignatureItems = [System.Collections.Generic.List[object]]::new()
     foreach ($account in $allAccounts) {
-        $status = Get-CachedUiDriveStatus -AccountId ([string]$account.Id) -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter)
+        $status = $accountUiStatuses[[string]$account.Id]
         $mountState = if ($status.MountState) { $status.MountState } elseif ($script:AccountMountStates.ContainsKey([string]$account.Id)) { $script:AccountMountStates[[string]$account.Id] } else { $null }
         $progress = $script:StartupAutoMountProgress
         if ($script:StartupAutoMountWorker -and $progress.AccountId -eq [string]$account.Id) {
@@ -3790,7 +3885,7 @@ function Update-AllUIState {
         $accountsStack.Children.Clear()
     if ($allAccounts -and $allAccounts.Count -gt 0) {
         $p = $script:Palette
-        $secLabel = New-Label 'SAVED CLOUD ACCOUNTS' 11 $p.TextSecondary $true
+        $secLabel = New-Label 'CLOUD DRIVES' 11 $p.TextSecondary $true
         $secLabel.Margin = [System.Windows.Thickness]::new(2, 6, 0, 8)
         $accountsStack.Children.Add($secLabel) | Out-Null
 
@@ -3822,7 +3917,11 @@ function Update-AllUIState {
             [System.Windows.Controls.Grid]::SetColumn($aInfoStack, 1)
             $aGrid.Children.Add($aInfoStack) | Out-Null
 
-            $aProviderName = if ($acc.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+            $aProviderName = switch ([string]$acc.ProviderId) {
+                'gdrive' { 'Google Drive'; break }
+                'terabox' { 'TeraBox'; break }
+                default { 'Unknown provider' }
+            }
             $aProviderLabel = New-Label $aProviderName 11 $p.TextMuted $true
             $aInfoStack.Children.Add($aProviderLabel) | Out-Null
             $aName = New-Label $acc.DisplayName 15 $p.TextPrimary $true
@@ -4089,63 +4188,16 @@ $gdActionBtn.Add_Click({
         return
     }
 
-    $gdCheck = Test-GoogleDriveBackendSession
-    if ($gdCheck.IsValid) {
-        $gdStatusText.Text = [string][char]0x25CF + ' Mounting...'
-        $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
-        $gdActionBtn.IsEnabled = $false
-        try {
-            # Mounting runs in a background runspace; the window stays responsive
-            # while rclone/WinFsp take up to 90 seconds to surface the drive.
-            [void](Start-LegacyMountWorker -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -DisplayName 'Google Drive')
-        } catch {
-            $gdErrorText.Text = "Mount failed: $($_.Exception.Message)"
-            $gdErrorText.Visibility = 'Visible'
-        } finally {
-            $gdActionBtn.IsEnabled = $true
-            Update-AllUIState
-        }
-        return
-    }
-
-    $script:IsConnecting = $true
-    $gdStatusText.Text = [string][char]0x25CF + ' Connecting...'
-    $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillConnected)
-    $gdErrorText.Visibility = 'Collapsed'
-    $gdActionBtn.IsEnabled = $false
-
     try {
-        $gdAccountText.Text = 'Awaiting Google sign-in approval in browser...'
-        $authRes = Invoke-GoogleDriveAuthorization -TimeoutSeconds 120 -CancelCheck { -not $window.IsVisible }
-        if ($authRes.Success) {
-            $gdAccountText.Text = 'Verifying Google Drive account access...'
-            $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens
-            if ($verify.IsValid) {
-                Save-GoogleDriveTokens -TokenData $authRes.Tokens
-
-                if (Test-WinFspInstalled) {
-                    $gdAccountText.Text = 'Mounting virtual drive (' + $script:GDriveLetter + ':)...'
-                    try {
-                        [void](Start-LegacyMountWorker -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -DisplayName 'Google Drive')
-                    } catch {
-                        $gdErrorText.Text = 'Connected, but could not mount ' + $script:GDriveLetter + ': ' + $_.Exception.Message
-                        $gdErrorText.Visibility = 'Visible'
-                    }
-                }
-            } else {
-                $gdErrorText.Text = "Validation failed: $($verify.Error)"
-                $gdErrorText.Visibility = 'Visible'
-            }
-        } else {
-            $gdErrorText.Text = "Sign-in cancelled or failed: $($authRes.Error)"
-            $gdErrorText.Visibility = 'Visible'
+        $created = Connect-NewCloudAccount -Owner $window -ProviderId 'gdrive'
+        if ($created) {
+            [void]$script:ManualMountRequests.Add([string]$created.Id)
+            Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
         }
+        Update-AllUIState
     } catch {
-        $gdErrorText.Text = "Error: $($_.Exception.Message)"
+        $gdErrorText.Text = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
         $gdErrorText.Visibility = 'Visible'
-    } finally {
-        $script:IsConnecting = $false
-        $gdActionBtn.IsEnabled = $true
         Update-AllUIState
     }
 })
@@ -4162,11 +4214,10 @@ $gdSettingsBtn.Add_Click({
     $selectedLetter = ([string]$selectedStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
     $existing = Get-CloudAccounts | Where-Object {
         $_.ProviderId -eq 'gdrive' -and
-        $_.Id -notlike 'test_*' -and
         ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $selectedLetter
     } | Select-Object -First 1
     if (-not $existing) {
-        [System.Windows.MessageBox]::Show('This legacy Google Drive connection has no verified saved-account settings. Add or reconnect a Google account to edit account-specific options.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        [System.Windows.MessageBox]::Show('This mounted Google Drive is not linked to a saved account. Use Add Cloud Disk to create a verified account record; this will not change the existing mount or its credentials.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         return
     }
     $res = Show-CloudAccountSetupModal -Owner $window -ProviderId 'gdrive' -InitialAccount $existing -Theme $script:Settings.Theme
@@ -4202,54 +4253,16 @@ $tbActionBtn.Add_Click({
         return
     }
 
-    $tbCheck = Test-TeraBoxBackendSession
-    if ($tbCheck.IsValid) {
-        $tbStatusText.Text = [string][char]0x25CF + ' Mounting...'
-        $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
-        $tbActionBtn.IsEnabled = $false
-        try {
-            # Mounting runs in a background runspace; the window stays responsive
-            # while rclone/WinFsp take up to 90 seconds to surface the drive.
-            [void](Start-LegacyMountWorker -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -DisplayName 'TeraBox')
-        } catch {
-            $tbErrorText.Text = "Mount failed: $($_.Exception.Message)"
-            $tbErrorText.Visibility = 'Visible'
-        } finally {
-            $tbActionBtn.IsEnabled = $true
-            Update-AllUIState
-        }
-        return
-    }
-
-    $script:IsConnecting = $true
-    $tbStatusText.Text = [string][char]0x25CF + ' Connecting...'
-    $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillConnected)
-    $tbErrorText.Visibility = 'Collapsed'
-    $tbActionBtn.IsEnabled = $false
-
     try {
-        $loginRes = Show-TeraBoxEmbeddedLoginWindow -Owner $window
-        if ($loginRes.Success) {
-            $tbAccountText.Text = 'Mounting virtual drive (' + $script:TeraBoxLetter + ':)...'
-            $verifiedRclone = Get-VerifiedRclonePath
-            if ($verifiedRclone -and (Test-WinFspInstalled)) {
-                try {
-                    [void](Start-LegacyMountWorker -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -DisplayName 'TeraBox')
-                } catch {
-                    $tbErrorText.Text = 'Connected, but could not mount ' + $script:TeraBoxLetter + ': ' + $_.Exception.Message
-                    $tbErrorText.Visibility = 'Visible'
-                }
-            }
-        } elseif (-not $loginRes.Cancelled) {
-            $tbErrorText.Text = if ($loginRes.Error) { $loginRes.Error } else { 'Sign-in was not completed.' }
-            $tbErrorText.Visibility = 'Visible'
+        $created = Connect-NewCloudAccount -Owner $window -ProviderId 'terabox'
+        if ($created) {
+            [void]$script:ManualMountRequests.Add([string]$created.Id)
+            Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
         }
+        Update-AllUIState
     } catch {
-        $tbErrorText.Text = "Sign-in error: $($_.Exception.Message)"
+        $tbErrorText.Text = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
         $tbErrorText.Visibility = 'Visible'
-    } finally {
-        $script:IsConnecting = $false
-        $tbActionBtn.IsEnabled = $true
         Update-AllUIState
     }
 })
@@ -4266,11 +4279,10 @@ $tbSettingsBtn.Add_Click({
     $selectedLetter = ([string]$selectedStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
     $existing = Get-CloudAccounts | Where-Object {
         $_.ProviderId -eq 'terabox' -and
-        $_.Id -notlike 'test_*' -and
         ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $selectedLetter
     } | Select-Object -First 1
     if (-not $existing) {
-        [System.Windows.MessageBox]::Show('This legacy TeraBox connection has no verified saved-account settings. Add or reconnect a TeraBox account to edit account-specific options.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        [System.Windows.MessageBox]::Show('This mounted TeraBox connection is not linked to a saved account. Use Add Cloud Disk to create a verified account record; this will not change the existing mount or its session.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         return
     }
     $res = Show-CloudAccountSetupModal -Owner $window -ProviderId 'terabox' -InitialAccount $existing -Theme $script:Settings.Theme
@@ -4295,7 +4307,18 @@ $tbRemoveBtn.Add_Click({
 # SYSTEM TRAY INTEGRATION
 # ==============================================================================
 $notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
-$notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+$script:CustomNotifyIcon = $null
+$appLogoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
+if (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
+    try {
+        $script:CustomNotifyIcon = Get-AppNotifyIcon $appLogoPath
+        $notifyIcon.Icon = $script:CustomNotifyIcon
+    } catch {
+        $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+    }
+} else {
+    $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+}
 $notifyIcon.Text = 'NS Cloud Drive'
 $notifyIcon.Visible = $true
 
@@ -4336,6 +4359,7 @@ $menuExit.Add_Click({
     Remove-NSCloudDriveOwnedExplorerIcons
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
+    Dispose-AppNotifyIcon
     if ($script:RestoreEvent) {
         try { $script:RestoreEvent.Dispose() } catch { }
         $script:RestoreEvent = $null
@@ -4374,6 +4398,7 @@ $window.Add_Closing({
             Remove-NSCloudDriveOwnedExplorerIcons
             $notifyIcon.Visible = $false
             $notifyIcon.Dispose()
+            Dispose-AppNotifyIcon
             if ($script:RestoreEvent) {
                 try { $script:RestoreEvent.Dispose() } catch { }
                 $script:RestoreEvent = $null
@@ -4655,7 +4680,7 @@ function Invoke-AutoReconnectWatchdog {
         foreach ($key in $script:ReconnectFailCount.Keys) { $failureCounts[$key] = [int]$script:ReconnectFailCount[$key] }
         $cacheDirectory = $script:CacheDirectory
         $cacheMaxGigabytes = [int]$script:Settings.CacheMaxGigabytes
-        $mountProgress = [hashtable]::Synchronized(@{ AccountId = $AccountId; Stage = 'Starting mount worker'; DriveLetter = ''; StartedAt = [DateTime]::UtcNow; Error = $null })
+        $mountProgress = New-MountOperationState -State 'Mounting' -Stage 'Starting mount worker' -AccountId $AccountId
         if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
             $mountProgress.DriveLetter = [string]$workerAccounts[0].DriveLetter
             $script:AccountMountStates[$AccountId] = $mountProgress
