@@ -490,7 +490,7 @@ function Test-TeraBoxBackendSession(
             } elseif ($uk) {
                 $ukStr = [string]$uk
                 $suffix = if ($ukStr.Length -gt 4) { $ukStr.Substring($ukStr.Length - 4) } else { $ukStr }
-                "TeraBox user …$suffix"
+                "TeraBox user ...$suffix"
             } else {
                 'TeraBox User'
             }
