@@ -58,23 +58,93 @@ function Get-NSCloudDriveExplorerIconPath([string]$ProviderId, [string]$SourceAs
     if (-not $targetInfo -or $targetInfo.LastWriteTimeUtc -lt $sourceInfo.LastWriteTimeUtc) {
         $tempIcon = "$iconPath.$([guid]::NewGuid().ToString('N')).tmp"
         $bitmap = $null; $scaled = $null; $graphics = $null; $icon = $null; $handle = [IntPtr]::Zero
+        $baseDriveBmp = $null; $driveIconHandle = [IntPtr]::Zero
         try {
             if (-not ('NSCloudDrive.ExplorerNative' -as [type])) {
                 Add-Type -Namespace NSCloudDrive -Name ExplorerNative -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr handle); [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] public static extern void SHChangeNotify(uint eventId, uint flags, string path1, System.IntPtr path2);'
             }
+            if (-not ('NSCloudDrive.DriveIconBuilder' -as [type])) {
+                Add-Type -Namespace NSCloudDrive -Name DriveIconBuilder -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)] public static extern uint PrivateExtractIcons(string szFileName, int nIconIndex, int cxIcon, int cyIcon, System.IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags); [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr handle);'
+            }
             Add-Type -AssemblyName System.Drawing
+            try {
+                $phicon = New-Object IntPtr[] 1
+                $extractCount = [NSCloudDrive.DriveIconBuilder]::PrivateExtractIcons('C:\Windows\System32\imageres.dll', 27, 128, 128, $phicon, $null, 1, 0)
+                if ($extractCount -gt 0 -and $phicon[0] -ne [IntPtr]::Zero) {
+                    $driveIconHandle = $phicon[0]
+                    $extractedIco = [System.Drawing.Icon]::FromHandle($driveIconHandle)
+                    $baseDriveBmp = $extractedIco.ToBitmap()
+                }
+            } catch { }
+
             $bitmap = [System.Drawing.Bitmap]::new($sourceInfo.FullName)
             $scaled = [System.Drawing.Bitmap]::new(128, 128, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
             $graphics = [System.Drawing.Graphics]::FromImage($scaled)
             $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $graphics.DrawImage($bitmap, 0, 0, 128, 128)
+            $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+            $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+
+            if ($baseDriveBmp) {
+                # 1. Base drive chassis (native Windows disk drive look matching C: and D: drives)
+                $graphics.DrawImage($baseDriveBmp, 0, 0, 128, 128)
+
+                # 2. Provider logo badge on top-left of the drive (matching Windows OS logo on C: drive)
+                $badgeW = 50
+                $badgeH = 50
+                $badgeX = 8
+                $badgeY = 6
+                if ($ProviderId.ToLowerInvariant() -in @('terabox', 'tera-box')) {
+                    $radius = 10
+                    $path = [System.Drawing.Drawing2D.GraphicsPath]::new()
+                    $r = [System.Drawing.Rectangle]::new($badgeX, $badgeY, $badgeW, $badgeH)
+                    $d = $radius * 2
+                    $path.AddArc($r.X, $r.Y, $d, $d, 180, 90)
+                    $path.AddArc($r.Right - $d, $r.Y, $d, $d, 270, 90)
+                    $path.AddArc($r.Right - $d, $r.Bottom - $d, $d, $d, 0, 90)
+                    $path.AddArc($r.X, $r.Bottom - $d, $d, $d, 90, 90)
+                    $path.CloseFigure()
+                    $state = $graphics.Save()
+                    $graphics.SetClip($path)
+                    $graphics.DrawImage($bitmap, $badgeX, $badgeY, $badgeW, $badgeH)
+                    $graphics.Restore($state)
+                    $path.Dispose()
+                } else {
+                    $graphics.DrawImage($bitmap, $badgeX, $badgeY, $badgeW, $badgeH)
+                }
+            } else {
+                $graphics.DrawImage($bitmap, 0, 0, 128, 128)
+            }
             $graphics.Dispose(); $graphics = $null
-            $handle = $scaled.GetHicon(); $icon = [System.Drawing.Icon]::FromHandle($handle)
-            $stream = [System.IO.File]::Open($tempIcon, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $icon.Save($stream) } finally { $stream.Dispose() }
+            $ms = [System.IO.MemoryStream]::new()
+            $scaled.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+            $pngBytes = $ms.ToArray()
+            $ms.Dispose()
+
+            $fs = [System.IO.File]::Open($tempIcon, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $bw = [System.IO.BinaryWriter]::new($fs)
+            try {
+                $bw.Write([uint16]0)
+                $bw.Write([uint16]1)
+                $bw.Write([uint16]1)
+                $bw.Write([byte]128)
+                $bw.Write([byte]128)
+                $bw.Write([byte]0)
+                $bw.Write([byte]0)
+                $bw.Write([uint16]1)
+                $bw.Write([uint16]32)
+                $bw.Write([uint32]$pngBytes.Length)
+                $bw.Write([uint32]22)
+                $bw.Write($pngBytes)
+            } finally {
+                $bw.Dispose()
+                $fs.Dispose()
+            }
             if (Test-Path -LiteralPath $iconPath) { Move-Item -LiteralPath $tempIcon -Destination $iconPath -Force } else { Move-Item -LiteralPath $tempIcon -Destination $iconPath }
         } finally {
             if ($graphics) { $graphics.Dispose() }; if ($scaled) { $scaled.Dispose() }; if ($icon) { $icon.Dispose() }; if ($bitmap) { $bitmap.Dispose() }
+            if ($baseDriveBmp) { $baseDriveBmp.Dispose() }
+            if ($driveIconHandle -ne [IntPtr]::Zero) { [NSCloudDrive.DriveIconBuilder]::DestroyIcon($driveIconHandle) | Out-Null }
             if ($handle -ne [IntPtr]::Zero) { [NSCloudDrive.ExplorerNative]::DestroyIcon($handle) | Out-Null }
             if (Test-Path -LiteralPath $tempIcon) { Remove-Item -LiteralPath $tempIcon -Force -ErrorAction SilentlyContinue }
         }
@@ -107,6 +177,17 @@ function Set-NSCloudDriveExplorerIcon([string]$DriveLetter, [string]$IconPath, [
     New-Item -Path $letterKey -Force | Out-Null; New-Item -Path $iconKey -Force | Out-Null
     Set-Item -LiteralPath $iconKey -Value "$normalizedIcon,0"
     Set-ItemProperty -LiteralPath $letterKey -Name 'NSCloudDriveOwner' -Value $script:NSCloudDriveIconOwner -Type String
+    if ($RegistryRoot -eq $script:NSCloudDriveDriveIconsRoot) {
+        try {
+            $classesRoot = 'HKCU:\Software\Classes\Applications\Explorer.exe\Drives'
+            $classesLetterKey = Join-Path $classesRoot $letter
+            $classesIconKey = Join-Path $classesLetterKey 'DefaultIcon'
+            New-Item -Path $classesLetterKey -Force | Out-Null
+            New-Item -Path $classesIconKey -Force | Out-Null
+            Set-Item -LiteralPath $classesIconKey -Value "$normalizedIcon,0"
+            Set-ItemProperty -LiteralPath $classesLetterKey -Name 'NSCloudDriveOwner' -Value $script:NSCloudDriveIconOwner -Type String
+        } catch { }
+    }
     return [ordered]@{ Success = $true; State = 'Registered'; DriveLetter = $letter; IconPath = "$normalizedIcon,0" }
 }
 
@@ -120,6 +201,12 @@ function Remove-NSCloudDriveExplorerIcon([string]$DriveLetter, [string]$Expected
     $remaining = @((Get-Item -LiteralPath $letterKey).GetValueNames())
     $children = @(Get-ChildItem -LiteralPath $letterKey)
     if ($remaining.Count -eq 0 -and $children.Count -eq 0) { Remove-Item -LiteralPath $letterKey -Force }
+    if ($RegistryRoot -eq $script:NSCloudDriveDriveIconsRoot) {
+        try {
+            $classesKey = Join-Path 'HKCU:\Software\Classes\Applications\Explorer.exe\Drives' $current.DriveLetter
+            if (Test-Path -LiteralPath $classesKey) { Remove-Item -LiteralPath $classesKey -Recurse -Force -ErrorAction SilentlyContinue }
+        } catch { }
+    }
     return [ordered]@{ Success = $true; State = 'Removed'; DriveLetter = $current.DriveLetter }
 }
 
@@ -131,6 +218,10 @@ function Update-NSCloudDriveExplorerItem([string]$DriveLetter, [switch]$DriveAdd
     }
     if ($DriveAdded) { [NSCloudDrive.ExplorerNative]::SHChangeNotify(0x00000100, 0x00000005, "$letter`:\", [IntPtr]::Zero) }
     [NSCloudDrive.ExplorerNative]::SHChangeNotify(0x00002000, 0x00000005, "$letter`:\", [IntPtr]::Zero)
+    try {
+        # SHCNE_ASSOCCHANGED (0x08000000) tells Windows Explorer shell to refresh drive icons cache
+        [NSCloudDrive.ExplorerNative]::SHChangeNotify(0x08000000, 0x0000, $null, [IntPtr]::Zero)
+    } catch { }
     return $true
 }
 
@@ -147,6 +238,17 @@ function Invoke-NSCloudDriveExplorerIconRegistration([string]$Action, [string]$D
         $iconPath = Get-NSCloudDriveExplorerIconPath $ProviderId
         $current = Get-NSCloudDriveExplorerIconRegistration $letter $RegistryRoot
         if ($Action -eq 'Register' -and $current.IsOwned -and (Test-NSCloudDriveIconEntryMatches $current.IconPath $iconPath)) {
+            if ($RegistryRoot -eq $script:NSCloudDriveDriveIconsRoot) {
+                try {
+                    $classesLetterKey = Join-Path 'HKCU:\Software\Classes\Applications\Explorer.exe\Drives' $letter
+                    $classesIconKey = Join-Path $classesLetterKey 'DefaultIcon'
+                    New-Item -Path $classesLetterKey -Force | Out-Null
+                    New-Item -Path $classesIconKey -Force | Out-Null
+                    $normalizedIcon = [System.IO.Path]::GetFullPath($iconPath)
+                    Set-Item -LiteralPath $classesIconKey -Value "$normalizedIcon,0"
+                    Set-ItemProperty -LiteralPath $classesLetterKey -Name 'NSCloudDriveOwner' -Value $script:NSCloudDriveIconOwner -Type String
+                } catch { }
+            }
             Update-NSCloudDriveExplorerItem $letter | Out-Null
             return [ordered]@{ Success = $true; State = 'AlreadyRegistered'; DriveLetter = $letter }
         }
