@@ -51,6 +51,14 @@ function Get-DefaultSettings {
     }
 }
 
+function ConvertTo-AccountCacheMaxGigabytes([object]$Value) {
+    $parsed = 0
+    if ([int]::TryParse([string]$Value, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 1024) {
+        return $parsed
+    }
+    return 0
+}
+
 function Get-NSCloudDriveSettings {
     $settingsPath = Get-NSCloudDriveSettingsPath
     if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
@@ -75,6 +83,8 @@ function Get-NSCloudDriveSettings {
                         AutoMount = if ($acc.PSObject.Properties['AutoMount'] -and $null -ne $acc.AutoMount) { [bool]$acc.AutoMount } else { $true }
                         OpenExplorerOnMount = if ($acc.PSObject.Properties['OpenExplorerOnMount'] -and $null -ne $acc.OpenExplorerOnMount) { [bool]$acc.OpenExplorerOnMount } else { $true }
                         ReadOnly = if ($acc.PSObject.Properties['ReadOnly'] -and $null -ne $acc.ReadOnly) { [bool]$acc.ReadOnly } else { $false }
+                        CacheDirectory = if ($acc.PSObject.Properties['CacheDirectory'] -and $acc.CacheDirectory) { [string]$acc.CacheDirectory } else { '' }
+                        CacheMaxGigabytes = if ($acc.PSObject.Properties['CacheMaxGigabytes']) { ConvertTo-AccountCacheMaxGigabytes $acc.CacheMaxGigabytes } else { 0 }
                         CustomIcon = if ($acc.PSObject.Properties['CustomIcon'] -and $acc.CustomIcon) { [string]$acc.CustomIcon } else { $null }
                         Created = if ($acc.PSObject.Properties['Created'] -and $acc.Created) { [string]$acc.Created } else { [DateTime]::UtcNow.ToString('o') }
                     }
@@ -156,6 +166,8 @@ function Get-CloudAccounts {
                 AutoMount = if ($null -ne $acc.AutoMount) { [bool]$acc.AutoMount } else { $true }
                 OpenExplorerOnMount = if ($acc.Contains('OpenExplorerOnMount') -and $null -ne $acc.OpenExplorerOnMount) { [bool]$acc.OpenExplorerOnMount } else { $true }
                 ReadOnly = if ($acc.Contains('ReadOnly') -and $null -ne $acc.ReadOnly) { [bool]$acc.ReadOnly } else { $false }
+                CacheDirectory = if ($acc.Contains('CacheDirectory') -and $acc.CacheDirectory) { [string]$acc.CacheDirectory } else { '' }
+                CacheMaxGigabytes = if ($acc.Contains('CacheMaxGigabytes')) { ConvertTo-AccountCacheMaxGigabytes $acc.CacheMaxGigabytes } else { 0 }
                 CustomIcon = if ($acc.Contains('CustomIcon') -and $acc.CustomIcon) { [string]$acc.CustomIcon } else { $null }
                 Created = if ($acc.Created) { [string]$acc.Created } else { [DateTime]::UtcNow.ToString('o') }
             }
@@ -224,6 +236,8 @@ function Add-CloudAccount([hashtable]$Account) {
         AutoMount = if ($Account.ContainsKey('AutoMount') -and $null -ne $Account.AutoMount) { [bool]$Account.AutoMount } else { $true }
         OpenExplorerOnMount = if ($Account.ContainsKey('OpenExplorerOnMount') -and $null -ne $Account.OpenExplorerOnMount) { [bool]$Account.OpenExplorerOnMount } else { $true }
         ReadOnly = if ($Account.ContainsKey('ReadOnly') -and $null -ne $Account.ReadOnly) { [bool]$Account.ReadOnly } else { $false }
+        CacheDirectory = if ($Account.ContainsKey('CacheDirectory') -and $Account.CacheDirectory) { [string]$Account.CacheDirectory } else { '' }
+        CacheMaxGigabytes = if ($Account.ContainsKey('CacheMaxGigabytes')) { ConvertTo-AccountCacheMaxGigabytes $Account.CacheMaxGigabytes } else { 0 }
         CustomIcon = if ($Account.ContainsKey('CustomIcon') -and $Account.CustomIcon) { [string]$Account.CustomIcon } else { $null }
         Created = if ($Account.ContainsKey('Created') -and $Account.Created) { [string]$Account.Created } else { [DateTime]::UtcNow.ToString('o') }
     }
@@ -261,6 +275,8 @@ function Update-CloudAccount([hashtable]$Account) {
         AutoMount = if ($Account.ContainsKey('AutoMount') -and $null -ne $Account.AutoMount) { [bool]$Account.AutoMount } else { $existing.AutoMount }
         OpenExplorerOnMount = if ($Account.ContainsKey('OpenExplorerOnMount') -and $null -ne $Account.OpenExplorerOnMount) { [bool]$Account.OpenExplorerOnMount } elseif ($existing.Contains('OpenExplorerOnMount')) { [bool]$existing.OpenExplorerOnMount } else { $true }
         ReadOnly = if ($Account.ContainsKey('ReadOnly') -and $null -ne $Account.ReadOnly) { [bool]$Account.ReadOnly } elseif ($existing.Contains('ReadOnly')) { [bool]$existing.ReadOnly } else { $false }
+        CacheDirectory = if ($Account.ContainsKey('CacheDirectory') -and $Account.CacheDirectory) { [string]$Account.CacheDirectory } elseif ($existing.Contains('CacheDirectory')) { [string]$existing.CacheDirectory } else { '' }
+        CacheMaxGigabytes = if ($Account.ContainsKey('CacheMaxGigabytes')) { ConvertTo-AccountCacheMaxGigabytes $Account.CacheMaxGigabytes } elseif ($existing.Contains('CacheMaxGigabytes')) { [int]$existing.CacheMaxGigabytes } else { 0 }
         CustomIcon = if ($Account.ContainsKey('CustomIcon') -and $Account.CustomIcon) { [string]$Account.CustomIcon } elseif ($existing.Contains('CustomIcon')) { $existing.CustomIcon } else { $null }
         Created = $existing.Created
     }
