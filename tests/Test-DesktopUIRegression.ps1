@@ -19,6 +19,15 @@ Write-Output '  [PASS] No read-only $pid parameters exist in src/'
 
 # 2. Test horizontal scrollbar configuration in NSCloudDrive.ps1
 $mainContent = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\NSCloudDrive.ps1') -Raw
+$logoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
+$readmeContent = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\README.md') -Raw
+if (-not (Test-Path -LiteralPath $logoPath -PathType Leaf) -or
+    $mainContent -notmatch 'Get-AppNotifyIcon \$appLogoPath' -or
+    $mainContent -notmatch '\$window\.Icon = Get-WpfBitmapImage \$appLogoPath' -or
+    $readmeContent -notmatch 'assets/logos/clouddrive\.png') {
+    throw 'The shared NS Cloud Drive brand logo must be used by the window, tray, and README.'
+}
+Write-Output '  [PASS] Shared NS Cloud Drive logo is wired into the window, tray, and README'
 if ($mainContent -notmatch '\$mainScroll\.HorizontalScrollBarVisibility\s*=\s*[''"]Disabled[''"]') {
     throw 'NSCloudDrive.ps1 must set $mainScroll.HorizontalScrollBarVisibility to Disabled to prevent layout overflow.'
 }
@@ -32,11 +41,11 @@ if ($dialogContent -notmatch '\$contentScroll\.HorizontalScrollBarVisibility\s*=
 Write-Output '  [PASS] ProviderConnectionWindow.ps1 disables horizontal scrollbar to prevent layout overflow'
 
 # 4. Test NSCloudDrive.ps1 loads cleanly in STA without throwing
-$dotSourceCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\NSCloudDrive.ps1'); if (`$window -and `$providersGrid -and `$addDiskBtn) { 'LoadedOK' } else { 'Failed' } }"
+$dotSourceCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\NSCloudDrive.ps1'); if (`$window -and `$providersGrid -and `$addDiskBtn -and `$script:CustomNotifyIcon -and `$script:CustomNotifyIcon.Width -gt 0) { 'LoadedOK' } else { 'Failed' } }"
 if ($dotSourceCheck -notmatch 'LoadedOK') {
-    throw "Failed to load NSCloudDrive.ps1 cleanly in STA session: $dotSourceCheck"
+    throw "Failed to load NSCloudDrive.ps1 and create the app's branded tray icon in STA session: $dotSourceCheck"
 }
-Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA and constructs window elements including Add Cloud Disk'
+Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA, constructs window elements, and creates a branded tray icon'
 
 # 5. Test Show-AddCloudDiskModal and Show-CloudAccountSetupModal functions exist and load cleanly
 $modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if ((Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) -and (Get-Command Show-CloudAccountSetupModal -ErrorAction SilentlyContinue)) { 'ModalOK' } else { 'Failed' } }"
