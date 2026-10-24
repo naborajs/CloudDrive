@@ -2653,7 +2653,7 @@ function Ensure-UiDriveStatusShape([object]$Status) {
         ProcessRunning = $false
         DriveLetter = ''
         DriveRoot = ''
-        IsReadOnly = $false
+        IsReadOnly = $null
         ProcessId = $null
         MountState = $null
     }
