@@ -129,6 +129,13 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-application'
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-taskbar'
 `$window.WindowState = [System.Windows.WindowState]::Minimized
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-state'
+`$fixtureLogDirectory = Join-Path `$env:LOCALAPPDATA 'NSCloudDrive\logs'
+New-Item -ItemType Directory -Path `$fixtureLogDirectory -Force | Out-Null
+`$fixtureLog = @(
+    '{"timestampUtc":"2026-01-01T00:00:00Z","severity":"Info","provider":"gdrive","accountId":"probe-account","accountLabel":"Synthetic account","operation":"mount","durationMs":10,"message":"synthetic searchable marker","recovered":true}',
+    '{"timestampUtc":"2026-01-01T00:00:01Z","severity":"Warning","provider":"terabox","accountId":"probe-terabox","accountLabel":"Synthetic TeraBox","operation":"restore","durationMs":20,"message":"secondary synthetic entry","recovered":null}'
+)
+[System.IO.File]::WriteAllText((Join-Path `$fixtureLogDirectory 'application.jsonl'), [string]::Join([Environment]::NewLine, `$fixtureLog) + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
 `$logsNavigationError = `$null
 try {
     Show-LogsView
@@ -142,6 +149,9 @@ try {
     `$probe.Stop()
     `$logsLoadCompletedBeforeNavigation = (`$null -eq `$script:LogsLoadOperation)
     `$logsStatusBeforeNavigation = [string]`$logsStatusLine.Text
+    `$logsPageEntryCount = `$script:LogsRenderedEntries.Count
+    `$logsAccountFilterValue = [string]`$logsAccountCombo.Items[1]
+    `$logsSearchBox.Text = 'synthetic searchable marker'
     `$logsTextBeforeNavigation = [string]`$logsTextBox.Text
     Show-DisksView
     `$result = [ordered]@{
@@ -164,6 +174,8 @@ try {
         PreservesAccountProcessAfterError = (`$failedAccountLiveStatus.IsMounted -and `$failedAccountLiveStatus.ProcessRunning -and `$failedAccountLiveStatus.MountState.State -eq 'Error')
         PreservesLegacyProcessAfterError = (`$failedLegacyLiveStatus.IsMounted -and `$failedLegacyLiveStatus.ProcessRunning -and `$failedLegacyLiveStatus.MountState.State -eq 'Error')
         LogsText = `$logsTextBeforeNavigation
+        LogsPageEntryCount = `$logsPageEntryCount
+        LogsAccountFilterValue = `$logsAccountFilterValue
     }
     [System.IO.File]::WriteAllText(`$env:NSCD_TEST_RESULT, (`$result | ConvertTo-Json -Compress))
     Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'probe-tick'
@@ -214,7 +226,10 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     }
     if ($result.LogsNavigationError -or -not $result.LogsLoadCompleted -or
         -not $result.LogsViewCollapsedAfterNavigation -or
-        $result.LogsStatus -match 'failed|timed out') {
+        $result.LogsStatus -match 'failed|timed out' -or $result.LogsPageEntryCount -ne 2 -or
+        $result.LogsAccountFilterValue -ne 'Synthetic account' -or
+        $result.LogsText -notmatch 'synthetic searchable marker' -or
+        $result.LogsText -match 'secondary synthetic entry') {
         throw "Logs navigation or bounded background loading did not complete cleanly: $($result | ConvertTo-Json -Compress)"
     }
     if (-not $result.PreservesAccountProcessAfterError -or -not $result.PreservesLegacyProcessAfterError) {
@@ -233,7 +248,7 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     Write-Output '  [PASS] Startup dispatcher wait timer advances before the worker starts.'
     Write-Output '  [PASS] Restore status is provider-specific and its elapsed time is monotonic across stages.'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
-    Write-Output '  [PASS] Logs loads in the isolated WPF dispatcher and navigation away completes cleanly.'
+    Write-Output '  [PASS] Logs paging, account filtering, search, and navigation work in the isolated WPF dispatcher.'
     Write-Output '  [PASS] Cached account and legacy mounts remain visible after transient health-check errors.'
 } finally {
     if ($child -and -not $child.HasExited) {
