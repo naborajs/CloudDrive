@@ -182,7 +182,9 @@ function Get-MainThemePalette([string]$ThemeName) {
                 WindowBg = '#13161CE6'
                 # Softer fill used only when a real acrylic backdrop is active,
                 # so the Windows-composed blur shows through the window surface.
-                WindowGlassBg = '#161B2A55'
+                WindowGlassBg = '#161B2A35'
+                SidebarGlassBg = '#10141A75'
+                CardGlassBg = '#161B2A88'
                 SidebarBg = '#0E1117D8'
                 SidebarBorder = '#1E2433C0'
                 CardBg = '#1A1E29CC'
@@ -1301,215 +1303,195 @@ function New-AnalyticsRow([System.Windows.Controls.StackPanel]$Parent, [string]$
     return $rowLabel
 }
 
-$animMemCard = New-AnalyticsCard 'Memory and CPU (live process measurements)'
-$analyticsContent.Children.Add($animMemCard.Card) | Out-Null
-$analyticsAppRam = New-AnalyticsRow $animMemCard.Stack 'App memory: measuring...'
-$analyticsAppCpu = New-AnalyticsRow $animMemCard.Stack 'App CPU: measuring...'
-$analyticsMountRam = New-AnalyticsRow $animMemCard.Stack 'Provider/mount processes (rclone, cpx): measuring...'
-$analyticsMountCpu = New-AnalyticsRow $animMemCard.Stack 'Mount processes CPU: measuring...'
-$analyticsSysNote = New-AnalyticsRow $animMemCard.Stack 'CPU percentages are per-process samples averaged over the sampling interval (5 s) on all logical cores.'
+$overviewCard = New-AnalyticsCard 'Cloud accounts and mounts'
+$analyticsContent.Children.Add($overviewCard.Card) | Out-Null
+$analyticsAccounts = New-AnalyticsRow $overviewCard.Stack 'Cloud accounts: measuring...'
+$analyticsMounts = New-AnalyticsRow $overviewCard.Stack 'Active mounted drives: measuring...'
 
-$animCacheCard = New-AnalyticsCard 'Cache disk usage (distinct from process RAM)'
-$analyticsContent.Children.Add($animCacheCard.Card) | Out-Null
-$analyticsCacheUsed = New-AnalyticsRow $animCacheCard.Stack 'Cached files on disk: measuring...'
-$analyticsCacheActive = New-AnalyticsRow $animCacheCard.Stack 'Currently in use / locked by mounts: measuring...'
-$analyticsCacheLimit = New-AnalyticsRow $animCacheCard.Stack 'Soft cache limit: measuring...'
-$analyticsCacheFree = New-AnalyticsRow $animCacheCard.Stack 'Free space on cache drive: measuring...'
+$storageCard = New-AnalyticsCard 'Cloud storage'
+$analyticsContent.Children.Add($storageCard.Card) | Out-Null
+$analyticsStorageSummary = New-AnalyticsRow $storageCard.Stack 'Used and remaining storage: Unavailable.'
+$analyticsStorageChart = [System.Windows.Controls.StackPanel]::new()
+$storageCard.Stack.Children.Add($analyticsStorageChart) | Out-Null
 
-$animSessionCard = New-AnalyticsCard 'Accounts, mounts, and connection health'
-$analyticsContent.Children.Add($animSessionCard.Card) | Out-Null
-$analyticsAccounts = New-AnalyticsRow $animSessionCard.Stack 'Saved accounts: measuring...'
-$analyticsMounts = New-AnalyticsRow $animSessionCard.Stack 'Active mounts: measuring...'
-$analyticsHealth = New-AnalyticsRow $animSessionCard.Stack 'Per-account health: measuring...'
-$analyticsRetries = New-AnalyticsRow $animSessionCard.Stack 'Recent reconnect failures (per account): measuring...'
+$resourceCard = New-AnalyticsCard 'App resources (live)'
+$analyticsContent.Children.Add($resourceCard.Card) | Out-Null
+$analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: measuring...'
+$analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: measuring...'
 
-$animUnavCard = New-AnalyticsCard 'Transfer statistics'
-$analyticsContent.Children.Add($animUnavCard.Card) | Out-Null
-$analyticsIoRate = New-AnalyticsRow $animUnavCard.Stack 'Mount process I/O rate (measured): measuring...'
-$analyticsIoTotal = New-AnalyticsRow $animUnavCard.Stack 'I/O totals per mount process (since process start): measuring...'
-$analyticsUnavTitle = New-Label 'Per-operation durations and provider round-trip latency: Unavailable.' 12 $script:Palette.TextSecondary
-$analyticsUnavTitle.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
-$animUnavCard.Stack.Children.Add($analyticsUnavTitle) | Out-Null
-$analyticsUnavNote = New-Label 'rclone VFS mounts do not expose a transfer-statistics endpoint for per-operation durations or provider latency. The I/O rate and totals above are real OS byte counters of the rclone/cpx processes (all volumes combined: cache disk writes and network traffic); they move only while actual transfers happen and show Unavailable when no mount processes are running.' 11 $script:Palette.TextMuted
-$analyticsUnavNote.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
-$animUnavCard.Stack.Children.Add($analyticsUnavNote) | Out-Null
-
-# Bounded history (max 120 samples, dropped as new samples arrive; only
-# populated while the Analytics page is visible, otherwise empty and idle).
-$script:AnalyticsHistory = [System.Collections.Generic.List[hashtable]]::new()
 $script:AnalyticsCpuBaseline = @{}
-# Per-mount-process cumulative I/O baseline (pid -> read/write byte totals and
-# timestamp) used to compute real transfer rates between samples.
-$script:AnalyticsIoBaseline = @{}
-$script:AnalyticsLastSample = $null
+$script:AnalyticsStorageWorker = $null
+$script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+
+function Format-AnalyticsBytes([int64]$Bytes) {
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    return ('{0:N0} KB' -f ($Bytes / 1KB))
+}
+
+function Set-AnalyticsStorageDisplay([object[]]$StorageRecords) {
+    $analyticsStorageChart.Children.Clear()
+    $validRecords = @($StorageRecords | Where-Object { $_ -and $_.TotalBytes -gt 0 -and $_.UsedBytes -ge 0 })
+    if ($validRecords.Count -eq 0) {
+        $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (no verified provider quota data).'
+        $analyticsStorageChart.Children.Add((New-AnalyticsRow $analyticsStorageChart 'Storage chart: Unavailable.')) | Out-Null
+        return
+    }
+
+    $totalUsed = [int64]0
+    $totalCapacity = [int64]0
+    foreach ($record in $validRecords) {
+        $totalUsed += [int64]$record.UsedBytes
+        $totalCapacity += [int64]$record.TotalBytes
+    }
+    $remaining = [Math]::Max([int64]0, $totalCapacity - $totalUsed)
+    $analyticsStorageSummary.Text = "Used: $(Format-AnalyticsBytes $totalUsed)   Remaining: $(Format-AnalyticsBytes $remaining)   ($($validRecords.Count) verified account(s))"
+
+    foreach ($record in $validRecords) {
+        $row = [System.Windows.Controls.StackPanel]::new()
+        $row.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
+        $label = New-Label ("{0}: {1} used of {2}" -f $record.Name, (Format-AnalyticsBytes ([int64]$record.UsedBytes)), (Format-AnalyticsBytes ([int64]$record.TotalBytes))) 11 $script:Palette.TextSecondary
+        $row.Children.Add($label) | Out-Null
+        $bar = [System.Windows.Controls.ProgressBar]::new()
+        $bar.Height = 7
+        $bar.Minimum = 0
+        $bar.Maximum = 100
+        $bar.Value = [Math]::Min(100, [Math]::Max(0, ([double]$record.UsedBytes / [double]$record.TotalBytes) * 100))
+        $bar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+        $bar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.InputBorder)
+        $bar.BorderThickness = [System.Windows.Thickness]::new(0)
+        $row.Children.Add($bar) | Out-Null
+        $analyticsStorageChart.Children.Add($row) | Out-Null
+    }
+}
+
+function Start-AnalyticsStorageWorker {
+    if ($script:AnalyticsStorageWorker -or
+        ([DateTime]::UtcNow - $script:AnalyticsStorageLastStarted).TotalSeconds -lt 60) { return }
+    $script:AnalyticsStorageLastStarted = [DateTime]::UtcNow
+    $analyticsStorageSummary.Text = 'Checking verified provider storage quotas...'
+    try {
+        $script:AnalyticsStorageWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
+        param([string]$sourceRoot)
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+        . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
+        . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+        . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+
+        $records = [System.Collections.Generic.List[object]]::new()
+        $errors = [System.Collections.Generic.List[string]]::new()
+        $accounts = @(Get-CloudAccounts)
+        if ($accounts.Count -eq 0) {
+            $accounts = @(
+                [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive' },
+                [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox' }
+            )
+        }
+        foreach ($account in $accounts) {
+            try {
+                $check = if ($account.ProviderId -eq 'gdrive') {
+                    Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
+                } elseif ($account.ProviderId -eq 'terabox') {
+                    Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
+                } else { $null }
+                if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
+                if ($account.ProviderId -eq 'gdrive' -and -not (Get-SafeProperty $check 'IdentityVerified' $false)) { continue }
+                $total = [int64](Get-SafeProperty $check.UserInfo 'QuotaTotal' (Get-SafeProperty $check.UserInfo 'QuotaTotalBytes' 0))
+                $used = [int64](Get-SafeProperty $check.UserInfo 'QuotaUsed' (Get-SafeProperty $check.UserInfo 'QuotaUsedBytes' -1))
+                if ($total -le 0 -or $used -lt 0) { continue }
+                $records.Add([pscustomobject]@{
+                    Name = [string]$account.DisplayName
+                    UsedBytes = $used
+                    TotalBytes = $total
+                })
+            } catch {
+                $errors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
+            }
+        }
+            return [pscustomobject]@{ Records = @($records.ToArray()); Errors = @($errors.ToArray()) }
+        }
+    } catch {
+        $script:AnalyticsStorageWorker = $null
+        $analyticsStorageSummary.Text = "Used and remaining storage: Unavailable. $(Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))"
+        $analyticsStorageChart.Children.Clear()
+    }
+}
+
+function Stop-AnalyticsStorageWorker {
+    if ($script:AnalyticsStorageWorker) {
+        Stop-NSBackgroundOperation $script:AnalyticsStorageWorker
+        $script:AnalyticsStorageWorker = $null
+    }
+}
 
 function Update-AnalyticsMetrics {
+    if ($script:CurrentView -ne 'Analytics') { return }
     $nowUtc = [DateTime]::UtcNow
-    $cores = 1
-    try { $cores = [Math]::Max(1, [System.Environment]::ProcessorCount) } catch { }
-
-    # --- App process (real measurements) ---
-    $appCpuPct = $null
-    try {
-        $appProc = Get-Process -Id $PID -ErrorAction Stop
-        $appCpuPct = Get-AnalyticsCpuPercent -Process $appProc -Now $nowUtc -Cores $cores
-        $appWsMb = [Math]::Round($appProc.WorkingSet64 / 1MB, 1)
-        $appPrivMb = [Math]::Round($appProc.PrivateMemorySize64 / 1MB, 1)
-        $analyticsAppRam.Text = "App memory: $appWsMb MB working set ($appPrivMb MB private)."
-        $analyticsAppCpu.Text = $(if ($null -ne $appCpuPct) { "App CPU: $appCpuPct% of all cores." } else { 'App CPU: first sample; visible on the next refresh.' })
-    } catch {
-        $analyticsAppRam.Text = 'App memory: Unavailable (process information failed).'
-    }
-
-    # --- Provider/mount processes (rclone mounts + TeraBox cpx bridges) ---
-    $mountRamText = 'Provider/mount processes (rclone, cpx): none running.'
-    $mountCpuText = 'Mount processes CPU: none running.'
-    $mountProcs = @()
-    try {
-        $mountProcs = @(Get-Process -Name 'rclone', 'cpx' -ErrorAction SilentlyContinue)
-    } catch { }
-    if ($mountProcs.Count -gt 0) {
-        $sumWs = 0L
-        foreach ($mp in $mountProcs) { try { $sumWs += [int64]$mp.WorkingSet64 } catch { } }
-        $mountRamText = "Provider/mount processes (rclone, cpx): $($mountProcs.Count) process(es), $([Math]::Round($sumWs / 1MB, 1)) MB working set total."
-        $perEntries = [System.Collections.Generic.List[string]]::new()
-        foreach ($mp in $mountProcs) {
-            try {
-                $pct = Get-AnalyticsCpuPercent -Process $mp -Now $nowUtc -Cores $cores
-                if ($null -ne $pct) { $perEntries.Add("rclone/cpx #$($mp.Id): $pct%") }
-            } catch { }
-        }
-        if ($perEntries.Count -gt 0) {
-            $mountCpuText = 'Mount processes CPU: ' + [string]::Join(' | ', $perEntries) + '.'
-        } else {
-            $mountCpuText = 'Mount processes CPU: first sample; visible on the next refresh.'
-        }
-    }
-    $analyticsMountRam.Text = $mountRamText
-    $analyticsMountCpu.Text = $mountCpuText
-
-    # --- Cache disk usage (distinct from RAM) ---
-    try {
-        $stats = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
-        $quota = Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory
-        $analyticsCacheUsed.Text = "Cached files on disk: $([Math]::Round($stats.TotalSizeBytes / 1MB, 1)) MB total ($($stats.TotalFileCount) files)."
-        $analyticsCacheActive.Text = "Currently in use / locked by mounts: $([Math]::Round($stats.InUseBytes / 1MB, 1)) MB ($($stats.InUseCount) entries). Otherwise safe to be evicted by cache policy."
-        $analyticsCacheLimit.Text = "Soft cache limit: $([Math]::Round($quota.TargetMaxBytes / 1GB, 2)) GiB (configurable via cache cleanup policy)."
-        $analyticsCacheFree.Text = "Free space on $($stats.DriveLetter)\: $([Math]::Round($stats.DriveFreeBytes / 1GB, 2)) GB$(if ($stats.IsSystemDrive) { ' (OS drive)' })."
-    } catch {
-        $analyticsCacheUsed.Text = 'Cached files on disk: Unavailable (cache inspection failed).'
-        $analyticsCacheActive.Text = 'Currently in use / locked by mounts: Unavailable.'
-        $analyticsCacheLimit.Text = 'Soft cache limit: Unavailable.'
-        $analyticsCacheFree.Text = 'Free space on cache drive: Unavailable.'
-    }
-
-    # --- Accounts, mounts, health (real state from the running app) ---
     try {
         $accounts = @(Get-CloudAccounts)
-        $analyticsAccounts.Text = "Saved accounts: $($accounts.Count)."
+        $analyticsAccounts.Text = "Cloud accounts: $($accounts.Count)."
         $mounted = 0
-        $healthLines = [System.Collections.Generic.List[string]]::new()
-        foreach ($acc in ($accounts | Select-Object -First 6)) {
-            $letter = ([string]$acc.DriveLetter).TrimEnd(':').TrimEnd('\')
-            $st = Get-CachedUiDriveStatus -ProviderId ([string]$acc.ProviderId) -AccountId ([string]$acc.Id) -DriveLetter $letter
-            $stateText = 'Disconnected'
-            if ($st.MountState -and $st.MountState.State) { $stateText = [string]$st.MountState.State }
-            elseif ($st.IsMounted) { $stateText = 'Mounted' }
-            if ($st.IsMounted) { $mounted++ }
-            $healthLines.Add("$([string]$acc.DisplayName) [$letter]: $stateText")
+        foreach ($account in $accounts) {
+            $letter = ([string]$account.DriveLetter).TrimEnd(':').TrimEnd('\')
+            $status = Get-CachedUiDriveStatus -ProviderId ([string]$account.ProviderId) -AccountId ([string]$account.Id) -DriveLetter $letter
+            if ($status -and $status.IsMounted) { $mounted++ }
         }
-        # Legacy provider cards (no saved account) participate in mount count too.
-        foreach ($legacyKey in @('gdrive', 'terabox')) {
-            try {
-                $st = Get-CachedUiDriveStatus -ProviderId $legacyKey
-                if ($st -and $st.IsMounted) { $mounted++ }
-            } catch { }
-        }
-        $analyticsMounts.Text = "Active mounts: $mounted."
-        $analyticsHealth.Text = 'Per-account health: ' + $(if ($healthLines.Count -gt 0) { ([string]::Join(' | ', $healthLines)) } else { 'no saved accounts configured.' })
-        $failLines = [System.Collections.Generic.List[string]]::new()
-        $failCount = 0
-        try {
-            foreach ($key in ($script:ReconnectFailCount.Keys)) {
-                if ($script:ReconnectFailCount[$key] -gt 0) { $failLines.Add("${key}: $($script:ReconnectFailCount[$key])"); $failCount++ }
+        if ($accounts.Count -eq 0) {
+            foreach ($providerId in @('gdrive', 'terabox')) {
+                $status = Get-CachedUiDriveStatus -ProviderId $providerId
+                if ($status -and $status.IsMounted) { $mounted++ }
             }
-        } catch { }
-        $analyticsRetries.Text = 'Recent reconnect failures (per account): ' + $(if ($failLines.Count -gt 0) { ([string]::Join(' | ', $failLines)) } else { 'none.' })
+        }
+        $analyticsMounts.Text = "Active mounted drives: $mounted."
     } catch {
-        $analyticsAccounts.Text = 'Saved accounts: Unavailable.'
-        $analyticsMounts.Text = 'Active mounts: Unavailable.'
-        $analyticsHealth.Text = 'Per-account health: Unavailable.'
-        $analyticsRetries.Text = 'Recent reconnect failures (per account): Unavailable.'
+        $analyticsAccounts.Text = 'Cloud accounts: Unavailable.'
+        $analyticsMounts.Text = 'Active mounted drives: Unavailable.'
     }
 
-    # --- Transfer I/O (real OS byte counters of the rclone/cpx processes) ---
     try {
-        $ioProcs = @()
+        $appProc = Get-Process -Id $PID -ErrorAction Stop
+        $cpuPct = Get-AnalyticsCpuPercent -Process $appProc -Now $nowUtc -Cores ([Math]::Max(1, [System.Environment]::ProcessorCount))
+        $analyticsAppRam.Text = "App RAM: $([Math]::Round($appProc.WorkingSet64 / 1MB, 1)) MB working set."
+        $analyticsAppCpu.Text = if ($null -ne $cpuPct) { "App CPU: $cpuPct% of all logical cores." } else { 'App CPU: sampling; value appears on the next refresh.' }
+    } catch {
+        $analyticsAppRam.Text = 'App RAM: Unavailable.'
+        $analyticsAppCpu.Text = 'App CPU: Unavailable.'
+    }
+
+    if (-not $script:AnalyticsStorageWorker) { Start-AnalyticsStorageWorker }
+    if ($script:AnalyticsStorageWorker -and (Test-NSBackgroundOperationCompleted $script:AnalyticsStorageWorker)) {
         try {
-            $ioProcs = @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe' OR Name = 'cpx.exe'" -ErrorAction SilentlyContinue)
-        } catch { $ioProcs = @() }
-
-        if ($ioProcs.Count -gt 0) {
-            $rateEntries = [System.Collections.Generic.List[string]]::new()
-            $totalEntries = [System.Collections.Generic.List[string]]::new()
-            $currentIds = [System.Collections.Generic.HashSet[int]]::new()
-            foreach ($ioProc in ($ioProcs | Select-Object -First 6)) {
-                $ioId = [int]$ioProc.ProcessId
-                [void]$currentIds.Add($ioId)
-                $ioRead = [uint64]$ioProc.ReadTransferCount
-                $ioWrite = [uint64]$ioProc.WriteTransferCount
-                $previous = if ($script:AnalyticsIoBaseline.ContainsKey($ioId)) { $script:AnalyticsIoBaseline[$ioId] } else { $null }
-                $script:AnalyticsIoBaseline[$ioId] = @{ Read = $ioRead; Write = $ioWrite; At = $nowUtc }
-
-                $procKind = if (([string]$ioProc.Name) -eq 'cpx.exe') { 'cpx' } else { 'rclone' }
-                $totalEntries.Add("$procKind #${ioId}: $([Math]::Round($ioRead / 1MB, 1)) MB read / $([Math]::Round($ioWrite / 1MB, 1)) MB written")
-
-                if ($previous) {
-                    $wallDelta = ($nowUtc - $previous.At).TotalSeconds
-                    if ($wallDelta -gt 0) {
-                        $readDelta = [double]$ioRead - [double]$previous.Read
-                        $writeDelta = [double]$ioWrite - [double]$previous.Write
-                        if ($readDelta -lt 0 -or $writeDelta -lt 0) {
-                            # Counter wrapped or process restarted mid-sample; rate is meaningless now.
-                            $rateEntries.Add("$procKind #${ioId}: first sample; visible on the next refresh.")
-                        } else {
-                            $mbPerSec = (($readDelta + $writeDelta) / 1MB) / $wallDelta
-                            $rateEntries.Add("$procKind #${ioId}: $([Math]::Round($mbPerSec, 2)) MB/s.")
-                        }
-                    }
+            $completed = Complete-NSBackgroundOperation $script:AnalyticsStorageWorker
+            $script:AnalyticsStorageWorker = $null
+            if ($completed.HadErrors) {
+                $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider measurement failed).'
+                $analyticsStorageChart.Children.Clear()
+            } else {
+                $storageResult = if ($completed.Output.Count -gt 0) { $completed.Output[-1] } else { $null }
+                if (-not $storageResult) {
+                    $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider returned no quota data).'
+                    $analyticsStorageChart.Children.Clear()
                 } else {
-                    $rateEntries.Add("$procKind #${ioId}: first sample; visible on the next refresh.")
+                    Set-AnalyticsStorageDisplay @($storageResult.Records)
+                    if ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -gt 0) {
+                        $analyticsStorageSummary.Text += " Some provider checks were unavailable: $($storageResult.Errors[0])"
+                    } elseif ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -eq 0) {
+                        $analyticsStorageSummary.Text = "Used and remaining storage: Unavailable. $($storageResult.Errors[0])"
+                    }
                 }
             }
-
-            # Drop stale pids so the baseline cannot grow across remount cycles.
-            foreach ($oldId in @($script:AnalyticsIoBaseline.Keys)) {
-                if (-not $currentIds.Contains([int]$oldId)) { $script:AnalyticsIoBaseline.Remove($oldId) }
-            }
-
-            $analyticsIoRate.Text = 'Mount process I/O rate (measured): ' + [string]::Join(' | ', $rateEntries)
-            $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): ' + [string]::Join(' | ', $totalEntries)
-        } else {
-            $analyticsIoRate.Text = 'Mount process I/O rate (measured): Unavailable (no rclone or cpx processes running).'
-            $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): Unavailable.'
+        } catch {
+            $script:AnalyticsStorageWorker = $null
+            $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider measurement failed).'
+            $analyticsStorageChart.Children.Clear()
         }
-    } catch {
-        $analyticsIoRate.Text = 'Mount process I/O rate (measured): Unavailable (measurement failed).'
-        $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): Unavailable.'
+    } elseif ($script:AnalyticsStorageWorker -and
+        ([DateTime]::UtcNow - $script:AnalyticsStorageLastStarted).TotalSeconds -gt 30) {
+        Stop-AnalyticsStorageWorker
+        $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider request timed out).'
+        $analyticsStorageChart.Children.Clear()
     }
-
-    # --- Bounded history (only here; memory stays tiny) ---
-    try {
-        if ($null -ne $appCpuPct) {
-            $script:AnalyticsHistory.Add(@{
-                At = $nowUtc
-                AppCpu = [double]$appCpuPct
-                Mounts = $mounted
-                CacheMb = if (Test-Path -LiteralPath $script:CacheDirectory) { [Math]::Round((Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory).UsedBytes / 1MB, 1) } else { $null }
-            })
-            while ($script:AnalyticsHistory.Count -gt 120) { $script:AnalyticsHistory.RemoveAt(0) }
-        }
-    } catch { }
 }
 
 function Get-AnalyticsCpuPercent($Process, [DateTime]$Now, [int]$Cores = 1) {
@@ -1536,12 +1518,25 @@ function Show-AnalyticsView {
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Visible
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
+    Stop-LogsViewLoad
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
+    Start-AnalyticsSampling
+}
+
+function Stop-AnalyticsSampling {
+    $script:AnalyticsSampler.Stop()
+    Stop-AnalyticsStorageWorker
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+}
+
+function Start-AnalyticsSampling {
+    if ($script:CurrentView -ne 'Analytics' -or -not $window.IsVisible -or
+        $window.WindowState -eq [System.Windows.WindowState]::Minimized) { return }
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-AnalyticsMetrics
-    try {
-        $script:AnalyticsSampler.Stop()
-        $script:AnalyticsSampler.Start()
-    } catch { }
+    $script:AnalyticsSampler.Stop()
+    $script:AnalyticsSampler.Start()
 }
 
 # ------------------------------------------------------------------------------
@@ -1696,6 +1691,10 @@ $script:LogsPrivacyLines = @(
 foreach ($line in $script:LogsPrivacyLines) { $logsPrivacyStack.Children.Add($line) | Out-Null }
 
 $script:LogsRenderedEntries = @()
+$script:LogsLoadOperation = $null
+$script:LogsLoadStartedAt = $null
+$script:LogsLoadTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$script:LogsLoadTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 
 function Format-LogsEntryLine($entry) {
     return ("{0} | {1,-7} | {2,-7} | {3,-16} | {4} | {5}" -f `
@@ -1707,11 +1706,8 @@ function Format-LogsEntryLine($entry) {
         $(try { [string]$entry.message } catch { '' }))
 }
 
-function Update-LogsViewContent {
-    $entries = @()
-    try { $entries = @(Read-ApplicationLogEntries 800) } catch { }
-    $script:LogsRenderedEntries = $entries
-
+function Render-LogsViewContent {
+    $entries = @($script:LogsRenderedEntries)
     $severitySel = if ($logsSeverityCombo.SelectedItem) { [string]$logsSeverityCombo.SelectedItem } else { 'All severities' }
     $accountSel = if ($logsAccountCombo.SelectedItem) { [string]$logsAccountCombo.SelectedItem } else { 'All accounts' }
 
@@ -1751,6 +1747,74 @@ function Update-LogsViewContent {
     $logsStatusLine.Text = "Showing $($filtered.Count) of $($entries.Count) stored entries (view reads the newest 800)."
 }
 
+function Stop-LogsViewLoad {
+    $script:LogsLoadTimer.Stop()
+    if ($script:LogsLoadOperation) {
+        Stop-NSBackgroundOperation $script:LogsLoadOperation
+        $script:LogsLoadOperation = $null
+    }
+    $script:LogsLoadStartedAt = $null
+}
+
+function Update-LogsViewContent {
+    if ($script:LogsLoadOperation) { return }
+    $logsStatusLine.Text = 'Loading recent log entries...'
+    $logsTextBox.Text = 'Loading logs...'
+    try {
+        $script:LogsLoadOperation = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
+            param([string]$sourceRoot)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+            Read-ApplicationLogEntries 800
+        }
+        $script:LogsLoadStartedAt = [DateTime]::UtcNow
+        $script:LogsLoadTimer.Start()
+    } catch {
+        $script:LogsLoadOperation = $null
+        $script:LogsLoadStartedAt = $null
+        $logsStatusLine.Text = 'Log loading failed.'
+        $logsTextBox.Text = "Unable to load logs: $(Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))"
+    }
+}
+
+$script:LogsLoadTimer.Add_Tick({
+    if ($script:CurrentView -ne 'Logs') {
+        Stop-LogsViewLoad
+        return
+    }
+    if (-not $script:LogsLoadOperation) {
+        $script:LogsLoadTimer.Stop()
+        return
+    }
+    if (-not (Test-NSBackgroundOperationCompleted $script:LogsLoadOperation)) {
+        if ($script:LogsLoadStartedAt -and ([DateTime]::UtcNow - $script:LogsLoadStartedAt).TotalSeconds -gt 10) {
+            Stop-LogsViewLoad
+            $logsStatusLine.Text = 'Log loading timed out.'
+            $logsTextBox.Text = 'Unable to load logs: the local log reader exceeded its 10 second limit. Use Refresh to retry.'
+        }
+        return
+    }
+
+    try {
+        $completed = Complete-NSBackgroundOperation $script:LogsLoadOperation
+        $script:LogsLoadOperation = $null
+        $script:LogsLoadStartedAt = $null
+        $script:LogsLoadTimer.Stop()
+        if ($completed.HadErrors) {
+            $message = if ($completed.Errors.Count -gt 0) { [string]$completed.Errors[0].Exception.Message } else { 'The log reader failed.' }
+            $logsStatusLine.Text = 'Log loading failed.'
+            $logsTextBox.Text = "Unable to load logs: $(Format-SanitizedDiagnosticMessage $message)"
+            return
+        }
+        $script:LogsRenderedEntries = @($completed.Output)
+        Render-LogsViewContent
+    } catch {
+        Stop-LogsViewLoad
+        $logsStatusLine.Text = 'Log loading failed.'
+        $logsTextBox.Text = "Unable to load logs: $(Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))"
+    }
+})
+
 function Show-LogsView {
     $script:CurrentView = 'Logs'
     $disksView.Visibility = [System.Windows.Visibility]::Collapsed
@@ -1758,6 +1822,8 @@ function Show-LogsView {
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-AnalyticsStorageWorker
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
     Update-LogsViewContent
 }
@@ -1911,6 +1977,7 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
     })
 
     & $populateData
+    [void](Enable-ModalGlassBackdrop $diagWin)
     $diagWin.ShowDialog() | Out-Null
 }
 
@@ -1966,13 +2033,25 @@ public static class NSCloudGlassInterop
         public uint SizeOfData;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MARGINS
+    {
+        public int Left;
+        public int Right;
+        public int Top;
+        public int Bottom;
+    }
+
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS margins);
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowCompositionAttribute(IntPtr hwnd, ref WINDOWCOMPOSITIONATTRIBDATA data);
 
-    private static void ApplyAccentPolicy(IntPtr hwnd, int accentState)
+    private static bool ApplyAccentPolicy(IntPtr hwnd, int accentState)
     {
         var policy = new ACCENT_POLICY();
         policy.AccentState = accentState;
@@ -1989,7 +2068,7 @@ public static class NSCloudGlassInterop
             Marshal.StructureToPtr(policy, ptr, false);
             data.Data = ptr;
             data.SizeOfData = (uint)Marshal.SizeOf(typeof(ACCENT_POLICY));
-            SetWindowCompositionAttribute(hwnd, ref data);
+            return SetWindowCompositionAttribute(hwnd, ref data);
         }
         finally
         {
@@ -2009,7 +2088,12 @@ public static class NSCloudGlassInterop
     public static bool EnableAcrylic(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) { return false; }
-        try { ApplyAccentPolicy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND); return true; }
+        try
+        {
+            var margins = new MARGINS { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+            if (DwmExtendFrameIntoClientArea(hwnd, ref margins) != 0) { return false; }
+            return ApplyAccentPolicy(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND);
+        }
         catch (DllNotFoundException) { return false; }
         catch (EntryPointNotFoundException) { return false; }
     }
@@ -2021,6 +2105,13 @@ public static class NSCloudGlassInterop
         if (hwnd == IntPtr.Zero) { return; }
         try { SetSystemBackdrop(hwnd, DWMSBT_NONE); } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
         try { ApplyAccentPolicy(hwnd, ACCENT_DISABLED); } catch (DllNotFoundException) { } catch (EntryPointNotFoundException) { }
+        try
+        {
+            var margins = new MARGINS();
+            DwmExtendFrameIntoClientArea(hwnd, ref margins);
+        }
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
     }
 }
 "@ -ErrorAction SilentlyContinue
@@ -2223,19 +2314,18 @@ function Apply-UITheme([string]$ThemeName) {
     # Analytics View
     $analyticsTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     $analyticsSubtitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
-    $analyticsUnavTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
-    $analyticsUnavNote.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+    $analyticsStorageSummary.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     $backFromAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
     $backFromAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backFromAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
-    foreach ($acard in @($animMemCard.Card, $animCacheCard.Card, $animSessionCard.Card, $animUnavCard.Card)) {
+    foreach ($acard in @($overviewCard.Card, $storageCard.Card, $resourceCard.Card)) {
         $acard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
         $acard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
     }
-    foreach ($atitle in @($animMemCard.Title, $animCacheCard.Title, $animSessionCard.Title, $animUnavCard.Title)) {
+    foreach ($atitle in @($overviewCard.Title, $storageCard.Title, $resourceCard.Title)) {
         $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
-    foreach ($arow in @($analyticsAppRam, $analyticsAppCpu, $analyticsMountRam, $analyticsMountCpu, $analyticsSysNote, $analyticsIoRate, $analyticsIoTotal, $analyticsUnavTitle, $analyticsUnavNote, $analyticsCacheUsed, $analyticsCacheActive, $analyticsCacheLimit, $analyticsCacheFree, $analyticsAccounts, $analyticsMounts, $analyticsHealth, $analyticsRetries)) {
+    foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsAccounts, $analyticsMounts)) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
 
@@ -2280,9 +2370,13 @@ function Apply-UITheme([string]$ThemeName) {
         Disable-GlassBackdrop $window
     }
     if ($glassActive) {
-        # Softened window fill so the acrylic blur shows through; sidebar,
-        # cards, and inputs keep their stronger tints for contrast.
+        # Keep a light tint over the compositor blur so the wallpaper remains
+        # visible through the window and its navigation and dashboard surfaces.
         $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowGlassBg)
+        $sidebar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.SidebarGlassBg)
+        foreach ($glassCard in @($gdCard, $tbCard, $genCard, $themeCard, $cacheCard, $diagCard, $helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $overviewCard.Card, $storageCard.Card, $resourceCard.Card, $logsListCard, $logsPrivacyCard)) {
+            $glassCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardGlassBg)
+        }
     }
 
     Update-NavActiveState
@@ -2317,6 +2411,9 @@ function Show-DisksView {
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-LogsViewLoad
+    Stop-AnalyticsStorageWorker
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 }
 
@@ -2340,6 +2437,9 @@ function Show-OptionsView {
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-LogsViewLoad
+    Stop-AnalyticsStorageWorker
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 
     Update-CacheUsageDisplay
@@ -2353,6 +2453,9 @@ function Show-HelpView {
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-LogsViewLoad
+    Stop-AnalyticsStorageWorker
+    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 }
 
@@ -2380,19 +2483,25 @@ $backToDisksBtn.Add_Click({ Show-DisksView })
 $backFromAnalyticsBtn.Add_Click({ Show-DisksView })
 $backFromLogsBtn.Add_Click({ Show-DisksView })
 
-$logsSeverityCombo.Add_SelectionChanged({ Update-LogsViewContent })
-$logsAccountCombo.Add_SelectionChanged({ Update-LogsViewContent })
+$logsSeverityCombo.Add_SelectionChanged({ Render-LogsViewContent })
+$logsAccountCombo.Add_SelectionChanged({ Render-LogsViewContent })
 
 function Clear-NSCloudLogsFolder {
+    Stop-LogsViewLoad
     try {
         $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
         if (Test-Path -LiteralPath $logDir) {
             foreach ($name in @('application.jsonl', 'application.jsonl.1', 'startup-restore.jsonl', 'startup-restore.jsonl.1')) {
                 $path = Join-Path $logDir $name
-                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
             }
         }
-    } catch { }
+    } catch {
+        $message = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+        $logsStatusLine.Text = 'Could not clear the logs.'
+        $logsTextBox.Text = "Unable to clear logs: $message"
+        return
+    }
     Update-LogsViewContent
 }
 
@@ -3028,7 +3137,8 @@ function Update-AllUIState {
 
         foreach ($acc in $allAccounts) {
             $aCard = [System.Windows.Controls.Border]::new()
-            $aCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $accountCardFill = if ($script:GlassState.Active -and $p.Name -eq 'Translucent') { $p.CardGlassBg } else { $p.CardBg }
+            $aCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($accountCardFill)
             $aCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
             $aCard.BorderThickness = [System.Windows.Thickness]::new(1)
             $aCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
@@ -3599,6 +3709,7 @@ $window.Add_Closing({
     if (-not $script:IsExiting) {
         if ($script:Settings.MinimizeToTrayOnClose) {
             $eventArgs.Cancel = $true
+            Stop-AnalyticsSampling
             $window.Hide()
             $notifyIcon.ShowBalloonTip(2000, 'NS Cloud Drive', 'Running in background. Double-click tray icon to open.', [System.Windows.Forms.ToolTipIcon]::Info)
         } else {
@@ -3617,6 +3728,21 @@ $window.Add_Closing({
                 $script:AppMutex = $null
             }
         }
+    }
+})
+
+$window.Add_IsVisibleChanged({
+    if (-not $window.IsVisible) {
+        Stop-AnalyticsSampling
+    } else {
+        Start-AnalyticsSampling
+    }
+})
+$window.Add_StateChanged({
+    if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) {
+        Stop-AnalyticsSampling
+    } else {
+        Start-AnalyticsSampling
     }
 })
 
@@ -3843,11 +3969,11 @@ function Invoke-AutoReconnectWatchdog {
         $workerAccounts = if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
             $account = Get-CloudAccount -AccountId $AccountId
             if (-not $account) { throw 'The saved account could not be found.' }
-            @([pscustomobject]@{ WorkerKey = [string]$account.Id; Id = [string]$account.Id; ProviderId = [string]$account.ProviderId; DriveLetter = [string]$account.DriveLetter; DisplayName = [string]$account.DisplayName; AutoMount = $true })
+            @([pscustomobject]@{ WorkerKey = [string]$account.Id; Id = [string]$account.Id; ProviderId = [string]$account.ProviderId; DriveLetter = [string]$account.DriveLetter; DisplayName = [string]$account.DisplayName; AutoMount = $true; ReadOnly = [bool]$account.ReadOnly })
         } elseif ($legacyMode) {
             @(
-                [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true },
-                [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true }
+                [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true; ReadOnly = $false },
+                [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true; ReadOnly = $false }
             )
         } else {
             @($accounts | Where-Object { $_.AutoMount } | ForEach-Object {
