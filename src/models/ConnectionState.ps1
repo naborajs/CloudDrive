@@ -302,25 +302,80 @@ function Write-NSCloudLog {
     } catch { }
 }
 
-function Read-ApplicationLogEntries([int]$MaxEntries = 800) {
-    # Returns the newest-at-end parsed tail of the shared log. Unparseable
-    # lines (partial writes) are skipped, never used to fail the reader.
-    $entries = [System.Collections.Generic.List[object]]::new()
+function Read-ApplicationLogEntries([int]$MaxEntries = 200, [int]$SkipEntries = 0, [int]$MaxBytes = 2MB) {
+    if ($MaxEntries -lt 1 -or $MaxEntries -gt 800) { throw 'Log page size must be between 1 and 800 entries.' }
+    if ($SkipEntries -lt 0) { throw 'Log page offset cannot be negative.' }
+    if ($MaxBytes -lt 1) { throw 'Log read byte limit must be positive.' }
+    $MaxBytes = [Math]::Min($MaxBytes, 2MB)
+
+    # Scan backward from the end so the read stays bounded even if a damaged
+    # or externally enlarged log exceeds the normal rotation limit.
+    $newestFirst = [System.Collections.Generic.List[object]]::new()
+    $lineBytes = [System.Collections.Generic.List[byte]]::new()
     $logPath = Get-ApplicationLogFilePath
-    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return $entries }
-    $lines = [System.IO.File]::ReadAllLines($logPath)
-    $start = 0
-    if ($lines.Count -gt $MaxEntries) { $start = $lines.Count - $MaxEntries }
-    for ($i = $start; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        try {
-            # Enforce the entry bound again after parsing in case of sparse lines.
-            if ($entries.Count -ge $MaxEntries) { $entries.RemoveAt(0) }
-            $entries.Add(($line | ConvertFrom-Json))
-        } catch { }
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return $newestFirst }
+
+    $stream = [System.IO.File]::Open($logPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $position = [int64]$stream.Length
+        $scanStart = [Math]::Max([int64]0, ($position - [int64]$MaxBytes))
+        $validEntriesSeen = 0
+        $buffer = [byte[]]::new(4096)
+
+        while ($position -gt $scanStart -and $newestFirst.Count -lt $MaxEntries) {
+            $chunkStart = [Math]::Max($scanStart, ($position - $buffer.Length))
+            $stream.Position = $chunkStart
+            $bytesToRead = [int]($position - $chunkStart)
+            $bytesRead = $stream.Read($buffer, 0, $bytesToRead)
+            if ($bytesRead -le 0) { break }
+
+            for ($index = $bytesRead - 1; $index -ge 0; $index--) {
+                if ($buffer[$index] -eq 10) {
+                    if ($lineBytes.Count -eq 0) { continue }
+                    $orderedLineBytes = [byte[]]::new($lineBytes.Count)
+                    for ($byteIndex = 0; $byteIndex -lt $lineBytes.Count; $byteIndex++) {
+                        $orderedLineBytes[$byteIndex] = $lineBytes[$lineBytes.Count - $byteIndex - 1]
+                    }
+                    $lineBytes.Clear()
+                    $line = [System.Text.Encoding]::UTF8.GetString($orderedLineBytes)
+                    $line = $line.TrimStart([char]0xFEFF)
+                    try {
+                        $entry = $line | ConvertFrom-Json -ErrorAction Stop
+                        if ($validEntriesSeen -lt $SkipEntries) {
+                            $validEntriesSeen++
+                            continue
+                        }
+                        $newestFirst.Add($entry)
+                    } catch { }
+                    if ($newestFirst.Count -ge $MaxEntries) { break }
+                } elseif ($buffer[$index] -ne 13) {
+                    $lineBytes.Add($buffer[$index])
+                }
+            }
+            $position = $chunkStart
+        }
+
+        if ($position -eq 0 -and $lineBytes.Count -gt 0 -and $newestFirst.Count -lt $MaxEntries) {
+            $orderedLineBytes = [byte[]]::new($lineBytes.Count)
+            for ($byteIndex = 0; $byteIndex -lt $lineBytes.Count; $byteIndex++) {
+                $orderedLineBytes[$byteIndex] = $lineBytes[$lineBytes.Count - $byteIndex - 1]
+            }
+            $line = [System.Text.Encoding]::UTF8.GetString($orderedLineBytes)
+            $line = $line.TrimStart([char]0xFEFF)
+            try {
+                $entry = $line | ConvertFrom-Json -ErrorAction Stop
+                if ($validEntriesSeen -ge $SkipEntries) { $newestFirst.Add($entry) }
+            } catch { }
+        }
+    } finally {
+        $stream.Dispose()
     }
-    return $entries
+
+    $oldestFirst = [System.Collections.Generic.List[object]]::new()
+    for ($entryIndex = $newestFirst.Count - 1; $entryIndex -ge 0; $entryIndex--) {
+        $oldestFirst.Add($newestFirst[$entryIndex])
+    }
+    return $oldestFirst
 }
 
 function Get-SafeProperty([object]$Object, [string]$PropertyName, $DefaultValue = $null) {
