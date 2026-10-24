@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $mainScript = Join-Path $projectRoot 'src\NSCloudDrive.ps1'
+$mainSource = Get-Content -LiteralPath $mainScript -Raw
 $testRoot = Join-Path $env:TEMP ('NSCloudDrive-startup-timer-' + [guid]::NewGuid().ToString('N'))
 $settingsDirectory = Join-Path $testRoot 'NSCloudDrive\config'
 $cacheDirectory = Join-Path $testRoot 'cache'
@@ -14,6 +15,22 @@ $originalResultPath = $env:NSCD_TEST_RESULT
 $child = $null
 
 try {
+    if ($mainSource -notmatch 'StageStartedAt = \[DateTime\]::UtcNow') {
+        throw 'Startup restore stages must own their elapsed-time origin.'
+    }
+    if ($mainSource -notmatch "Get-StartupRestoreDisplay -ProviderId 'terabox'") {
+        throw 'TeraBox status must use its provider-specific restore progress.'
+    }
+    if ($mainSource -notmatch 'Set-StartupRestoreProgress -Progress \$progress -Stage ''Validating TeraBox session'' -ProviderId ''terabox''') {
+        throw 'TeraBox startup validation must publish its provider identity and stage.'
+    }
+    if ($mainSource -notmatch '\$refreshInterval = if \(\$script:StartupAutoMountPending -or \$script:StartupAutoMountWorker\) \{ 1 \} else \{ 4 \}') {
+        throw 'Startup progress must refresh once per second without increasing idle refresh work.'
+    }
+    if ($mainSource -match '\$restoreStateLabel') {
+        throw 'Startup restore labels must not share one provider stage across all drive cards.'
+    }
+
     New-Item -ItemType Directory -Path $settingsDirectory, $cacheDirectory -Force | Out-Null
     $settings = [ordered]@{
         AutoMountDrives = $true
@@ -36,6 +53,18 @@ try {
 `$ErrorActionPreference = 'Stop'
 `$env:LOCALAPPDATA = `$env:NSCD_TEST_ROOT
 . $quotedMainScript
+`$script:StartupAutoMountPending = `$true
+`$script:StartupAutoMountWorker = [pscustomobject]@{ StartedAt = [DateTime]::UtcNow.AddSeconds(-7) }
+`$script:StartupAutoMountProgress.ProviderId = 'terabox'
+`$script:StartupAutoMountProgress.DriveLetter = 'T'
+`$script:StartupAutoMountProgress.AccountId = ''
+`$script:StartupAutoMountProgress.Stage = 'Validating TeraBox session'
+`$script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow.AddSeconds(-25)
+`$script:StartupAutoMountProgress.StageStartedAt = [DateTime]::UtcNow.AddSeconds(-7)
+`$tbProgressLabel = Get-StartupRestoreDisplay -ProviderId 'terabox' -DriveLetter 'T'
+`$gdProgressLabel = Get-StartupRestoreDisplay -ProviderId 'gdrive' -DriveLetter 'G'
+`$script:StartupAutoMountPending = `$false
+`$script:StartupAutoMountWorker = `$null
 `$app = [System.Windows.Application]::new()
 `$window.ShowInTaskbar = `$false
 `$window.WindowState = [System.Windows.WindowState]::Minimized
@@ -48,6 +77,8 @@ try {
         HasWorker = (`$null -ne `$script:StartupAutoMountWorker)
         DispatchError = `$script:StartupAutoMountError
         RestoreStage = [string]`$script:StartupAutoMountProgress.Stage
+        TeraBoxProgress = `$tbProgressLabel
+        GoogleProgress = `$gdProgressLabel
     }
     [System.IO.File]::WriteAllText(`$env:NSCD_TEST_RESULT, (`$result | ConvertTo-Json -Compress))
     `$script:IsExiting = `$true
@@ -76,6 +107,11 @@ try {
     if ($result.Pending -or $result.DispatchError -or $result.RestoreStage -ne 'Recovery checks complete') {
         throw "Startup timer did not complete cleanly: $($result | ConvertTo-Json -Compress)"
     }
+    if ($result.TeraBoxProgress -notmatch '^Validating TeraBox session \(0:07\)$' -or
+        $result.GoogleProgress -notmatch '^Waiting for Google Drive restore \(0:25\)$') {
+        throw "Startup restore labels do not isolate the active provider or stage timer: $($result | ConvertTo-Json -Compress)"
+    }
+    Write-Output '  [PASS] Restore status is provider-specific and its elapsed time is stage-scoped.'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
 } finally {
     if ($child -and -not $child.HasExited) {
