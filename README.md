@@ -7,12 +7,12 @@
 ## Core Capabilities
 
 - **Native Windows File Explorer Integration**: Cloud drives mount as local fixed disks (`FixedDisk`), eliminating network redirector "red X" artifacts, UNC drive issues, or `FUSE-rclone` labels. Open, copy, paste, rename, and stream files directly in File Explorer.
-- **Air Live Drive-Inspired Desktop UI**: Clean, modern interface featuring a navigation sidebar (`Disks`, `Options`, `Help`), provider badge icons, direct `Connect` / `Disconnect` buttons, drive letter combo (`in [ G: v ]`), quick action buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), live storage capacity progress bars, and an embedded `Options` view.
+- **Air Live Drive-Inspired Desktop UI**: Clean, modern interface featuring a navigation sidebar (`Disks`, `Options`, `Analytics`, `Logs`, `Help`), distinct provider-branded account cards with display names and verified identities where available, direct `Connect` / `Disconnect` buttons, drive-letter selection, and per-account actions.
 - **Three Supported Themes**:
   - **Pure Black** (`#000000`): High-contrast OLED dark theme.
   - **Translucent Liquid Glass**: Windows DWM system backdrop / acrylic blur with reduced-opacity window, navigation, cards, and dialogs where supported; falls back to the normal dark theme when composition is unavailable.
   - **Pure White** (`#F8FAFC`): Clean, crisp light theme with refined contrast.
-- **On-Demand Analytics**: A compact dashboard reports account and mounted-drive counts, app RAM/CPU, and a storage chart only from verified provider quota data. Provider checks run off the UI thread only while Analytics is visible; unavailable quotas are shown as unavailable.
+- **On-Demand Analytics**: A compact dashboard reports account and mounted-drive counts, per-account storage and measured provider response time, app working-set/private memory and CPU, and a storage chart only from verified provider quota data. Provider checks run off the UI thread only while Analytics is visible. Transfer speed is shown as unavailable when no active transfer telemetry exists.
 - **Responsive Local Logs**: Recent application events load asynchronously, with bounded entries, filtering, secret redaction, and visible timeout/error states.
 - **Cloud-to-Cloud Streaming Transfers**:
   - Dedicated transfer dialog (`+ Transfer Files`) with dual cloud directory browsers.
@@ -29,7 +29,7 @@
   - Support for multiple concurrent accounts (e.g., Personal Google Drive `G:`, Work Google Drive `H:`, TeraBox `T:`).
   - Dynamically allocated remote aliases (`gdrive_<id>`, `terabox_<id>`) and isolated DPAPI credential files.
 - **Low Memory & Background Efficiency**:
-  - Throttled UI refresh timers, minimal polling, and Win32 `EmptyWorkingSet` memory trimming reducing working set RAM to ~10 MB when minimized to the System Tray.
+  - Reuses decoded provider icons, avoids rebuilding unchanged account cards on every refresh, throttles idle UI polling, and trims the working set when minimized. Memory use depends on the Windows/PowerShell/WPF runtime and active providers; no fixed RAM target is claimed.
 
 ---
 
