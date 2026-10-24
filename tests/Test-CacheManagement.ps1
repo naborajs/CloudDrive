@@ -11,13 +11,19 @@ Write-Output 'Testing Cache Management and In-Use File Protection...'
 Write-Output '  -> Testing in-use file detection...'
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ('cache_test_' + [Guid]::NewGuid().ToString('N').Substring(0, 6))
 [System.IO.Directory]::CreateDirectory($tempDir) | Out-Null
+$managedCacheDirectory = Join-Path $tempDir 'gdrive_test'
+$unmanagedCacheDirectory = Join-Path $tempDir 'Documents'
+[System.IO.Directory]::CreateDirectory($managedCacheDirectory) | Out-Null
+[System.IO.Directory]::CreateDirectory($unmanagedCacheDirectory) | Out-Null
 
-$fileLocked = Join-Path $tempDir 'active_download.vfs'
-$fileNormal = Join-Path $tempDir 'idle_file.vfs'
+$fileLocked = Join-Path $managedCacheDirectory 'active_download.vfs'
+$fileNormal = Join-Path $managedCacheDirectory 'idle_file.vfs'
+$unmanagedFile = Join-Path $unmanagedCacheDirectory 'important.tmp'
 $testBytes = [byte[]]@(1..100)
 
 [System.IO.File]::WriteAllBytes($fileLocked, $testBytes)
 [System.IO.File]::WriteAllBytes($fileNormal, $testBytes)
+[System.IO.File]::WriteAllBytes($unmanagedFile, $testBytes)
 
 # Open exclusive lock on $fileLocked
 $lockStream = [System.IO.File]::Open($fileLocked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
@@ -35,7 +41,7 @@ try {
 
     # 2. Test Detailed Cache Statistics
     Write-Output '  -> Testing detailed cache statistics calculation...'
-    $stats = Get-DetailedCacheStatistics -CacheDirectory $tempDir
+    $stats = Get-DetailedCacheStatistics -CacheDirectory $managedCacheDirectory
     if ($stats.TotalFileCount -ne 2 -or $stats.TotalSizeBytes -ne 200L) {
         throw "Get-DetailedCacheStatistics failed total size/count check: TotalFiles=$($stats.TotalFileCount), TotalSize=$($stats.TotalSizeBytes)"
     }
@@ -62,6 +68,12 @@ try {
     if (Test-Path -LiteralPath $fileNormal) {
         throw "Evictable file was not removed during force cleanup!"
     }
+    if (-not (Test-Path -LiteralPath $unmanagedFile)) {
+        throw 'Force cleanup removed a temporary-looking file outside a managed account cache directory'
+    }
+    if ($cleanRes.Errors.Count -ne 0) {
+        throw "Cache cleanup reported errors: $($cleanRes.Errors -join '; ')"
+    }
     Write-Output '  [PASS] Safe cache cleanup preserved in-use files and cleaned evictable files'
 } finally {
     $lockStream.Dispose()
@@ -72,10 +84,12 @@ try {
 Write-Output '  -> Testing LRU eviction under quota threshold...'
 $lruDir = Join-Path ([System.IO.Path]::GetTempPath()) ('lru_test_' + [Guid]::NewGuid().ToString('N').Substring(0, 6))
 [System.IO.Directory]::CreateDirectory($lruDir) | Out-Null
+$lruCacheDirectory = Join-Path $lruDir 'gdrive_lru'
+[System.IO.Directory]::CreateDirectory($lruCacheDirectory) | Out-Null
 
 try {
-    $fOld = Join-Path $lruDir 'file_old.dat'
-    $fNew = Join-Path $lruDir 'file_new.dat'
+    $fOld = Join-Path $lruCacheDirectory 'file_old.dat'
+    $fNew = Join-Path $lruCacheDirectory 'file_new.dat'
 
     $kbPayload = [byte[]]::new(10240) # 10 KB each
     [System.IO.File]::WriteAllBytes($fOld, $kbPayload)
