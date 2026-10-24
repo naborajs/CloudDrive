@@ -80,13 +80,13 @@ try {
         DriveLetter = 'I'
     })
 
-    $beforePurge = Get-CloudAccounts
+    $beforePurge = @(Get-CloudAccounts)
     if ($beforePurge.Count -ne 3) {
         throw "Expected 3 accounts before purge, got $($beforePurge.Count)"
     }
 
     $purged = Remove-SeededPlaceholderAccounts
-    $afterPurge = Get-CloudAccounts
+    $afterPurge = @(Get-CloudAccounts)
     if ($afterPurge.Count -ne 1) {
         throw "Expected exactly 1 real account after purge, got $($afterPurge.Count)"
     }
