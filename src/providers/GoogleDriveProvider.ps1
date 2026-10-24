@@ -392,18 +392,20 @@ function Wait-OAuthLoopbackResponse([hashtable]$ListenerContext, [scriptblock]$C
         $state = $qs['state']
         $error = $qs['error']
 
-        # Render response page in user browser
+        # Render a branded local callback page without external resources.
+        $brand = '<div class="brand"><svg viewBox="0 0 48 48" role="img" aria-label="NS Cloud Drive"><path d="M13 34h22a8 8 0 0 0 1-16 13 13 0 0 0-25-2 9 9 0 0 0 2 18Z" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round"/><path d="m18 25 6 6 10-11" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>NS Cloud Drive</span></div>'
+        $pageStart = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>NS Cloud Drive</title><style>body{margin:0;background:#0b1020;color:#e5e7eb;font:16px Segoe UI,Arial,sans-serif;display:grid;min-height:100vh;place-items:center}.card{max-width:440px;margin:24px;padding:32px;border:1px solid #334155;border-radius:18px;background:#111827;text-align:center;box-shadow:0 18px 60px #0008}.brand{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:24px;font-weight:600}.brand svg{width:42px;height:42px}.brand span{font-size:18px}h1{font-size:22px;margin:0 0 12px;color:#4ade80}p{line-height:1.6;color:#cbd5e1;margin:8px 0}</style></head><body><main class='card'>$brand"
         $html = ''
         if ($error) {
-            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Authentication Failed</h2><p>$([System.Net.WebUtility]::HtmlEncode($error))</p><p>You can close this tab and return to NS Cloud Drive.</p></body></html>"
+            $html = "$pageStart<h1>Authorization failed</h1><p>$([System.Net.WebUtility]::HtmlEncode($error))</p><p>You can close this tab and return to NS Cloud Drive.</p></main></body></html>"
         } elseif (-not $state -or $state -ne $expectedState) {
             $error = 'State parameter mismatch (possible CSRF or invalid request).'
-            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Security Validation Failed</h2><p>State parameter did not match. Please restart sign-in from NS Cloud Drive.</p></body></html>"
+            $html = "$pageStart<h1>Security validation failed</h1><p>State parameter did not match. Please restart sign-in from NS Cloud Drive.</p></main></body></html>"
         } elseif (-not $code) {
             $error = 'No authorization code received from Google.'
-            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2>Authorization Code Missing</h2><p>Please restart sign-in from NS Cloud Drive.</p></body></html>"
+            $html = "$pageStart<h1>Authorization response incomplete</h1><p>No authorization code was received. Please restart sign-in from NS Cloud Drive.</p></main></body></html>"
         } else {
-            $html = "<html><body style='font-family:sans-serif;text-align:center;padding:50px;'><h2 style='color:#0F9D58;'>Google Drive Connected</h2><p>Authentication was successful! You may close this tab and return to NS Cloud Drive.</p></body></html>"
+            $html = "$pageStart<h1>Authorization received</h1><p>Google returned a valid authorization response. Return to NS Cloud Drive to finish account verification.</p></main></body></html>"
         }
 
         $buffer = [System.Text.Encoding]::UTF8.GetBytes($html)
