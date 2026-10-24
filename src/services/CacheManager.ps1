@@ -314,7 +314,8 @@ function Invoke-SafeCacheCleanup {
 function Invoke-StartupCacheRecovery {
     [CmdletBinding()]
     param(
-        [string]$CacheDirectory = ''
+        [string]$CacheDirectory = '',
+        [string[]]$MountCacheDirectories = @()
     )
 
     if (-not $CacheDirectory) {
@@ -322,35 +323,62 @@ function Invoke-StartupCacheRecovery {
         $CacheDirectory = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
     }
 
-    if (-not (Test-Path -LiteralPath $CacheDirectory)) {
-        return @{ RecoveredFiles = 0; RecoveredBytes = 0L }
+    $managedDirectoryPattern = '^(?:gdrive|terabox)(?:_[A-Za-z0-9_-]{1,128})?$'
+    $recoveryTargets = [System.Collections.Generic.List[string]]::new()
+    if ($MountCacheDirectories.Count -gt 0) {
+        foreach ($directory in $MountCacheDirectories) {
+            if ([string]::IsNullOrWhiteSpace($directory)) { continue }
+            $mountKey = [System.IO.Path]::GetFileName($directory.TrimEnd('\', '/'))
+            if ($mountKey -notmatch $managedDirectoryPattern) {
+                throw "Refusing cache recovery for a directory outside an account cache namespace."
+            }
+            $recoveryTargets.Add($directory)
+        }
+    } elseif (Test-Path -LiteralPath $CacheDirectory -PathType Container) {
+        foreach ($directory in Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction Stop) {
+            if ($directory.Name -match $managedDirectoryPattern) {
+                $recoveryTargets.Add($directory.FullName)
+            }
+        }
     }
 
     $recoveredFiles = 0
     $recoveredBytes = 0L
+    $errors = [System.Collections.Generic.List[string]]::new()
 
-    try {
-        # Scan for orphaned temporary rclone files or interrupted partial chunks
-        $patterns = @('*.partial', '*.tmp', '*.rclone-tmp', '*~', '.write_test_*')
-        foreach ($pat in $patterns) {
-            $orphans = Get-ChildItem -LiteralPath $CacheDirectory -Recurse -File -Filter $pat -Force -ErrorAction SilentlyContinue
-            if ($orphans) {
-                foreach ($o in $orphans) {
-                    if (-not (Test-FileInUse -FilePath $o.FullName)) {
-                        try {
-                            $len = [int64]$o.Length
-                            Remove-Item -LiteralPath $o.FullName -Force -ErrorAction Stop
-                            $recoveredFiles++
-                            $recoveredBytes += $len
-                        } catch { }
-                    }
+    foreach ($recoveryTarget in $recoveryTargets) {
+        if (-not (Test-Path -LiteralPath $recoveryTarget -PathType Container)) { continue }
+        $targetInfo = Get-Item -LiteralPath $recoveryTarget -Force -ErrorAction Stop
+        if (($targetInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $errors.Add("Skipped cache recovery because the account cache path is a reparse point: $recoveryTarget")
+            continue
+        }
+
+        Get-ChildItem -LiteralPath $recoveryTarget -Recurse -File -Force -ErrorAction Stop |
+            Where-Object {
+                $_.Name -like '*.partial' -or
+                $_.Name -like '*.tmp' -or
+                $_.Name -like '*.rclone-tmp' -or
+                $_.Name -like '*~' -or
+                $_.Name -like '.write_test_*'
+            } |
+            ForEach-Object {
+                $orphan = $_
+                if (Test-FileInUse -FilePath $orphan.FullName) { return }
+                try {
+                    $length = [int64]$orphan.Length
+                    Remove-Item -LiteralPath $orphan.FullName -Force -ErrorAction Stop
+                    $recoveredFiles++
+                    $recoveredBytes += $length
+                } catch {
+                    $errors.Add("Could not remove cache temporary file '$($orphan.FullName)': $($_.Exception.Message)")
                 }
             }
-        }
-    } catch { }
+    }
 
     return [ordered]@{
         RecoveredFiles = $recoveredFiles
         RecoveredBytes = $recoveredBytes
+        Errors = @($errors.ToArray())
     }
 }
