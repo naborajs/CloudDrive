@@ -2753,7 +2753,7 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
         $providerKey = ([string]$ProviderId).ToLowerInvariant()
         if ($script:LegacyMountStates.ContainsKey($providerKey)) {
             $legacyState = $script:LegacyMountStates[$providerKey]
-            if ($legacyState -and $legacyState.State -in @('Mounting', 'Error', 'AuthRequired')) {
+            if ($legacyState -and $legacyState.State -eq 'Mounting') {
                 $letter = if ($DriveLetter) { $DriveLetter } else { [string]$legacyState.DriveLetter }
                 return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $legacyState }
             }
