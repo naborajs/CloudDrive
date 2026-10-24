@@ -93,6 +93,8 @@ try {
     Assert-True ($mainSource -match 'function Format-LogsEntryLine') 'entry formatting exists'
     Assert-True ($mainSource -match '\$logsSeverityCombo') 'severity filter exists'
     Assert-True ($mainSource -match '\$logsAccountCombo') 'account filter exists'
+    Assert-True ($mainSource -match '\$logsSearchBox = \[System\.Windows\.Controls\.TextBox\]::new\(\)' -and
+        $mainSource -match '\$logsSearchBox\.Add_TextChanged') 'free-text search is wired for the current log page'
     Assert-True ($mainSource -match 'Clear-NSCloudLogsFolder') 'clear action exists'
     Assert-True ($mainSource -match 'function Clear-NSCloudLogsFolder \{[\s\S]{0,500}Stop-LogsViewLoad') 'clear cancels an in-flight log read before removing files'
     Assert-True ($mainSource -match 'Unable to clear logs:') 'log clear failures remain visible'
