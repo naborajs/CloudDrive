@@ -1786,6 +1786,7 @@ $script:LogsRenderedEntries = @()
 $script:LogsPageOffset = 0
 $script:LogsPageSize = 200
 $script:LogsHasOlderEntries = $false
+$script:LogsFilterUpdateInProgress = $false
 $script:LogsLoadOperation = $null
 $script:LogsLoadStartedAt = $null
 $script:LogsLoadTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -1817,9 +1818,14 @@ function Render-LogsViewContent {
             if ($value -and -not $accountKeys.Contains($value)) { $accountKeys.Add($value) }
         } catch { }
     }
-    $logsAccountCombo.Items.Clear()
-    foreach ($value in $accountKeys) { [void]$logsAccountCombo.Items.Add($value) }
-    if ($accountKeys.Contains($accountSel)) { $logsAccountCombo.SelectedItem = $accountSel } else { $logsAccountCombo.SelectedIndex = 0; $accountSel = 'All accounts' }
+    $script:LogsFilterUpdateInProgress = $true
+    try {
+        $logsAccountCombo.Items.Clear()
+        foreach ($value in $accountKeys) { [void]$logsAccountCombo.Items.Add($value) }
+        if ($accountKeys.Contains($accountSel)) { $logsAccountCombo.SelectedItem = $accountSel } else { $logsAccountCombo.SelectedIndex = 0; $accountSel = 'All accounts' }
+    } finally {
+        $script:LogsFilterUpdateInProgress = $false
+    }
 
     $filtered = [System.Collections.Generic.List[object]]::new()
     foreach ($entry in $entries) {
@@ -2605,8 +2611,8 @@ $backToDisksBtn.Add_Click({ Show-DisksView })
 $backFromAnalyticsBtn.Add_Click({ Show-DisksView })
 $backFromLogsBtn.Add_Click({ Show-DisksView })
 
-$logsSeverityCombo.Add_SelectionChanged({ Render-LogsViewContent })
-$logsAccountCombo.Add_SelectionChanged({ Render-LogsViewContent })
+$logsSeverityCombo.Add_SelectionChanged({ if (-not $script:LogsFilterUpdateInProgress) { Render-LogsViewContent } })
+$logsAccountCombo.Add_SelectionChanged({ if (-not $script:LogsFilterUpdateInProgress) { Render-LogsViewContent } })
 
 function Clear-NSCloudLogsFolder {
     Stop-LogsViewLoad
