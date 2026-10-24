@@ -51,6 +51,8 @@ $script:ReconnectNextAllowed = @{}
 $script:ReconnectFailCount = @{}
 # Tracks when the watchdog was last executed (prevents it running every 1-second tick)
 $script:LastWatchdogRun = [DateTime]::MinValue
+# Deduplication key for startup failure log entries (log each distinct error once)
+$script:LastLoggedAutoMountErrorText = ''
 $script:ProviderStatusWorker = $null
 $script:ProviderStatusSnapshot = $null
 $script:LastProviderStatusCheck = [DateTime]::MinValue
@@ -388,6 +390,9 @@ $navTopStack.Children.Add($navOptionsItem.Button) | Out-Null
 
 $navAnalyticsItem = New-NavButton ([string]([char]0x2581 + '' + [char]0x2584 + '' + [char]0x2588)) 'Analytics' $false
 $navTopStack.Children.Add($navAnalyticsItem.Button) | Out-Null
+
+$navLogsItem = New-NavButton ([string][char]0x2261) 'Logs' $false
+$navTopStack.Children.Add($navLogsItem.Button) | Out-Null
 
 $navHelpItem = New-NavButton '?' 'Help' $false
 [System.Windows.Controls.DockPanel]::SetDock($navHelpItem.Button, 'Bottom')
@@ -1469,12 +1474,231 @@ function Show-AnalyticsView {
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Visible
+    $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     Update-NavActiveState
     Update-AnalyticsMetrics
     try {
         $script:AnalyticsSampler.Stop()
         $script:AnalyticsSampler.Start()
     } catch { }
+}
+
+# ------------------------------------------------------------------------------
+# 5. LOGS VIEW (bounded local application events + honest privacy notice)
+# ------------------------------------------------------------------------------
+$logsView = [System.Windows.Controls.DockPanel]::new()
+$logsView.Margin = [System.Windows.Thickness]::new(24, 20, 24, 20)
+$logsView.Visibility = [System.Windows.Visibility]::Collapsed
+$mainArea.Children.Add($logsView) | Out-Null
+
+$logsHeader = [System.Windows.Controls.DockPanel]::new()
+[System.Windows.Controls.DockPanel]::SetDock($logsHeader, 'Top')
+$logsHeader.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+$logsView.Children.Add($logsHeader) | Out-Null
+
+$backFromLogsBtn = [System.Windows.Controls.Button]::new()
+$backFromLogsBtn.Content = '< Back to Disks'
+$backFromLogsBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$backFromLogsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$backFromLogsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$backFromLogsBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$backFromLogsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$backFromLogsBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+[System.Windows.Controls.DockPanel]::SetDock($backFromLogsBtn, 'Right')
+$logsHeader.Children.Add($backFromLogsBtn) | Out-Null
+
+$logsTitles = [System.Windows.Controls.StackPanel]::new()
+$logsTitle = New-Label 'Logs' 22 $script:Palette.TextPrimary $true
+$logsSubtitle = New-Label 'Bounded record of mount, restore, and reconnect events stored locally on this machine.' 12 $script:Palette.TextSecondary
+$logsTitles.Children.Add($logsTitle) | Out-Null
+$logsTitles.Children.Add($logsSubtitle) | Out-Null
+$logsHeader.Children.Add($logsTitles) | Out-Null
+
+# Filter bar
+$logsFilterBar = [System.Windows.Controls.DockPanel]::new()
+[System.Windows.Controls.DockPanel]::SetDock($logsFilterBar, 'Top')
+$logsFilterBar.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+$logsView.Children.Add($logsFilterBar) | Out-Null
+
+$logsButtons = [System.Windows.Controls.StackPanel]::new()
+$logsButtons.Orientation = 'Horizontal'
+[System.Windows.Controls.DockPanel]::SetDock($logsButtons, 'Left')
+$logsFilterBar.Children.Add($logsButtons) | Out-Null
+
+$logsRefreshBtn = [System.Windows.Controls.Button]::new()
+$logsRefreshBtn.Content = 'Refresh'
+$logsRefreshBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$logsRefreshBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$logsRefreshBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$logsButtons.Children.Add($logsRefreshBtn) | Out-Null
+
+$logsOpenFolderBtn = [System.Windows.Controls.Button]::new()
+$logsOpenFolderBtn.Content = 'Open logs folder'
+$logsOpenFolderBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$logsOpenFolderBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$logsOpenFolderBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$logsButtons.Children.Add($logsOpenFolderBtn) | Out-Null
+
+$logsClearBtn = [System.Windows.Controls.Button]::new()
+$logsClearBtn.Content = 'Clear logs'
+$logsClearBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$logsClearBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$logsButtons.Children.Add($logsClearBtn) | Out-Null
+
+$logsFilterStack = [System.Windows.Controls.StackPanel]::new()
+$logsFilterStack.Orientation = 'Horizontal'
+[System.Windows.Controls.DockPanel]::SetDock($logsFilterStack, 'Right')
+$logsFilterBar.Children.Add($logsFilterStack) | Out-Null
+
+$logsSeverityLabel = New-Label 'Severity:' 11 $script:Palette.TextSecondary
+$logsSeverityLabel.VerticalAlignment = 'Center'
+$logsSeverityLabel.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+$logsFilterStack.Children.Add($logsSeverityLabel) | Out-Null
+
+$logsSeverityCombo = [System.Windows.Controls.ComboBox]::new()
+$logsSeverityCombo.Width = 130
+$logsSeverityCombo.Margin = [System.Windows.Thickness]::new(0, 0, 14, 0)
+foreach ($item in @('All severities', 'Info', 'Warning', 'Error')) { [void]$logsSeverityCombo.Items.Add($item) }
+$logsSeverityCombo.SelectedIndex = 0
+$logsFilterStack.Children.Add($logsSeverityCombo) | Out-Null
+
+$logsAccountLabel = New-Label 'Account:' 11 $script:Palette.TextSecondary
+$logsAccountLabel.VerticalAlignment = 'Center'
+$logsAccountLabel.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+$logsFilterStack.Children.Add($logsAccountLabel) | Out-Null
+
+$logsAccountCombo = [System.Windows.Controls.ComboBox]::new()
+$logsAccountCombo.Width = 220
+$logsAccountCombo.SelectedIndex = 0
+$logsFilterStack.Children.Add($logsAccountCombo) | Out-Null
+
+# Event list card
+$logsListCard = [System.Windows.Controls.Border]::new()
+$logsListCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$logsListCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$logsListCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$logsListCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$logsListCard.Padding = [System.Windows.Thickness]::new(14)
+$logsListCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+[System.Windows.Controls.DockPanel]::SetDock($logsListCard, 'Top')
+$logsView.Children.Add($logsListCard) | Out-Null
+
+$logsListStack = [System.Windows.Controls.StackPanel]::new()
+$logsListCard.Child = $logsListStack
+
+$logsStatusLine = New-Label 'Showing 0 entries.' 11 $script:Palette.TextMuted
+$logsStatusLine.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+$logsListStack.Children.Add($logsStatusLine) | Out-Null
+
+$logsTextBox = [System.Windows.Controls.TextBox]::new()
+$logsTextBox.IsReadOnly = $true
+$logsTextBox.VerticalScrollBarVisibility = 'Auto'
+$logsTextBox.HorizontalScrollBarVisibility = 'Auto'
+$logsTextBox.FontFamily = 'Consolas, Courier New'
+$logsTextBox.FontSize = 11
+$logsTextBox.MinHeight = 220
+$logsTextBox.MaxHeight = 330
+$logsTextBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.InputBg)
+$logsTextBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.InputBorder)
+$logsTextBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$logsTextBox.Text = 'No log entries yet. Mount and reconnect events appear here.'
+$logsListStack.Children.Add($logsTextBox) | Out-Null
+
+# Privacy / retention notice card
+$logsPrivacyCard = [System.Windows.Controls.Border]::new()
+$logsPrivacyCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$logsPrivacyCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$logsPrivacyCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$logsPrivacyCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$logsPrivacyCard.Padding = [System.Windows.Thickness]::new(14)
+$logsView.Children.Add($logsPrivacyCard) | Out-Null
+
+$logsPrivacyStack = [System.Windows.Controls.StackPanel]::new()
+$logsPrivacyCard.Child = $logsPrivacyStack
+
+$logsPrivacyTitle = New-Label 'Privacy and retention' 14 $script:Palette.TextPrimary $true
+$logsPrivacyTitle.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+$logsPrivacyStack.Children.Add($logsPrivacyTitle) | Out-Null
+
+function New-PrivacyLine([string]$Text) {
+    $tb = New-Label $Text 11 $script:Palette.TextSecondary
+    $tb.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+    $tb.TextWrapping = 'Wrap'
+    return $tb
+}
+$script:LogsPrivacyLines = @(
+    (New-PrivacyLine 'Stored locally: %LOCALAPPDATA%\NSCloudDrive\logs only. application.jsonl and startup-restore.jsonl are event records from this application; rclone-<mount>.log files contain per-mount provider output. Nothing is sent anywhere by NS Cloud Drive itself.'),
+    (New-PrivacyLine 'Redaction: every application log message passes a sanitizer before it is written; authorization codes, access and refresh tokens, passwords, and session cookies are replaced with [REDACTED]. Per-mount rclone output is produced by rclone itself and is not reparsed by this application.'),
+    (New-PrivacyLine 'Provider access: mounts use the Google Drive API through rclone and the TeraBox bridge service, per the account you configured. NS Cloud Drive does not collect analytics and does not upload your logs.'),
+    (New-PrivacyLine 'Retention: bounded storage; application.jsonl rotates at 2 MB keeping one predecessor, and per-mount logs rotate at 5 MB the same way. Clear logs removes both generations of every log file in the folder.')
+)
+foreach ($line in $script:LogsPrivacyLines) { $logsPrivacyStack.Children.Add($line) | Out-Null }
+
+$script:LogsRenderedEntries = @()
+
+function Format-LogsEntryLine($entry) {
+    return ("{0} | {1,-7} | {2,-7} | {3,-16} | {4} | {5}" -f `
+        $(try { ([string]$entry.timestampUtc) } catch { '' }), `
+        $(try { ([string]$entry.severity) } catch { '' }), `
+        $(try { [string]$entry.provider } catch { '' }), `
+        $(try { [string]$entry.operation } catch { '' }), `
+        $(try { if ($null -ne $entry.durationMs -and [int]$entry.durationMs -ge 0) { "$([int]$entry.durationMs) ms" } else { '-' } } catch { '-' }), `
+        $(try { [string]$entry.message } catch { '' }))
+}
+
+function Update-LogsViewContent {
+    $entries = @()
+    try { $entries = @(Read-ApplicationLogEntries 800) } catch { }
+    $script:LogsRenderedEntries = $entries
+
+    $severitySel = if ($logsSeverityCombo.SelectedItem) { [string]$logsSeverityCombo.SelectedItem } else { 'All severities' }
+    $accountSel = if ($logsAccountCombo.SelectedItem) { [string]$logsAccountCombo.SelectedItem } else { 'All accounts' }
+
+    # Rebuild the account filter from cached entries (sorted, unique, no PII beyond labels the user chose).
+    $accountKeys = [System.Collections.Generic.List[string]]::new()
+    $accountKeys.Add('All accounts')
+    foreach ($entry in $entries) {
+        try {
+            $label = ([string]$entry.accountLabel).Trim()
+            $id = ([string]$entry.accountId).Trim()
+            $value = if ($label) { $label } elseif ($id) { $id } else { '' }
+            if ($value -and -not $accountKeys.Contains($value)) { $accountKeys.Add($value) }
+        } catch { }
+    }
+    $logsAccountCombo.Items.Clear()
+    foreach ($value in $accountKeys) { [void]$logsAccountCombo.Items.Add($value) }
+    if ($accountKeys.Contains($accountSel)) { $logsAccountCombo.SelectedItem = $accountSel } else { $logsAccountCombo.SelectedIndex = 0; $accountSel = 'All accounts' }
+
+    $filtered = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $entries) {
+        try {
+            if ($severitySel -ne 'All severities' -and ([string]$entry.severity) -ne $severitySel) { continue }
+            if ($accountSel -ne 'All accounts') {
+                $label = ([string]$entry.accountLabel).Trim()
+                $id = ([string]$entry.accountId).Trim()
+                if ($label -ne $accountSel -and $id -ne $accountSel) { continue }
+            }
+            $filtered.Add($entry)
+        } catch { }
+    }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $filtered) {
+        try { $lines.Add((Format-LogsEntryLine $entry)) } catch { }
+    }
+    $logsTextBox.Text = if ($lines.Count -gt 0) { [string]::Join([Environment]::NewLine, $lines) } else { 'No matching log entries. Events are written when accounts mount, restore, or reconnect.' }
+    $logsStatusLine.Text = "Showing $($filtered.Count) of $($entries.Count) stored entries (view reads the newest 800)."
+}
+
+function Show-LogsView {
+    $script:CurrentView = 'Logs'
+    $disksView.Visibility = [System.Windows.Visibility]::Collapsed
+    $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
+    $helpView.Visibility = [System.Windows.Visibility]::Collapsed
+    $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    try { $script:AnalyticsSampler.Stop() } catch { }
+    Update-NavActiveState
+    Update-LogsViewContent
 }
 
 # ==============================================================================
@@ -1954,6 +2178,37 @@ function Apply-UITheme([string]$ThemeName) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
 
+    # Logs View
+    $logsTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $logsSubtitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    $logsSeverityLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    $logsAccountLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    $logsStatusLine.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+    $logsPrivacyTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $logsTextBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $logsTextBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $logsTextBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $backFromLogsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $backFromLogsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $backFromLogsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($lbtn in @($logsRefreshBtn, $logsOpenFolderBtn, $logsClearBtn)) {
+        $lbtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        $lbtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+        $lbtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
+    foreach ($lcard in @($logsListCard, $logsPrivacyCard)) {
+        $lcard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+        $lcard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    }
+    foreach ($lcombo in @($logsSeverityCombo, $logsAccountCombo)) {
+        $lcombo.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+        $lcombo.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+        $lcombo.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
+    foreach ($pline in $script:LogsPrivacyLines) {
+        $pline.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    }
+
     # Liquid glass backdrop: real Windows-composed acrylic for the Translucent
     # theme only, torn down when switching to any other theme. Unsupported
     # builds or any failure keep the plain translucent fallback set above.
@@ -1978,6 +2233,7 @@ function Update-NavActiveState {
         @{ Nav = $navDisksItem; View = 'Disks' },
         @{ Nav = $navOptionsItem; View = 'Options' },
         @{ Nav = $navAnalyticsItem; View = 'Analytics' },
+        @{ Nav = $navLogsItem; View = 'Logs' },
         @{ Nav = $navHelpItem; View = 'Help' }
     )) {
         if ($script:CurrentView -eq $item.View) {
@@ -1998,6 +2254,7 @@ function Show-DisksView {
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 }
@@ -2020,6 +2277,7 @@ function Show-OptionsView {
     $optionsView.Visibility = [System.Windows.Visibility]::Visible
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 
@@ -2032,6 +2290,7 @@ function Show-HelpView {
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Visible
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 }
@@ -2054,9 +2313,37 @@ $script:AnalyticsSampler.Add_Tick({
 $navDisksItem.Button.Add_Click({ Show-DisksView })
 $navOptionsItem.Button.Add_Click({ Show-OptionsView })
 $navAnalyticsItem.Button.Add_Click({ Show-AnalyticsView })
+$navLogsItem.Button.Add_Click({ Show-LogsView })
 $navHelpItem.Button.Add_Click({ Show-HelpView })
 $backToDisksBtn.Add_Click({ Show-DisksView })
 $backFromAnalyticsBtn.Add_Click({ Show-DisksView })
+$backFromLogsBtn.Add_Click({ Show-DisksView })
+
+$logsSeverityCombo.Add_SelectionChanged({ Update-LogsViewContent })
+$logsAccountCombo.Add_SelectionChanged({ Update-LogsViewContent })
+
+function Clear-NSCloudLogsFolder {
+    try {
+        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        if (Test-Path -LiteralPath $logDir) {
+            foreach ($name in @('application.jsonl', 'application.jsonl.1', 'startup-restore.jsonl', 'startup-restore.jsonl.1')) {
+                $path = Join-Path $logDir $name
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+            }
+        }
+    } catch { }
+    Update-LogsViewContent
+}
+
+$logsRefreshBtn.Add_Click({ Update-LogsViewContent })
+$logsClearBtn.Add_Click({ Clear-NSCloudLogsFolder })
+$logsOpenFolderBtn.Add_Click({
+    try {
+        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$logDir`""
+    } catch { }
+})
 
 # Use a theme-aware button template so disabled controls keep their themed surface
 # instead of reverting to the Windows default white/gray face.
@@ -2197,6 +2484,9 @@ function Complete-AvailableStartupWorkers {
                 } else {
                     'Provider status check failed.'
                 }
+                try {
+                    Write-NSCloudLog -Severity 'Error' -Operation 'status-refresh' -Message $message -Recovered $false
+                } catch { }
                 $script:ProviderStatusSnapshot = [pscustomobject]@{
                     GoogleCheck = [ordered]@{ IsValid = $false; State = 'Error'; Error = $message; UserInfo = $null }
                     GoogleStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
@@ -2229,6 +2519,18 @@ function Complete-AvailableStartupWorkers {
                     StartedAt = $null
                     UpdatedAt = [DateTime]::UtcNow
                 }
+                # Shared-log entry per completed startup restore result so the
+                # Logs page shows the true outcome (this loop is the single
+                # funnel where worker results reach the UI).
+                try {
+                    $restoreSeverity = 'Info'
+                    if ($result.State -eq 'Error') { $restoreSeverity = 'Error' }
+                    elseif ($result.State -eq 'AuthRequired') { $restoreSeverity = 'Warning' }
+                    $restoreRecovered = if ($result.State -in @('Mounted', 'ExistingProcess')) { $true } elseif ($result.State -eq 'Error') { $false } else { $null }
+                    Write-NSCloudLog -Severity $restoreSeverity -AccountId $key -Operation 'startup-restore' `
+                        -Message ("Account restore finished: $(if ($result.State) { [string]$result.State } else { 'unknown' })$(if ($result.DriveLetter) { " on $($result.DriveLetter):" })$(if ($result.Error) { " - $($result.Error)" })") `
+                        -Recovered $restoreRecovered
+                } catch { }
                 if ($result.State -in @('Mounted', 'ExistingProcess')) {
                     Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
                 }
@@ -2253,9 +2555,20 @@ function Complete-AvailableStartupWorkers {
                         StartedAt = $null
                         UpdatedAt = [DateTime]::UtcNow
                     }
-                    if ($result.State -eq 'Mounted') {
-                        Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
-                    }
+                }
+                # Shared-log entry for every reconnect outcome (mount or
+                # recovery attempt), including legacy keys.
+                try {
+                    $reconSeverity = 'Info'
+                    if ($result.State -eq 'Error') { $reconSeverity = 'Error' }
+                    elseif ($result.State -eq 'AuthRequired') { $reconSeverity = 'Warning' }
+                    $reconRecovered = if ($result.State -in @('Mounted', 'Connected')) { $true } elseif ($result.State -eq 'Error') { $false } else { $null }
+                    Write-NSCloudLog -Severity $reconSeverity -AccountId $key -Operation 'reconnect' `
+                        -Message ("Reconnect attempt finished: $(if ($result.State) { [string]$result.State } else { 'unknown' })$(if ($result.DriveLetter) { " on $($result.DriveLetter):" })$(if ($result.Error) { " - $($result.Error)" })") `
+                        -Recovered $reconRecovered
+                } catch { }
+                if ($result.State -eq 'Mounted') {
+                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
                 }
                 if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
                     $script:ReconnectFailCount[$key] = 0
@@ -2315,6 +2628,17 @@ function Write-StartupAutoMountProgressLog {
         }
         Add-Content -LiteralPath $logPath -Value (($entry | ConvertTo-Json -Compress) + [Environment]::NewLine) -Encoding UTF8
     } catch { }
+
+    # Mirror the stage into the shared application log so the Logs page shows
+    # the restore flow together with mount and reconnect events.
+    try {
+        $stage = [string]$progress.Stage
+        $severity = if ($stage -match '(?i)failed|could not|not responsive') { 'Error' } else { 'Info' }
+        Write-NSCloudLog -Severity $severity -Provider $providerId -Operation 'startup-restore' `
+            -Message ("Startup restore stage: $stage$(if ($driveLetter) { " ($driveLetter`:)" })") `
+            -DurationMilliseconds ([int]$elapsedMilliseconds) `
+            -Recovered $(if ($stage -eq 'Recovery checks complete') { $true } else { $null })
+    } catch { }
 }
 
 function Update-AllUIState {
@@ -2330,6 +2654,15 @@ function Update-AllUIState {
 
     $statusSnapshot = $script:ProviderStatusSnapshot
     if ($script:StartupAutoMountError -and -not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker) {
+        # Log each distinct startup failure exactly once (the UI branch runs on
+        # every dispatcher tick, so no dedup here means log spam).
+        try {
+            $failureText = Format-SanitizedDiagnosticMessage ([string]$script:StartupAutoMountError)
+            if ($failureText -and $failureText -ne $script:LastLoggedAutoMountErrorText) {
+                $script:LastLoggedAutoMountErrorText = $failureText
+                Write-NSCloudLog -Severity 'Error' -Operation 'startup-restore' -Message $failureText -Recovered $false
+            }
+        } catch { }
         $failure = [ordered]@{ IsValid = $false; State = 'Error'; Error = $script:StartupAutoMountError; UserInfo = $null }
         $script:ProviderStatusSnapshot = [pscustomobject]@{
             GoogleCheck = $failure
@@ -3341,6 +3674,16 @@ function Complete-AvailableLegacyMountWorkers {
             }
         } catch { }
         $script:LegacyMountStates[$providerKey] = $final
+        # Shared-log entry so the Logs page shows legacy card mount outcomes.
+        try {
+            $legacySeverity = 'Info'
+            if ($final.State -eq 'Error') { $legacySeverity = 'Error' }
+            elseif ($final.State -eq 'AuthRequired') { $legacySeverity = 'Warning' }
+            $legacyRecovered = if ($final.State -in @('Mounted', 'Connected')) { $true } elseif ($final.State -eq 'Error') { $false } else { $null }
+            Write-NSCloudLog -Severity $legacySeverity -Provider $providerKey -Operation 'legacy-mount' `
+                -Message ("Legacy mount finished: $(if ($final.State) { [string]$final.State } else { 'unknown' })$(if ($final.DriveLetter) { " on $($final.DriveLetter):" })$(if ($final.Error) { " - $($final.Error)" })") `
+                -Recovered $legacyRecovered
+        } catch { }
         if ($final.State -eq 'Mounted') {
             Register-ProviderExplorerIcon -ProviderId $providerKey -DriveLetter ([string]$final.DriveLetter)
             if ($script:Settings.OpenExplorerOnMount -and $final.DriveLetter) {
