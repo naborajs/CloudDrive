@@ -19,6 +19,23 @@ function Get-ConnectionStates {
     return $script:ConnectionStates
 }
 
+function New-MountOperationState(
+    [string]$Stage,
+    [string]$AccountId = '',
+    [string]$DriveLetter = '',
+    [string]$State = 'Mounting'
+) {
+    return ,([hashtable]::Synchronized(@{
+        State = $State
+        Stage = $Stage
+        AccountId = $AccountId
+        DriveLetter = $DriveLetter
+        Error = $null
+        StartedAt = [DateTime]::UtcNow
+        UpdatedAt = [DateTime]::UtcNow
+    }))
+}
+
 function Get-ConnectionStateInfo([string]$State) {
     switch ($State) {
         'Disconnected' {
