@@ -478,19 +478,24 @@ $addDiskBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $addDiskBtn.Add_Click({
     Show-AddCloudDiskModal -Owner $window -Theme $script:Settings.Theme -OnProviderSelected {
         param($selected)
-        if ($selected -eq 'gdrive') {
-            $created = Connect-NewCloudAccount -Owner $window -ProviderId 'gdrive'
+        if ($selected -in @('gdrive', 'terabox')) {
+            $created = Connect-NewCloudAccount -Owner $window -ProviderId $selected
             if ($created) {
-                Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
-                Update-AllUIState
-                Invoke-MemoryTrim
-            }
-        } elseif ($selected -eq 'terabox') {
-            $created = Connect-NewCloudAccount -Owner $window -ProviderId 'terabox'
-            if ($created) {
-                Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
-                Update-AllUIState
-                Invoke-MemoryTrim
+                try {
+                    Invoke-AutoReconnectWatchdog -AccountId ([string]$created.Id)
+                    Update-AllUIState
+                    Invoke-MemoryTrim
+                } catch {
+                    $reason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                    Write-NSCloudLog -Severity 'Error' -Provider $selected -AccountId ([string]$created.Id) `
+                        -Operation 'account-post-save' -Message $reason -Recovered $false
+                    [System.Windows.MessageBox]::Show(
+                        "The account was saved, but its mount or dashboard refresh did not complete. Your saved account was kept. You can retry from its account card.`n`n$reason",
+                        'Account saved; mount needs attention',
+                        [System.Windows.MessageBoxButton]::OK,
+                        [System.Windows.MessageBoxImage]::Warning
+                    ) | Out-Null
+                }
             }
         }
     }
@@ -3233,8 +3238,10 @@ function Update-AllUIState {
         $tbUploadBtn.IsEnabled = $false
     }
 
-    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $gdCheck.State -ne 'Checking' -and -not (Test-LegacyMountBusy 'gdrive'))
-    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheck.State -ne 'Checking' -and -not (Test-LegacyMountBusy 'terabox'))
+    $gdCheckState = [string](Get-SafeProperty $gdCheck 'State' 'Error')
+    $tbCheckState = [string](Get-SafeProperty $tbCheck 'State' 'Error')
+    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $gdCheckState -ne 'Checking' -and -not (Test-LegacyMountBusy 'gdrive'))
+    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and $tbCheckState -ne 'Checking' -and -not (Test-LegacyMountBusy 'terabox'))
 
     # 3. Dynamic Multi-Account Cards
     $allAccounts = @()
@@ -3251,8 +3258,10 @@ function Update-AllUIState {
 
     $hasSavedGoogleAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'gdrive' }).Count -gt 0
     $hasSavedTeraBoxAccounts = @($allAccounts | Where-Object { $_.ProviderId -eq 'terabox' }).Count -gt 0
-    $gdCard.Visibility = if ($hasSavedGoogleAccounts) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
-    $tbCard.Visibility = if ($hasSavedTeraBoxAccounts) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+    $hasActiveLegacyGoogle = [bool]$gdStatus.IsMounted -or [bool](Get-SafeProperty $gdCheck 'IsValid' $false)
+    $hasActiveLegacyTeraBox = [bool]$tbStatus.IsMounted -or [bool](Get-SafeProperty $tbCheck 'IsValid' $false)
+    $gdCard.Visibility = if ($hasSavedGoogleAccounts -and -not $hasActiveLegacyGoogle) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
+    $tbCard.Visibility = if ($hasSavedTeraBoxAccounts -and -not $hasActiveLegacyTeraBox) { [System.Windows.Visibility]::Collapsed } else { [System.Windows.Visibility]::Visible }
 
     $cardSignatureItems = [System.Collections.Generic.List[object]]::new()
     foreach ($account in $allAccounts) {
