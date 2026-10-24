@@ -50,6 +50,14 @@ function Find-RcloneBinary([string]$CustomPath = '') {
     return $null
 }
 
+function Get-VerifiedRclonePath([string]$CustomPath = '') {
+    $r = Find-RcloneBinary -CustomPath $CustomPath
+    if ($r -and (Test-Path -LiteralPath $r -PathType Leaf)) {
+        return $r
+    }
+    return $null
+}
+
 function Test-WinFspInstalled {
     $paths = @(
         'C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll',
@@ -91,6 +99,13 @@ function Test-DriveLetterAvailable([string]$DriveLetter) {
     $path = "$letter`:\"
     $used = [System.IO.DriveInfo]::GetDrives().Name -contains $path
     return (-not $used)
+}
+
+function Get-VirtualDriveRcPort([string]$DriveLetter) {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return 5580 }
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    if ($letter.Length -ne 1) { return 5580 }
+    return 5580 + ([int]$letter[0] - [int][char]'A')
 }
 
 function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 10) {
@@ -331,7 +346,8 @@ function Build-RcloneMountArguments(
     [string]$LogFile = '',
     [int]$CacheMaxGigabytes = 20,
     [switch]$ReadOnly = $false,
-    [switch]$FixedDisk = $false
+    [switch]$FixedDisk = $false,
+    [int]$RcPort = 0
 ) {
     if ($CacheMaxGigabytes -lt 1 -or $CacheMaxGigabytes -gt 1024) {
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
@@ -395,6 +411,14 @@ function Build-RcloneMountArguments(
 
     if (-not [string]::IsNullOrEmpty($LogFile)) {
         $args += @('--log-file', $LogFile)
+    }
+
+    if ($RcPort -gt 0) {
+        $args += @(
+            '--rc',
+            '--rc-addr', "127.0.0.1:$RcPort",
+            '--rc-no-auth'
+        )
     }
 
     # Set WinFsp filesystem name to NTFS so Windows File Explorer displays clean volume format
@@ -506,7 +530,8 @@ function Start-VirtualDriveMount(
             } catch { $mountConfigPath = '' }
         }
     }
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk -RcPort $rcPort
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
@@ -566,6 +591,7 @@ function Start-VirtualDriveMount(
                 ProcessId = $proc.Id
                 LogPath = $logPath
                 FilesystemVerified = $true
+                RcPort = $rcPort
             }
         }
 
@@ -860,4 +886,155 @@ function Get-MountLogContent([string]$MountKey, [int]$Tail = 50) {
         } catch { }
     }
     return @()
+}
+
+function Get-VirtualDriveVfsStats {
+    [CmdletBinding()]
+    param(
+        [string]$DriveLetter = '',
+        [string]$AccountId = '',
+        [string]$ProviderId = ''
+    )
+
+    $letter = if ($DriveLetter) {
+        $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    } else {
+        $st = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $ProviderId
+        if ($st -and $st.DriveLetter) { $st.DriveLetter } else { '' }
+    }
+
+    if (-not $letter) {
+        return [ordered]@{
+            IsActive = $false
+            DriveLetter = ''
+            RcPort = 0
+            UploadsInProgress = 0
+            UploadsQueued = 0
+            BytesTransferred = 0L
+            TransferSpeed = 0.0
+            Errors = 0
+            LastError = $null
+            Transferring = @()
+            CacheBytesUsed = 0L
+            State = 'Remote state unknown'
+        }
+    }
+
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+
+    try {
+        $vfsResp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/stats" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+        $coreResp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/stats" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+
+        $uploadsInProg = 0
+        $uploadsQueued = 0
+        $cacheBytes = 0L
+        if ($vfsResp -and $vfsResp.PSObject.Properties['diskCache'] -and $vfsResp.diskCache) {
+            $dc = $vfsResp.diskCache
+            if ($dc.PSObject.Properties['uploadsInProgress']) { $uploadsInProg = [int]$dc.uploadsInProgress }
+            if ($dc.PSObject.Properties['uploadsQueued']) { $uploadsQueued = [int]$dc.uploadsQueued }
+            if ($dc.PSObject.Properties['bytesUsed']) { $cacheBytes = [int64]$dc.bytesUsed }
+        }
+
+        $bTrans = 0L
+        $speed = 0.0
+        $errCount = 0
+        $lastErr = $null
+        $transferring = @()
+
+        if ($coreResp) {
+            if ($coreResp.PSObject.Properties['bytes']) { $bTrans = [int64]$coreResp.bytes }
+            if ($coreResp.PSObject.Properties['speed']) { $speed = [double]$coreResp.speed }
+            if ($coreResp.PSObject.Properties['errors']) { $errCount = [int]$coreResp.errors }
+            if ($coreResp.PSObject.Properties['lastError'] -and $coreResp.lastError) { $lastErr = [string]$coreResp.lastError }
+            if ($coreResp.PSObject.Properties['transferring'] -and $coreResp.transferring) {
+                foreach ($t in $coreResp.transferring) {
+                    $transferring += [ordered]@{
+                        Name = if ($t.PSObject.Properties['name']) { [string]$t.name } else { '' }
+                        Size = if ($t.PSObject.Properties['size']) { [int64]$t.size } else { 0L }
+                        Bytes = if ($t.PSObject.Properties['bytes']) { [int64]$t.bytes } else { 0L }
+                        Percentage = if ($t.PSObject.Properties['percentage']) { [double]$t.percentage } else { 0.0 }
+                        Speed = if ($t.PSObject.Properties['speed']) { [double]$t.speed } else { 0.0 }
+                        Eta = if ($t.PSObject.Properties['eta']) { [int]$t.eta } else { $null }
+                    }
+                }
+            }
+        }
+
+        $state = if ($errCount -gt 0 -and $uploadsInProg -eq 0 -and $uploadsQueued -eq 0) {
+            'Failed'
+        } elseif ($uploadsInProg -gt 0) {
+            'Uploading to provider'
+        } elseif ($uploadsQueued -gt 0) {
+            'Locally cached or queued'
+        } else {
+            'Remotely confirmed'
+        }
+
+        return [ordered]@{
+            IsActive = $true
+            DriveLetter = $letter
+            RcPort = $rcPort
+            UploadsInProgress = $uploadsInProg
+            UploadsQueued = $uploadsQueued
+            BytesTransferred = $bTrans
+            TransferSpeed = $speed
+            Errors = $errCount
+            LastError = $lastErr
+            Transferring = $transferring
+            CacheBytesUsed = $cacheBytes
+            State = $state
+        }
+    } catch {
+        return [ordered]@{
+            IsActive = $false
+            DriveLetter = $letter
+            RcPort = $rcPort
+            UploadsInProgress = 0
+            UploadsQueued = 0
+            BytesTransferred = 0L
+            TransferSpeed = 0.0
+            Errors = 0
+            LastError = $null
+            Transferring = @()
+            CacheBytesUsed = 0L
+            State = 'Remote state unknown'
+        }
+    }
+}
+
+function Get-VirtualDriveActiveErrors {
+    [CmdletBinding()]
+    param(
+        [string]$DriveLetter = '',
+        [string]$AccountId = '',
+        [string]$ProviderId = ''
+    )
+
+    $stats = Get-VirtualDriveVfsStats -DriveLetter $DriveLetter -AccountId $AccountId -ProviderId $ProviderId
+    $errors = [System.Collections.Generic.List[string]]::new()
+
+    if ($stats.LastError) {
+        $errors.Add($stats.LastError)
+    }
+
+    $mountKey = if ($AccountId) { $AccountId } elseif ($ProviderId) { $ProviderId } else { '' }
+    if ($mountKey) {
+        $logPath = Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs') "rclone-$mountKey.log"
+        if (Test-Path -LiteralPath $logPath) {
+            try {
+                $lines = Get-Content -LiteralPath $logPath -Tail 25 -ErrorAction SilentlyContinue
+                foreach ($line in $lines) {
+                    if ($line -match '(?i)ERROR\s*:\s*(.+)$') {
+                        $errText = $matches[1].Trim()
+                        if (-not $errors.Contains($errText)) {
+                            $errors.Add($errText)
+                        }
+                    }
+                }
+            } catch { }
+        }
+    }
+
+    return @($errors)
 }
