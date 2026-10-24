@@ -171,19 +171,34 @@ function Get-NextAvailableDriveLetter([string]$PreferredLetter = 'T') {
     throw 'No available drive letters found on system.'
 }
 
-function Find-ActiveMountProcess([string]$DriveLetter = '') {
-    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return $null }
+function Test-MountProcessOwnership([string]$CommandLine, [string]$DriveLetter, [string]$MountKey) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine) -or
+        [string]::IsNullOrWhiteSpace($DriveLetter) -or
+        [string]::IsNullOrWhiteSpace($MountKey)) { return $false }
+
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     $targetPattern = "(?i)\bmount\b.*\s+[`"']?${letter}:\\?[`"']?(\s+|$)"
+    $logPattern = '(?i)(?:^|[\\/"\s])rclone-' + [regex]::Escape($MountKey) + '\.log(?:["\s]|$)'
+    return ($CommandLine -match $targetPattern) -and ($CommandLine -match $logPattern)
+}
+
+function Find-ActiveMountProcess([string]$DriveLetter = '', [string]$MountKey = '') {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return $null }
 
     try {
         $procs = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue
         if ($procs) {
             foreach ($p in $procs) {
-                if ($p.CommandLine -and ($p.CommandLine -match $targetPattern)) {
+                $ownsMount = if ($MountKey) {
+                    Test-MountProcessOwnership -CommandLine ([string]$p.CommandLine) -DriveLetter $DriveLetter -MountKey $MountKey
+                } else {
+                    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                    $targetPattern = "(?i)\bmount\b.*\s+[`"']?${letter}:\\?[`"']?(\s+|$)"
+                    [bool]($p.CommandLine -and ($p.CommandLine -match $targetPattern))
+                }
+                if ($ownsMount) {
                     return [ordered]@{
                         ProcessId = [int]$p.ProcessId
-                        CommandLine = [string]$p.CommandLine
                         IsReadOnly = ($p.CommandLine -match '--read-only')
                     }
                 }
@@ -238,7 +253,11 @@ function Get-VirtualDriveStatus(
     $driveRoot = "$letter`:\"
     $driveInfo = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -eq $driveRoot }
 
-    $activeProc = Find-ActiveMountProcess -DriveLetter $letter
+    $activeProc = if ($mountKey) {
+        Find-ActiveMountProcess -DriveLetter $letter -MountKey $mountKey
+    } else {
+        Find-ActiveMountProcess -DriveLetter $letter
+    }
     $processAlive = $false
     $procId = $null
     $isReadOnly = $false
@@ -256,9 +275,6 @@ function Get-VirtualDriveStatus(
             $processAlive = $true
             $procId = $p.Id
         }
-    } elseif ([string]::IsNullOrEmpty($AccountId) -and $script:MountProcess -and (-not $script:MountProcess.HasExited)) {
-        $processAlive = $true
-        $procId = $script:MountProcess.Id
     }
 
     if ($driveInfo) {
@@ -531,6 +547,9 @@ function Start-VirtualDriveMount(
         if ($isMounted) {
             $filesystemCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 10
             if (-not $filesystemCheck.Success) {
+                if ($filesystemCheck.State -eq 'Timeout') {
+                    throw "Mount process $($proc.Id) remains running, but the filesystem root check timed out: $($filesystemCheck.Error)"
+                }
                 $cleanup = Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
                 if (-not $cleanup.Success -or -not $cleanup.Verified) {
                     throw "Filesystem verification failed: $($filesystemCheck.Error) Cleanup could not be verified: $($cleanup.Message)"
