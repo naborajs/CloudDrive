@@ -80,6 +80,16 @@ try {
     }
     Write-Output '  [PASS] Account-scoped reads never inherit the legacy connection credentials'
 
+    $mountProgress = New-MountOperationState -Stage 'Validating credentials' -AccountId 'life_gd_a' -DriveLetter 'X'
+    if ($mountProgress.State -ne 'Mounting' -or $mountProgress.AccountId -ne 'life_gd_a' -or $mountProgress.DriveLetter -ne 'X') {
+        throw 'Account mount progress must provide the State property consumed by the UI and retain account ownership.'
+    }
+    $mountProgress.Stage = 'Starting filesystem'
+    if ($mountProgress.State -ne 'Mounting' -or $mountProgress.Stage -ne 'Starting filesystem') {
+        throw 'The synchronized mount progress record must retain its state and stage contract while workers update it.'
+    }
+    Write-Output '  [PASS] Mount progress always carries the UI State contract and account ownership'
+
     # --------------------------------------------------------------------------
     # 2. Saved-identity cross-check (Google): a verified Google identity that
     #    does not belong to the saved account fails the session check. HTTP
@@ -178,7 +188,7 @@ try {
         $persisted.CacheMaxGigabytes -ne 7) {
         throw 'Renaming an account or saving its per-drive cache settings did not persist.'
     }
-    $allAccounts = Get-CloudAccounts
+    $allAccounts = @(Get-CloudAccounts)
     if ($allAccounts.Count -ne 2) {
         throw ("Expected exactly 2 saved accounts after restore simulation, found $($allAccounts.Count).")
     }
@@ -220,7 +230,7 @@ try {
 
     # Removing account X frees its letter and leaves account Y intact.
     Remove-CloudAccount -AccountId 'life_gd_x' | Out-Null
-    $afterRemove = Get-CloudAccounts
+    $afterRemove = @(Get-CloudAccounts)
     if ($afterRemove.Count -ne 1 -or $afterRemove[0].Id -ne 'life_gd_y') {
         throw 'Removing one account affected another saved account.'
     }
