@@ -129,6 +129,11 @@ try {
     # ---- Scenario 5 (structural): UI retry/guard/not-fabricated additions exist ----
     $uiSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ui\ProviderConnectionWindow.ps1') -Raw
     $provSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\providers\GoogleDriveProvider.ps1') -Raw
+    Assert-True ($uiSource -notmatch '\$(?:verify|res)\.State') 'Scenario 5: incomplete provider results cannot throw on direct State property access'
+    Assert-True ($uiSource -match 'UpdateStateFromProviderResult' -and $uiSource -match 'Get-SafeProperty \$Result ''State'' ''Error''') 'Scenario 5: missing provider state is surfaced as an explicit Error'
+    Assert-True ($uiSource -match '\$verify\.IsValid -and \$userEmail -match') 'Scenario 5: a new Google account requires a valid provider-returned email'
+    Assert-True ($uiSource -match 'IdentityVerified') 'Scenario 5: a new Google account requires provider-verified identity'
+    Assert-True ($uiSource -match 'already saved as' -and $uiSource -match 'OrdinalIgnoreCase') 'Scenario 5: the same verified Google identity cannot be saved twice'
     Assert-True ($uiSource -match 'Retry the identity check without signing in again\?') 'Scenario 5: UI offers an identity check retry without re-authorizing'
     Assert-True ($uiSource -match 'The received authorization was discarded for security') 'Scenario 5: UI explains the discard decision'
     Assert-True ($uiSource -match '\$script:CloudAccountCreationBusy') 'Scenario 5: re-entrancy guard exists (no nested creation flows)'
