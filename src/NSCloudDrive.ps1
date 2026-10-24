@@ -33,8 +33,8 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
 $script:Settings = Get-NSCloudDriveSettings
-if (-not $PSBoundParameters.ContainsKey('Minimized') -and $script:Settings.StartMinimized) {
-    $Minimized = [switch]::Present
+if (-not $PSBoundParameters.ContainsKey('Minimized')) {
+    $Minimized = [switch]$false
 }
 $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings.CacheDirectory } else { 'D:\CloudCache' }
 $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
@@ -64,6 +64,8 @@ $script:DriveDisconnectWorkers = @{}
 $script:AccountCardsSignature = ''
 $script:AnalyticsStorageRecords = @()
 $script:BitmapImageCache = @{}
+$script:OptionsInfoIcons = [System.Collections.Generic.List[System.Windows.Controls.Border]]::new()
+$script:OptionsToolTips = [System.Collections.Generic.List[System.Windows.Controls.ToolTip]]::new()
 $script:ReconnectWorker = $null
 $script:ReconnectWorkerAccountId = ''
 $script:ReconnectWorkerProgress = $null
@@ -76,6 +78,7 @@ $script:LegacyMountWorkers = @{}
 $script:LegacyMountStates = @{}
 $script:StartupAutoMountPending = [bool]$script:Settings.AutoMountDrives
 $script:StartupAutoMountProgress = [hashtable]::Synchronized(@{
+    AccountStages = [hashtable]::Synchronized(@{})
     Stage = 'Waiting for startup dispatcher'
     ProviderId = ''
     DriveLetter = ''
@@ -125,6 +128,118 @@ function New-Label([string]$Text, [int]$Size = 13, [string]$Color = '#F2F3F5', [
     if ($Bold) { $label.FontWeight = [System.Windows.FontWeights]::SemiBold }
     $label.TextWrapping = 'Wrap'
     return $label
+}
+
+function New-OptionsInfoIcon([string]$ExplanationText, [string]$Title = '') {
+    $btn = [System.Windows.Controls.Border]::new()
+    $btn.Width = 16
+    $btn.Height = 16
+    $btn.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+    $btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+    $btn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $btn.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+    $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btn.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+    $iconText = [System.Windows.Controls.TextBlock]::new()
+    $iconText.Text = 'i'
+    $iconText.FontFamily = 'Segoe UI'
+    $iconText.FontSize = 10
+    $iconText.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $iconText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    $iconText.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+    $iconText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+    $btn.Child = $iconText
+
+    $tip = [System.Windows.Controls.ToolTip]::new()
+    $tip.MaxWidth = 360
+    $tip.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+    $tip.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+    $tip.BorderThickness = [System.Windows.Thickness]::new(1)
+    $tip.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+
+    $tipStack = [System.Windows.Controls.StackPanel]::new()
+    if (-not [string]::IsNullOrEmpty($Title)) {
+        $tipTitle = [System.Windows.Controls.TextBlock]::new()
+        $tipTitle.Text = $Title
+        $tipTitle.FontWeight = [System.Windows.FontWeights]::Bold
+        $tipTitle.FontSize = 11
+        $tipTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+        $tipTitle.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+        $tipTitle.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        $tipStack.Children.Add($tipTitle) | Out-Null
+    }
+
+    $tipBody = [System.Windows.Controls.TextBlock]::new()
+    $tipBody.Text = $ExplanationText
+    $tipBody.FontSize = 11
+    $tipBody.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    $tipBody.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $tipStack.Children.Add($tipBody) | Out-Null
+
+    $tip.Content = $tipStack
+    $btn.ToolTip = $tip
+
+    [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($btn, 50)
+    [System.Windows.Controls.ToolTipService]::SetShowDuration($btn, 60000)
+    [System.Windows.Controls.ToolTipService]::SetBetweenShowDelay($btn, 0)
+
+    $btn.Add_MouseDown({
+        param($s, $e)
+        if ($btn.ToolTip -is [System.Windows.Controls.ToolTip]) {
+            $btn.ToolTip.IsOpen = -not $btn.ToolTip.IsOpen
+        }
+    })
+
+    if ($null -ne $script:OptionsInfoIcons) {
+        $script:OptionsInfoIcons.Add($btn)
+    }
+    if ($null -ne $script:OptionsToolTips) {
+        $script:OptionsToolTips.Add($tip)
+    }
+
+    return $btn
+}
+
+function Set-ControlDetailedToolTip($Control, [string]$ExplanationText, [string]$Title = '') {
+    if (-not $Control) { return }
+    $tip = [System.Windows.Controls.ToolTip]::new()
+    $tip.MaxWidth = 360
+    $tip.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+    $tip.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+    $tip.BorderThickness = [System.Windows.Thickness]::new(1)
+    $tip.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+
+    $tipStack = [System.Windows.Controls.StackPanel]::new()
+    if (-not [string]::IsNullOrEmpty($Title)) {
+        $tipTitle = [System.Windows.Controls.TextBlock]::new()
+        $tipTitle.Text = $Title
+        $tipTitle.FontWeight = [System.Windows.FontWeights]::Bold
+        $tipTitle.FontSize = 11
+        $tipTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+        $tipTitle.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+        $tipTitle.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        $tipStack.Children.Add($tipTitle) | Out-Null
+    }
+
+    $tipBody = [System.Windows.Controls.TextBlock]::new()
+    $tipBody.Text = $ExplanationText
+    $tipBody.FontSize = 11
+    $tipBody.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    $tipBody.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $tipStack.Children.Add($tipBody) | Out-Null
+
+    $tip.Content = $tipStack
+    $Control.ToolTip = $tip
+
+    [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($Control, 150)
+    [System.Windows.Controls.ToolTipService]::SetShowDuration($Control, 60000)
+    [System.Windows.Controls.ToolTipService]::SetBetweenShowDelay($Control, 0)
+
+    if ($null -ne $script:OptionsToolTips) {
+        $script:OptionsToolTips.Add($tip)
+    }
 }
 
 function Get-VerifiedRclonePath {
@@ -409,7 +524,6 @@ function New-NavButton([string]$Glyph, [string]$Text, [bool]$IsActive = $false) 
     $stack.Children.Add($ico) | Out-Null
     $stack.Children.Add($lbl) | Out-Null
     $btn.Content = $stack
-
     if ($IsActive) {
         $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.NavActiveBg)
         $ico.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
@@ -551,6 +665,45 @@ $disksView.Children.Add($mainScroll) | Out-Null
 
 $content = [System.Windows.Controls.StackPanel]::new()
 $mainScroll.Content = $content
+
+# --- Overall Drives Summary Banner ---
+$drivesSummaryBanner = [System.Windows.Controls.Border]::new()
+$drivesSummaryBanner.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$drivesSummaryBanner.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+$drivesSummaryBanner.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+$drivesSummaryBanner.BorderThickness = [System.Windows.Thickness]::new(1)
+$bannerGrid = [System.Windows.Controls.Grid]::new()
+$drivesSummaryBanner.Child = $bannerGrid
+$bCol0 = [System.Windows.Controls.ColumnDefinition]::new(); $bCol0.Width = [System.Windows.GridLength]::Auto
+$bCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $bCol1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+$bCol2 = [System.Windows.Controls.ColumnDefinition]::new(); $bCol2.Width = [System.Windows.GridLength]::Auto
+$bannerGrid.ColumnDefinitions.Add($bCol0)
+$bannerGrid.ColumnDefinitions.Add($bCol1)
+$bannerGrid.ColumnDefinitions.Add($bCol2)
+
+$bannerIcon = New-Label ([char]::ConvertFromUtf32(0x25CF)) 14 $script:Palette.PillMounted $true
+$bannerIcon.VerticalAlignment = 'Center'
+$bannerIcon.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+[System.Windows.Controls.Grid]::SetColumn($bannerIcon, 0)
+$bannerGrid.Children.Add($bannerIcon) | Out-Null
+
+$bannerTextStack = [System.Windows.Controls.StackPanel]::new()
+$bannerTextStack.VerticalAlignment = 'Center'
+[System.Windows.Controls.Grid]::SetColumn($bannerTextStack, 1)
+$bannerGrid.Children.Add($bannerTextStack) | Out-Null
+
+$bannerTitle = New-Label 'All drives connected' 13 $script:Palette.TextPrimary $true
+$bannerTextStack.Children.Add($bannerTitle) | Out-Null
+$bannerSubtitle = New-Label 'All virtual cloud drives are active in Windows File Explorer.' 11 $script:Palette.TextSecondary
+$bannerTextStack.Children.Add($bannerSubtitle) | Out-Null
+
+$bannerChipsStack = [System.Windows.Controls.StackPanel]::new()
+$bannerChipsStack.Orientation = 'Horizontal'
+$bannerChipsStack.VerticalAlignment = 'Center'
+[System.Windows.Controls.Grid]::SetColumn($bannerChipsStack, 2)
+$bannerGrid.Children.Add($bannerChipsStack) | Out-Null
+
+$content.Children.Add($drivesSummaryBanner) | Out-Null
 
 # Saved accounts are the primary drive list. Provider-only entries are shown
 # afterward only when an active mount cannot be reconciled to a saved account.
@@ -871,7 +1024,6 @@ $optSubtitle = New-Label 'Configure application preferences, themes, and cache b
 $optTitles.Children.Add($optTitle) | Out-Null
 $optTitles.Children.Add($optSubtitle) | Out-Null
 $optHeader.Children.Add($optTitles) | Out-Null
-
 $optScroll = [System.Windows.Controls.ScrollViewer]::new()
 $optScroll.VerticalScrollBarVisibility = 'Auto'
 $optScroll.HorizontalScrollBarVisibility = 'Disabled'
@@ -892,67 +1044,137 @@ $optContent.Children.Add($genCard) | Out-Null
 
 $genStack = [System.Windows.Controls.StackPanel]::new()
 $genCard.Child = $genStack
+
 $genTitle = New-Label 'General' 15 $script:Palette.TextPrimary $true
 $genStack.Children.Add($genTitle) | Out-Null
 
+# Row 1: Startup
+$rowStartup = [System.Windows.Controls.StackPanel]::new()
+$rowStartup.Orientation = 'Horizontal'
+$rowStartup.Margin = [System.Windows.Thickness]::new(0, 12, 0, 8)
 $optStartupChk = [System.Windows.Controls.CheckBox]::new()
 $optStartupChk.Content = 'Run NS Cloud Drive at Windows login'
 $optStartupChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $optStartupChk.IsChecked = (Test-WindowsStartupEnabled)
-$optStartupChk.Margin = [System.Windows.Thickness]::new(0, 12, 0, 8)
-$optStartupChk.Add_Click({
-    $c = ($optStartupChk.IsChecked -eq $true)
-    Set-WindowsStartupEnabled -Enable $c
-    $script:Settings.AutoStartWithWindows = $c
-    Set-NSCloudDriveSettings $script:Settings
-})
-$genStack.Children.Add($optStartupChk) | Out-Null
+$rowStartup.Children.Add($optStartupChk) | Out-Null
+$genStack.Children.Add($rowStartup) | Out-Null
 
+# Row 2: Tray
+$rowTray = [System.Windows.Controls.StackPanel]::new()
+$rowTray.Orientation = 'Horizontal'
+$rowTray.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $optTrayChk = [System.Windows.Controls.CheckBox]::new()
 $optTrayChk.Content = 'Minimize to system tray on close'
 $optTrayChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $optTrayChk.IsChecked = $script:Settings.MinimizeToTrayOnClose
-$optTrayChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$optTrayChk.Add_Click({
-    $script:Settings.MinimizeToTrayOnClose = ($optTrayChk.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$genStack.Children.Add($optTrayChk) | Out-Null
+$rowTray.Children.Add($optTrayChk) | Out-Null
+$genStack.Children.Add($rowTray) | Out-Null
 
+# Row 3: Start Minimized
+$rowStartMin = [System.Windows.Controls.StackPanel]::new()
+$rowStartMin.Orientation = 'Horizontal'
+$rowStartMin.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $optStartMinChk = [System.Windows.Controls.CheckBox]::new()
 $optStartMinChk.Content = 'Start application minimized to system tray'
 $optStartMinChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $optStartMinChk.IsChecked = $script:Settings.StartMinimized
-$optStartMinChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$optStartMinChk.Add_Click({
-    $script:Settings.StartMinimized = ($optStartMinChk.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$genStack.Children.Add($optStartMinChk) | Out-Null
+$rowStartMin.Children.Add($optStartMinChk) | Out-Null
+$genStack.Children.Add($rowStartMin) | Out-Null
 
+# Row 4: Explorer on Connect
+$rowExplorer = [System.Windows.Controls.StackPanel]::new()
+$rowExplorer.Orientation = 'Horizontal'
+$rowExplorer.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $optExplorerChk = [System.Windows.Controls.CheckBox]::new()
 $optExplorerChk.Content = 'Open Windows File Explorer automatically on connect'
 $optExplorerChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $optExplorerChk.IsChecked = $script:Settings.OpenExplorerOnMount
-$optExplorerChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$optExplorerChk.Add_Click({
-    $script:Settings.OpenExplorerOnMount = ($optExplorerChk.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$genStack.Children.Add($optExplorerChk) | Out-Null
+$rowExplorer.Children.Add($optExplorerChk) | Out-Null
+$genStack.Children.Add($rowExplorer) | Out-Null
 
+# Row 5: Auto Mount
+$rowAutoMount = [System.Windows.Controls.StackPanel]::new()
+$rowAutoMount.Orientation = 'Horizontal'
+$rowAutoMount.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
 $optAutoMountChk = [System.Windows.Controls.CheckBox]::new()
 $optAutoMountChk.Content = 'Automatically mount cloud drives on startup'
 $optAutoMountChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $optAutoMountChk.IsChecked = $script:Settings.AutoMountDrives
-$optAutoMountChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
-$optAutoMountChk.Add_Click({
-    $script:Settings.AutoMountDrives = ($optAutoMountChk.IsChecked -eq $true)
-    Set-NSCloudDriveSettings $script:Settings
-})
-$genStack.Children.Add($optAutoMountChk) | Out-Null
+$rowAutoMount.Children.Add($optAutoMountChk) | Out-Null
+$genStack.Children.Add($rowAutoMount) | Out-Null
 
-# Card B: Theme Selection (Pure Black, Translucent, Pure White)
+$optStatusLabel = New-Label '' 11 '#4ADE80'
+$optStatusLabel.Margin = [System.Windows.Thickness]::new(0, 6, 0, 0)
+$genStack.Children.Add($optStatusLabel) | Out-Null
+
+$optStartupChk.Add_Click({
+    try {
+        $c = ($optStartupChk.IsChecked -eq $true)
+        Set-WindowsStartupEnabled -Enable $c
+        $script:Settings.AutoStartWithWindows = $c
+        Set-NSCloudDriveSettings $script:Settings
+        $optStatusLabel.Text = if ($c) { 'Auto-start enabled at Windows login.' } else { 'Auto-start disabled.' }
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
+    } catch {
+        $optStatusLabel.Text = "Failed to update Windows startup: $($_.Exception.Message)"
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    }
+})
+
+$optTrayChk.Add_Click({
+    try {
+        $script:Settings.MinimizeToTrayOnClose = ($optTrayChk.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $script:Settings
+        $optStatusLabel.Text = if ($script:Settings.MinimizeToTrayOnClose) { 'Minimize to tray on close enabled.' } else { 'Window will exit on close.' }
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
+    } catch {
+        $optStatusLabel.Text = "Failed to save settings: $($_.Exception.Message)"
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    }
+})
+
+$optStartMinChk.Add_Click({
+    try {
+        $script:Settings.StartMinimized = ($optStartMinChk.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $script:Settings
+        if (Test-WindowsStartupEnabled) {
+            Set-WindowsStartupEnabled -Enable $true
+        }
+        $optStatusLabel.Text = if ($script:Settings.StartMinimized) { 'Application will start minimized to system tray.' } else { 'Application will show window on launch.' }
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
+    } catch {
+        $optStatusLabel.Text = "Failed to save settings: $($_.Exception.Message)"
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    }
+})
+
+$optExplorerChk.Add_Click({
+    try {
+        $script:Settings.OpenExplorerOnMount = ($optExplorerChk.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $script:Settings
+        $optStatusLabel.Text = if ($script:Settings.OpenExplorerOnMount) { 'File Explorer will open automatically when drives connect.' } else { 'File Explorer auto-open disabled.' }
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
+    } catch {
+        $optStatusLabel.Text = "Failed to save settings: $($_.Exception.Message)"
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    }
+})
+
+$optAutoMountChk.Add_Click({
+    try {
+        $script:Settings.AutoMountDrives = ($optAutoMountChk.IsChecked -eq $true)
+        Set-NSCloudDriveSettings $script:Settings
+        $optStatusLabel.Text = if ($script:Settings.AutoMountDrives) { 'Cloud drives will mount automatically on application startup.' } else { 'Automatic mount on startup disabled.' }
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
+    } catch {
+        $optStatusLabel.Text = "Failed to save settings: $($_.Exception.Message)"
+        $optStatusLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
+    }
+})
+
+# Card B: Theme Selection (Pure Black, Pure White)
+# Note: Translucent Liquid Glass theme engine and palette are preserved for test and runtime compatibility,
+# while the Options UI presents high-contrast Pure Black and Pure White options.
 $themeCard = [System.Windows.Controls.Border]::new()
 $themeCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
 $themeCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
@@ -964,6 +1186,7 @@ $optContent.Children.Add($themeCard) | Out-Null
 
 $themeStack = [System.Windows.Controls.StackPanel]::new()
 $themeCard.Child = $themeStack
+
 $themeTitle = New-Label 'Appearance & Themes' 15 $script:Palette.TextPrimary $true
 $themeStack.Children.Add($themeTitle) | Out-Null
 
@@ -978,12 +1201,7 @@ $rbThemePureBlack.Foreground = [System.Windows.Media.BrushConverter]::new().Conv
 $rbThemePureBlack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
 $themeStack.Children.Add($rbThemePureBlack) | Out-Null
 
-$rbThemeTranslucent = [System.Windows.Controls.RadioButton]::new()
-$rbThemeTranslucent.GroupName = 'ThemeSelection'
-$rbThemeTranslucent.Content = 'Translucent Liquid Glass (Acrylic blur where Windows supports it)'
-$rbThemeTranslucent.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
-$rbThemeTranslucent.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
-$themeStack.Children.Add($rbThemeTranslucent) | Out-Null
+$rbThemeTranslucent = $null
 
 $rbThemePureWhite = [System.Windows.Controls.RadioButton]::new()
 $rbThemePureWhite.GroupName = 'ThemeSelection'
@@ -993,23 +1211,16 @@ $rbThemePureWhite.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
 $themeStack.Children.Add($rbThemePureWhite) | Out-Null
 
 $currResolvedTheme = Resolve-AppTheme $script:Settings.Theme
-if ($currResolvedTheme -eq 'PureBlack') {
-    $rbThemePureBlack.IsChecked = $true
-} elseif ($currResolvedTheme -eq 'Translucent') {
-    $rbThemeTranslucent.IsChecked = $true
-} elseif ($currResolvedTheme -eq 'PureWhite') {
+if ($currResolvedTheme -eq 'PureWhite') {
     $rbThemePureWhite.IsChecked = $true
+} else {
+    $rbThemePureBlack.IsChecked = $true
 }
 
 $rbThemePureBlack.Add_Checked({
     $script:Settings.Theme = 'PureBlack'
     Set-NSCloudDriveSettings $script:Settings
     Apply-UITheme 'PureBlack'
-})
-$rbThemeTranslucent.Add_Checked({
-    $script:Settings.Theme = 'Translucent'
-    Set-NSCloudDriveSettings $script:Settings
-    Apply-UITheme 'Translucent'
 })
 $rbThemePureWhite.Add_Checked({
     $script:Settings.Theme = 'PureWhite'
@@ -1029,12 +1240,17 @@ $optContent.Children.Add($cacheCard) | Out-Null
 
 $cacheStack = [System.Windows.Controls.StackPanel]::new()
 $cacheCard.Child = $cacheStack
+
 $cacheTitle = New-Label 'Cache Management' 15 $script:Palette.TextPrimary $true
 $cacheStack.Children.Add($cacheTitle) | Out-Null
 
 $cachePathRow = [System.Windows.Controls.DockPanel]::new()
 $cachePathRow.Margin = [System.Windows.Thickness]::new(0, 8, 0, 4)
 $cacheStack.Children.Add($cachePathRow) | Out-Null
+
+$browseStack = [System.Windows.Controls.StackPanel]::new()
+$browseStack.Orientation = 'Horizontal'
+[System.Windows.Controls.DockPanel]::SetDock($browseStack, 'Right')
 
 $browseCacheBtn = [System.Windows.Controls.Button]::new()
 $browseCacheBtn.Content = 'Browse...'
@@ -1043,8 +1259,9 @@ $browseCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().Conver
 $browseCacheBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
 $browseCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $browseCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
-[System.Windows.Controls.DockPanel]::SetDock($browseCacheBtn, 'Right')
-$cachePathRow.Children.Add($browseCacheBtn) | Out-Null
+
+$browseStack.Children.Add($browseCacheBtn) | Out-Null
+$cachePathRow.Children.Add($browseStack) | Out-Null
 
 $cachePathLabel = New-Label ('Cache Folder: ' + $script:CacheDirectory) 12 $script:Palette.TextSecondary
 $cachePathRow.Children.Add($cachePathLabel) | Out-Null
@@ -1072,6 +1289,22 @@ $browseCacheBtn.Add_Click({
         Set-NSCloudDriveSettings $script:Settings
         $cachePathLabel.Text = 'Cache Folder: ' + $script:CacheDirectory
         Update-CacheUsageDisplay
+
+        $accounts = @(Get-CloudAccounts)
+        $mountedCount = 0
+        foreach ($acc in $accounts) {
+            $st = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
+            if ($st -and $st.IsMounted) { $mountedCount++ }
+        }
+        if ($mountedCount -gt 0) {
+            [System.Windows.MessageBox]::Show(
+                "The cache folder has been changed to:`n$($dlg.SelectedPath)`n`n" +
+                "Notice: Active mounted drives ($mountedCount drive(s)) will continue using their current cache folder until they are remounted or the application is restarted.",
+                'Cache Folder Changed',
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Information
+            ) | Out-Null
+        }
     }
 })
 
@@ -1088,10 +1321,13 @@ $cacheQuotaCombo = [System.Windows.Controls.ComboBox]::new()
 $cacheQuotaCombo.Width = 100
 $cacheQuotaCombo.Height = 26
 $cacheQuotaCombo.VerticalContentAlignment = 'Center'
-foreach ($sz in @(10, 20, 50, 100)) {
+foreach ($sz in @(10, 20, 50, 100, 200)) {
     [void]$cacheQuotaCombo.Items.Add("$($sz) GB")
 }
 $currQuota = if ($script:Settings.CacheMaxGigabytes) { $script:Settings.CacheMaxGigabytes } else { 20 }
+if (-not ($cacheQuotaCombo.Items -contains "$($currQuota) GB")) {
+    [void]$cacheQuotaCombo.Items.Add("$($currQuota) GB")
+}
 $cacheQuotaCombo.SelectedItem = "$($currQuota) GB"
 $cacheQuotaCombo.Add_SelectionChanged({
     if ($cacheQuotaCombo.SelectedItem) {
@@ -1120,6 +1356,18 @@ $cleanCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().Convert
 $cleanCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $cleanCacheBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $cleanCacheBtn.Add_Click({
+    $confirm = [System.Windows.MessageBox]::Show(
+        "Are you sure you want to clean the local cache directory?`n`n" +
+        "• In-use files and pending uploads will be safely protected and preserved.`n" +
+        "• Files stored remotely on Google Drive and TeraBox will NOT be affected.`n`n" +
+        "Target directory:`n$($script:CacheDirectory)",
+        'Clean Local Cache',
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) {
+        return
+    }
     try {
         $res = Invoke-SafeCacheCleanup -CacheDirectory $script:CacheDirectory -Force
         $mbCleaned = [Math]::Round($res.CleanedBytes / 1MB, 1)
@@ -1127,9 +1375,10 @@ $cleanCacheBtn.Add_Click({
             $cacheUsageLabel.Text = "Cleaned $mbCleaned MB ($($res.CleanedFiles) files). $($res.SkippedInUseCount) files protected in-use by active mounts."
             $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#60A5FA')
         } else {
-            $cacheUsageLabel.Text = "Cache cleared successfully ($mbCleaned MB reclaimed)."
+            $cacheUsageLabel.Text = "Cache cleared successfully ($mbCleaned MB reclaimed, $($res.CleanedFiles) files)."
             $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
         }
+        Update-CacheUsageDisplay
     } catch {
         $cacheUsageLabel.Text = "Could not clear all cache files: $($_.Exception.Message)"
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
@@ -1146,14 +1395,18 @@ $openCacheBtn.BorderThickness = [System.Windows.Thickness]::new(1)
 $openCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
 $openCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $openCacheBtn.Add_Click({
-    if (-not (Test-Path -LiteralPath $script:CacheDirectory)) {
-        New-Item -ItemType Directory -Path $script:CacheDirectory -Force | Out-Null
+    try {
+        if (-not (Test-Path -LiteralPath $script:CacheDirectory)) {
+            New-Item -ItemType Directory -Path $script:CacheDirectory -Force | Out-Null
+        }
+        Start-ExplorerWindow $script:CacheDirectory
+    } catch {
+        [System.Windows.MessageBox]::Show("Unable to open cache folder '$($script:CacheDirectory)': $($_.Exception.Message)", 'Cache Folder Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
     }
-    Start-ExplorerWindow $script:CacheDirectory
 })
 $cacheActionStack.Children.Add($openCacheBtn) | Out-Null
 
-# Card D: Diagnostics & System Health
+
 $diagCard = [System.Windows.Controls.Border]::new()
 $diagCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
 $diagCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
@@ -1165,6 +1418,7 @@ $optContent.Children.Add($diagCard) | Out-Null
 
 $diagStack = [System.Windows.Controls.StackPanel]::new()
 $diagCard.Child = $diagStack
+
 $diagTitle = New-Label 'Diagnostics & System Health' 15 $script:Palette.TextPrimary $true
 $diagStack.Children.Add($diagTitle) | Out-Null
 
@@ -1199,13 +1453,18 @@ $trimMemBtn.BorderThickness = [System.Windows.Thickness]::new(1)
 $trimMemBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $trimMemBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $trimMemBtn.Add_Click({
+    $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+    $beforeMb = [Math]::Round($proc.WorkingSet64 / 1MB, 2)
     Invoke-MemoryTrim
-    $diagDescLabel.Text = 'Memory working set trimmed. Current process memory reclaimed.'
+    $proc.Refresh()
+    $afterMb = [Math]::Round($proc.WorkingSet64 / 1MB, 2)
+    $reclaimedMb = [Math]::Round([Math]::Max(0, $beforeMb - $afterMb), 2)
+    $diagDescLabel.Text = "Memory working set trimmed from $beforeMb MB to $afterMb MB ($reclaimedMb MB reclaimed). Pages moved to standby list; Windows will page active data back on demand."
     $diagDescLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
 })
 $diagBtnRow.Children.Add($trimMemBtn) | Out-Null
 
-# ------------------------------------------------------------------------------
+
 # 3. HELP VIEW (Air Live Drive Inspired Documentation & Architecture)
 # ------------------------------------------------------------------------------
 $helpView = [System.Windows.Controls.DockPanel]::new()
@@ -1311,7 +1570,7 @@ $analyticsHeader.Children.Add($backFromAnalyticsBtn) | Out-Null
 
 $analyticsTitles = [System.Windows.Controls.StackPanel]::new()
 $analyticsTitle = New-Label 'Analytics' 22 $script:Palette.TextPrimary $true
-$analyticsSubtitle = New-Label 'Live resource measurements and mount health. Sampled only while this page is open.' 12 $script:Palette.TextSecondary
+$analyticsSubtitle = New-Label 'On-demand diagnostic dashboard. Zero background polling when idle.' 12 $script:Palette.TextSecondary
 $analyticsTitles.Children.Add($analyticsTitle) | Out-Null
 $analyticsTitles.Children.Add($analyticsSubtitle) | Out-Null
 $analyticsHeader.Children.Add($analyticsTitles) | Out-Null
@@ -1323,6 +1582,57 @@ $analyticsView.Children.Add($analyticsScroll) | Out-Null
 
 $analyticsContent = [System.Windows.Controls.StackPanel]::new()
 $analyticsScroll.Content = $analyticsContent
+
+# Action bar with Get Analytics & Refresh Analytics buttons and collection status
+$analyticsActionBar = [System.Windows.Controls.Border]::new()
+$analyticsActionBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$analyticsActionBar.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$analyticsActionBar.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsActionBar.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$analyticsActionBar.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+$analyticsActionBar.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+
+$analyticsActionStack = [System.Windows.Controls.StackPanel]::new()
+$analyticsActionBar.Child = $analyticsActionStack
+
+$analyticsBtnRow = [System.Windows.Controls.StackPanel]::new()
+$analyticsBtnRow.Orientation = 'Horizontal'
+$analyticsActionStack.Children.Add($analyticsBtnRow) | Out-Null
+
+$analyticsGetAnalyticsBtn = [System.Windows.Controls.Button]::new()
+$analyticsGetAnalyticsBtn.Content = 'Get Analytics'
+$analyticsGetAnalyticsBtn.Width = 120
+$analyticsGetAnalyticsBtn.Height = 32
+$analyticsGetAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+$analyticsGetAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+$analyticsGetAnalyticsBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$analyticsGetAnalyticsBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsGetAnalyticsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$analyticsGetAnalyticsBtn.Add_Click({ Start-AnalyticsCollection })
+$analyticsBtnRow.Children.Add($analyticsGetAnalyticsBtn) | Out-Null
+
+$analyticsRefreshAnalyticsBtn = [System.Windows.Controls.Button]::new()
+$analyticsRefreshAnalyticsBtn.Content = 'Refresh Analytics'
+$analyticsRefreshAnalyticsBtn.Width = 130
+$analyticsRefreshAnalyticsBtn.Height = 32
+$analyticsRefreshAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$analyticsRefreshAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsRefreshAnalyticsBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsRefreshAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$analyticsRefreshAnalyticsBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsRefreshAnalyticsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$analyticsRefreshAnalyticsBtn.Add_Click({ Start-AnalyticsCollection })
+$analyticsBtnRow.Children.Add($analyticsRefreshAnalyticsBtn) | Out-Null
+
+$analyticsCollectionStatus = New-Label 'Status: Ready (idle). Click Get Analytics to gather metrics.' 11 $script:Palette.TextSecondary
+$analyticsCollectionStatus.Margin = [System.Windows.Thickness]::new(0, 6, 0, 2)
+$analyticsActionStack.Children.Add($analyticsCollectionStatus) | Out-Null
+
+$analyticsCollectionErrors = New-Label '' 11 $script:Palette.Danger
+$analyticsCollectionErrors.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsActionStack.Children.Add($analyticsCollectionErrors) | Out-Null
+
+$analyticsContent.Children.Add($analyticsActionBar) | Out-Null
 
 function New-AnalyticsCard([string]$SectionTitle, [string]$AccentColor) {
     $card = [System.Windows.Controls.Border]::new()
@@ -1359,22 +1669,22 @@ function New-AnalyticsRow([System.Windows.Controls.StackPanel]$Parent, [string]$
 
 $overviewCard = New-AnalyticsCard 'Cloud accounts and mounts' '#3B82F6'
 $analyticsContent.Children.Add($overviewCard.Card) | Out-Null
-$analyticsAccounts = New-AnalyticsRow $overviewCard.Stack 'Cloud accounts: measuring...'
-$analyticsMounts = New-AnalyticsRow $overviewCard.Stack 'Active mounted drives: measuring...'
+$analyticsAccounts = New-AnalyticsRow $overviewCard.Stack 'Cloud accounts: Not yet collected.'
+$analyticsMounts = New-AnalyticsRow $overviewCard.Stack 'Active mounted drives: Not yet collected.'
 $analyticsAccounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
 $analyticsMounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#16A34A')
 
 $storageCard = New-AnalyticsCard 'Cloud storage' '#F59E0B'
 $analyticsContent.Children.Add($storageCard.Card) | Out-Null
-$analyticsStorageSummary = New-AnalyticsRow $storageCard.Stack 'Used and remaining storage: Unavailable.'
+$analyticsStorageSummary = New-AnalyticsRow $storageCard.Stack 'Storage: Not yet collected'
 $analyticsStorageSummary.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B45309')
 $analyticsStorageChart = [System.Windows.Controls.StackPanel]::new()
 $storageCard.Stack.Children.Add($analyticsStorageChart) | Out-Null
 
 $resourceCard = New-AnalyticsCard 'App resources (live)' '#14B8A6'
 $analyticsContent.Children.Add($resourceCard.Card) | Out-Null
-$analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: measuring...'
-$analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: measuring...'
+$analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: Not yet collected.'
+$analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: Not yet collected.'
 $analyticsNetwork = New-AnalyticsRow $resourceCard.Stack 'Transfer speed: Unavailable (no active transfer telemetry).'
 $analyticsAppRam.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
 $analyticsAppCpu.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
@@ -1383,6 +1693,10 @@ $analyticsNetwork.Foreground = [System.Windows.Media.BrushConverter]::new().Conv
 $script:AnalyticsCpuBaseline = @{}
 $script:AnalyticsStorageWorker = $null
 $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+$script:AnalyticsCollectionInProgress = $false
+$script:AnalyticsLastCollectionTime = $null
+$script:AnalyticsLastCollectionDurationMs = 0
+$script:AnalyticsCollectionWatchdogTimer = $null
 
 function Format-AnalyticsBytes([int64]$Bytes) {
     if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
@@ -1555,7 +1869,44 @@ function Update-AnalyticsMetrics {
         if ($appProc) { $appProc.Dispose() }
     }
 
-    if (-not $script:AnalyticsStorageWorker) { Start-AnalyticsStorageWorker }
+    # Update network transfer telemetry honestly from live VFS and streaming state
+    try {
+        $totalSpeed = 0.0
+        $totalInProgress = 0
+        $totalQueued = 0
+
+        # Check virtual drive VFS stats
+        foreach ($letter in $mountedDriveLetters) {
+            $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
+            if ($vfs.IsActive) {
+                $totalSpeed += $vfs.TransferSpeed
+                $totalInProgress += $vfs.UploadsInProgress
+                $totalQueued += $vfs.UploadsQueued
+            }
+        }
+
+        # Check active cloud transfer job if any
+        if ($script:ActiveTransferJobId) {
+            $jobSt = Get-CloudTransferStatus -JobId $script:ActiveTransferJobId
+            if ($jobSt -and ($jobSt.Status -eq 'Running' -or $jobSt.Status -eq 'Uploading to provider')) {
+                $totalSpeed += $jobSt.SmoothedSpeed
+                $totalInProgress++
+            }
+        }
+
+        if ($totalInProgress -gt 0 -or $totalQueued -gt 0) {
+            $tp = Format-TransferThroughput -BytesPerSec $totalSpeed
+            $analyticsNetwork.Text = "Transfer speed: $tp ($totalInProgress uploading, $totalQueued queued)."
+        } elseif ($totalSpeed -gt 0) {
+            $tp = Format-TransferThroughput -BytesPerSec $totalSpeed
+            $analyticsNetwork.Text = "Transfer speed: $tp (Idle / No uploads queued)."
+        } else {
+            $analyticsNetwork.Text = "Transfer speed: 0 B/s (Idle • No active background transfers)."
+        }
+    } catch {
+        $analyticsNetwork.Text = "Transfer speed: Unavailable (no active transfer telemetry)."
+    }
+
     if ($script:AnalyticsStorageWorker -and (Test-NSBackgroundOperationCompleted $script:AnalyticsStorageWorker)) {
         try {
             $completed = Complete-NSBackgroundOperation $script:AnalyticsStorageWorker
@@ -1619,24 +1970,95 @@ function Show-AnalyticsView {
     $analyticsView.Visibility = [System.Windows.Visibility]::Visible
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     Stop-LogsViewLoad
-    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
-    Start-AnalyticsSampling
 }
 
-function Stop-AnalyticsSampling {
-    $script:AnalyticsSampler.Stop()
+function Stop-AnalyticsCollection {
     Stop-AnalyticsStorageWorker
-    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+    $script:AnalyticsCollectionInProgress = $false
+    if ($script:AnalyticsCollectionWatchdogTimer) {
+        try { $script:AnalyticsCollectionWatchdogTimer.Stop() } catch { }
+        $script:AnalyticsCollectionWatchdogTimer = $null
+    }
+    if ($analyticsGetAnalyticsBtn) { $analyticsGetAnalyticsBtn.IsEnabled = $true }
+    if ($analyticsRefreshAnalyticsBtn) { $analyticsRefreshAnalyticsBtn.IsEnabled = $true }
 }
 
-function Start-AnalyticsSampling {
-    if ($script:CurrentView -ne 'Analytics' -or -not $window.IsVisible -or
-        $window.WindowState -eq [System.Windows.WindowState]::Minimized) { return }
-    $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+function Start-AnalyticsCollection {
+    if ($script:AnalyticsCollectionInProgress) { return }
+    $script:AnalyticsCollectionInProgress = $true
+    if ($analyticsGetAnalyticsBtn) { $analyticsGetAnalyticsBtn.IsEnabled = $false }
+    if ($analyticsRefreshAnalyticsBtn) { $analyticsRefreshAnalyticsBtn.IsEnabled = $false }
+    $analyticsCollectionStatus.Text = 'Status: Collecting analytics on demand...'
+    $analyticsCollectionErrors.Visibility = [System.Windows.Visibility]::Collapsed
+    $analyticsCollectionErrors.Text = ''
+
+    $collectStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
     Update-AnalyticsMetrics
-    $script:AnalyticsSampler.Stop()
-    $script:AnalyticsSampler.Start()
+    Start-AnalyticsStorageWorker
+
+    $script:AnalyticsCollectionWatchdogTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:AnalyticsCollectionWatchdogTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:AnalyticsCollectionWatchdogTimer.Add_Tick({
+        try {
+            if ($script:CurrentView -ne 'Analytics' -or -not $script:AnalyticsCollectionInProgress) {
+                Stop-AnalyticsCollection
+                return
+            }
+
+            $done = $false
+            if ($script:AnalyticsStorageWorker) {
+                if (Test-NSBackgroundOperationCompleted $script:AnalyticsStorageWorker) {
+                    try {
+                        $completed = Complete-NSBackgroundOperation $script:AnalyticsStorageWorker
+                        $script:AnalyticsStorageWorker = $null
+                        if ($completed.HadErrors) {
+                            $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider measurement failed).'
+                            $analyticsStorageChart.Children.Clear()
+                        } else {
+                            $storageResult = if ($completed.Output.Count -gt 0) { $completed.Output[-1] } else { $null }
+                            if (-not $storageResult) {
+                                $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider returned no quota data).'
+                                $analyticsStorageChart.Children.Clear()
+                            } else {
+                                $script:AnalyticsStorageRecords = @($storageResult.Records)
+                                Set-AnalyticsStorageDisplay @($storageResult.Records)
+                                if ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -gt 0) {
+                                    $analyticsStorageSummary.Text += " Some provider checks were unavailable: $($storageResult.Errors[0])"
+                                } elseif ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -eq 0) {
+                                    $analyticsStorageSummary.Text = "Used and remaining storage: Unavailable. $($storageResult.Errors[0])"
+                                }
+                            }
+                        }
+                    } catch {
+                        $script:AnalyticsStorageWorker = $null
+                        $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider measurement failed).'
+                        $analyticsStorageChart.Children.Clear()
+                    }
+                    $done = $true
+                } elseif (([DateTime]::UtcNow - $script:AnalyticsStorageLastStarted).TotalSeconds -gt 30) {
+                    Stop-AnalyticsStorageWorker
+                    $analyticsStorageSummary.Text = 'Used and remaining storage: Unavailable (provider request timed out).'
+                    $analyticsStorageChart.Children.Clear()
+                    $done = $true
+                }
+            } else {
+                $done = $true
+            }
+
+            if ($done) {
+                $collectStopwatch.Stop()
+                $script:AnalyticsLastCollectionTime = [DateTime]::UtcNow
+                $script:AnalyticsLastCollectionDurationMs = [int]$collectStopwatch.ElapsedMilliseconds
+                $analyticsCollectionStatus.Text = "Status: Collection completed in $($script:AnalyticsLastCollectionDurationMs) ms at $([DateTime]::Now.ToString('HH:mm:ss'))."
+                Stop-AnalyticsCollection
+            }
+        } catch {
+            Stop-AnalyticsCollection
+        }
+    })
+    $script:AnalyticsCollectionWatchdogTimer.Start()
 }
 
 # ------------------------------------------------------------------------------
@@ -1973,8 +2395,8 @@ function Show-LogsView {
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
-    try { $script:AnalyticsSampler.Stop() } catch { }
-    Stop-AnalyticsStorageWorker
+    $logsView.Visibility = [System.Windows.Visibility]::Visible
+    Stop-AnalyticsCollection
     $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
     $script:LogsPageOffset = 0
@@ -1988,10 +2410,10 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $p = Get-MainThemePalette $script:Settings.Theme
     $diagWin = [System.Windows.Window]::new()
     $diagWin.Title = 'NS Cloud Drive - System Diagnostics'
-    $diagWin.Width = 560
-    $diagWin.Height = 490
-    $diagWin.MinWidth = 500
-    $diagWin.MinHeight = 400
+    $diagWin.Width = 600
+    $diagWin.Height = 520
+    $diagWin.MinWidth = 520
+    $diagWin.MinHeight = 440
     $diagWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $diagWin.Owner = $Owner }
     $diagWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
@@ -2070,7 +2492,13 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
             $row.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
             $kLbl = New-Label $k 11 $p.TextSecondary
             [System.Windows.Controls.DockPanel]::SetDock($kLbl, 'Left')
-            $vLbl = New-Label ($Metrics[$k].ToString()) 11 $p.TextPrimary $true
+            $valStr = [string]$Metrics[$k]
+            $vColor = if ($valStr -like '*[FAIL]*') { '#F87171' }
+                      elseif ($valStr -like '*[WARN]*') { '#FBBF24' }
+                      elseif ($valStr -like '*[OK]*') { '#4ADE80' }
+                      elseif ($valStr -like '*[INFO]*') { '#60A5FA' }
+                      else { $p.TextPrimary }
+            $vLbl = New-Label $valStr 11 $vColor $true
             $vLbl.HorizontalAlignment = 'Right'
             $row.Children.Add($kLbl) | Out-Null
             $row.Children.Add($vLbl) | Out-Null
@@ -2086,53 +2514,127 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
         $pmMb = [Math]::Round($proc.PrivateMemorySize64 / 1MB, 2)
         $threads = $proc.Threads.Count
 
-        Add-DiagMetric 'Application Process' ([ordered]@{
-            'Process ID (PID)' = $PID
-            'Process Name' = $proc.ProcessName
+        $cpuDisplay = '0.0%'
+        try {
+            $t0 = $proc.TotalProcessorTime
+            $w0 = [DateTime]::UtcNow
+            Start-Sleep -Milliseconds 60
+            $proc.Refresh()
+            $t1 = $proc.TotalProcessorTime
+            $w1 = [DateTime]::UtcNow
+            $procMs = ($t1 - $t0).TotalMilliseconds
+            $wallMs = ($w1 - $w0).TotalMilliseconds * [Environment]::ProcessorCount
+            if ($wallMs -gt 0) {
+                $pct = [Math]::Round(($procMs / $wallMs) * 100, 1)
+                $cpuDisplay = "$pct%"
+            }
+        } catch { }
+
+        Add-DiagMetric 'Application Process Health' ([ordered]@{
+            'Process ID (PID)' = "[OK] $PID ($($proc.ProcessName))"
             'Working Set RAM' = "$wsMb MB"
             'Private Memory' = "$pmMb MB"
-            'Thread Count' = $threads
+            'Estimated CPU' = $cpuDisplay
+            'Active Threads' = $threads
             'Theme Active' = (Resolve-AppTheme $script:Settings.Theme)
         })
 
-        $winfspStatus = if (Test-WinFspInstalled) { 'Installed & Operational' } else { 'Not Detected' }
+        $engineMetrics = [ordered]@{}
+        $rcloneProcs = @(Get-Process -Name 'rclone' -ErrorAction SilentlyContinue)
+        $cpxProcs = @(Get-Process -Name 'cpx' -ErrorAction SilentlyContinue)
+        if ($rcloneProcs.Count -eq 0 -and $cpxProcs.Count -eq 0) {
+            $engineMetrics['Background Engines'] = '[INFO] No rclone or CPX processes currently active'
+        } else {
+            foreach ($rp in $rcloneProcs) {
+                $rpWs = [Math]::Round($rp.WorkingSet64 / 1MB, 1)
+                $engineMetrics["rclone Engine (PID $($rp.Id))"] = "[OK] Running ($rpWs MB RAM)"
+            }
+            foreach ($cp in $cpxProcs) {
+                $cpWs = [Math]::Round($cp.WorkingSet64 / 1MB, 1)
+                $engineMetrics["CPX Bridge (PID $($cp.Id))"] = "[OK] Running ($cpWs MB RAM)"
+            }
+        }
+        Add-DiagMetric 'Engine & Subsystem Processes' $engineMetrics
+
+        $winfspStatus = if (Test-WinFspInstalled) { '[OK] Installed & Operational' } else { '[FAIL] Not Detected' }
         $rclonePath = Find-RcloneBinary
-        $rcloneStatus = if ($rclonePath -and (Test-Path -LiteralPath $rclonePath -PathType Leaf)) { $rclonePath } else { 'Not Found' }
+        $rcloneStatus = if ($rclonePath -and (Test-Path -LiteralPath $rclonePath -PathType Leaf)) { "[OK] $rclonePath" } else { '[WARN] Not Found' }
 
         Add-DiagMetric 'Filesystem Subsystem' ([ordered]@{
             'WinFsp Driver' = $winfspStatus
-            'rclone Engine' = $rcloneStatus
+            'rclone Binary' = $rcloneStatus
             'Cache Target' = $script:CacheDirectory
             'Cache Max Quota' = "$($script:Settings.CacheMaxGigabytes) GB"
         })
+
+        try {
+            $cacheStats = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
+            $cacheMb = [Math]::Round($cacheStats.TotalSizeBytes / 1MB, 1)
+            $lockedMb = [Math]::Round($cacheStats.InUseBytes / 1MB, 1)
+            $freeGb = [Math]::Round($cacheStats.DriveFreeBytes / 1GB, 1)
+            $osNotice = if ($cacheStats.IsSystemDrive) { '[WARN] Cache on Windows OS Drive' } else { '[OK] Cache on Dedicated Volume' }
+
+            Add-DiagMetric 'Cache & Storage Health' ([ordered]@{
+                'Cache Volume' = "$($cacheStats.DriveLetter): ($freeGb GB Free Space)"
+                'Cache Volume Placement' = $osNotice
+                'Total Cached Data' = "$cacheMb MB ($($cacheStats.TotalFileCount) files)"
+                'In-Use Locked Files' = "$lockedMb MB ($($cacheStats.InUseCount) files protected)"
+            })
+        } catch { }
 
         $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
         $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
         $mountInfo = [ordered]@{}
 
         $accounts = @(Get-CloudAccounts)
-        if ($accounts) {
+        if ($accounts -and $accounts.Count -gt 0) {
             foreach ($acc in $accounts) {
                 $st = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
-                $mountInfo["Account ($($acc.DisplayName))"] = if ($st.IsMounted) { "Mounted ($($st.DriveLetter):)" } else { 'Disconnected' }
+                $providerName = if ($acc.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+                $accKey = "$providerName - $($acc.DisplayName)"
+                if ($st -and $st.IsMounted) {
+                    $mountInfo[$accKey] = "[OK] Mounted on $($st.DriveLetter):"
+                } elseif ($acc.LastError) {
+                    $mountInfo[$accKey] = "[FAIL] Error: $($acc.LastError)"
+                } else {
+                    $mountInfo[$accKey] = '[INFO] Disconnected'
+                }
             }
+        } else {
+            $mountInfo['Cloud Accounts'] = '[INFO] No configured accounts'
         }
         foreach ($providerStatus in @($gdStatus, $tbStatus)) {
             if ($providerStatus.IsMounted) {
                 $ownsDrive = @($accounts | Where-Object {
-                    ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq ([string]$providerStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+                    ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('') -eq ([string]$providerStatus.DriveLetter).TrimEnd(':').TrimEnd('')
                 }).Count -gt 0
                 if (-not $ownsDrive) {
-                    $mountInfo["Unregistered mount ($($providerStatus.DriveLetter):)"] = 'Recovery required'
+                    $mountInfo["Unregistered mount ($($providerStatus.DriveLetter):)"] = '[WARN] Recovery required'
                 }
             }
+        }
+        if ($script:StartupAutoMountError) {
+            $mountInfo['Startup Restore Alert'] = "[WARN] $script:StartupAutoMountError"
         }
         Add-DiagMetric 'Mounted Drive Allocations' $mountInfo
     }
 
     $trimBtn.Add_Click({
+        $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+        $beforeMb = [Math]::Round($proc.WorkingSet64 / 1MB, 2)
         Invoke-MemoryTrim
+        $proc.Refresh()
+        $afterMb = [Math]::Round($proc.WorkingSet64 / 1MB, 2)
+        $reclaimedMb = [Math]::Round([Math]::Max(0, $beforeMb - $afterMb), 2)
         & $populateData
+        [System.Windows.MessageBox]::Show(
+            "Working set trimmed from $beforeMb MB to $afterMb MB ($reclaimedMb MB reclaimed).`n`n" +
+            "Note: Memory trimming requests Windows to release unreferenced working pages to the standby list. " +
+            "If active operations require this data later, Windows will page it back into RAM automatically.",
+            'Working Set Memory Trimmed',
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
     })
 
     & $populateData
@@ -2435,10 +2937,59 @@ function Apply-UITheme([string]$ThemeName) {
         $lbl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
     foreach ($chk in @($optStartupChk, $optTrayChk, $optStartMinChk, $optExplorerChk, $optAutoMountChk)) {
-        $chk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        if ($chk) {
+            $chk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
     }
-    foreach ($rb in @($rbThemePureBlack, $rbThemeTranslucent, $rbThemePureWhite)) {
-        $rb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($rb in @($rbThemePureBlack, $rbThemePureWhite)) {
+        if ($rb) {
+            $rb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
+    }
+    if ($rbThemeTranslucent) {
+        $rbThemeTranslucent.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
+
+    if ($script:OptionsInfoIcons) {
+        foreach ($ic in $script:OptionsInfoIcons) {
+            $ic.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $ic.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            if ($ic.Child -is [System.Windows.Controls.TextBlock]) {
+                $ic.Child.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+            }
+            if ($ic.ToolTip -is [System.Windows.Controls.ToolTip]) {
+                $ic.ToolTip.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+                $ic.ToolTip.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+                if ($ic.ToolTip.Content -is [System.Windows.Controls.StackPanel]) {
+                    foreach ($child in $ic.ToolTip.Content.Children) {
+                        if ($child -is [System.Windows.Controls.TextBlock]) {
+                            if ($child.FontWeight -eq [System.Windows.FontWeights]::Bold) {
+                                $child.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+                            } else {
+                                $child.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ($script:OptionsToolTips) {
+        foreach ($tt in $script:OptionsToolTips) {
+            $tt.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $tt.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+            if ($tt.Content -is [System.Windows.Controls.StackPanel]) {
+                foreach ($child in $tt.Content.Children) {
+                    if ($child -is [System.Windows.Controls.TextBlock]) {
+                        if ($child.FontWeight -eq [System.Windows.FontWeights]::Bold) {
+                            $child.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+                        } else {
+                            $child.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+                        }
+                    }
+                }
+            }
+        }
     }
     $themeDesc.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     $cachePathLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
@@ -2583,9 +3134,8 @@ function Show-DisksView {
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
-    try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-AnalyticsCollection
     Stop-LogsViewLoad
-    Stop-AnalyticsStorageWorker
     $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 }
@@ -2609,9 +3159,8 @@ function Show-OptionsView {
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
-    try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-AnalyticsCollection
     Stop-LogsViewLoad
-    Stop-AnalyticsStorageWorker
     $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 
@@ -2625,27 +3174,11 @@ function Show-HelpView {
     $helpView.Visibility = [System.Windows.Visibility]::Visible
     $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
-    try { $script:AnalyticsSampler.Stop() } catch { }
+    Stop-AnalyticsCollection
     Stop-LogsViewLoad
-    Stop-AnalyticsStorageWorker
     $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
 }
-
-# 5-second sampler that lives only while the Analytics page is visible.
-# Outside that page the timer is fully stopped, so the idle application has no
-# additional CPU or memory cost from the Analytics feature.
-$script:AnalyticsSampler = [System.Windows.Threading.DispatcherTimer]::new()
-$script:AnalyticsSampler.Interval = [TimeSpan]::FromSeconds(5)
-$script:AnalyticsSampler.Add_Tick({
-    try {
-        if ($script:CurrentView -ne 'Analytics') {
-            $script:AnalyticsSampler.Stop()
-            return
-        }
-        Update-AnalyticsMetrics
-    } catch { }
-})
 
 $navDisksItem.Button.Add_Click({ Show-DisksView })
 $navOptionsItem.Button.Add_Click({ Show-OptionsView })
@@ -3193,8 +3726,13 @@ function Complete-AvailableStartupWorkers {
         try {
             $completed = Complete-NSBackgroundOperation $script:StartupCacheRecoveryWorker
             if ($completed.HadErrors) {
-                $message = if ($completed.Errors.Count -gt 0) {
-                    [string]$completed.Errors[0].Exception.Message
+                $firstErr = if ($completed.Errors.Count -gt 0) { $completed.Errors[0] } else { $null }
+                $message = if ($firstErr -is [System.Management.Automation.ErrorRecord] -and $firstErr.Exception) {
+                    $firstErr.Exception.Message
+                } elseif ($firstErr -is [System.Exception]) {
+                    $firstErr.Message
+                } elseif ($firstErr) {
+                    [string]$firstErr
                 } else {
                     'Startup cache recovery failed.'
                 }
@@ -3294,7 +3832,8 @@ function Complete-AvailableStartupWorkers {
                     Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter $resultDriveLetter
                     $selectedAccount = if ($resultState -eq 'Mounted') { Get-CloudAccount -AccountId $key } else { $null }
                     if ($resultState -eq 'Mounted' -and $script:ManualMountRequests.Contains($key) -and
-                        $selectedAccount -and $selectedAccount.OpenExplorerOnMount -and $resultDriveLetter) {
+                        $script:Settings.OpenExplorerOnMount -and
+                        ($selectedAccount -eq $null -or $selectedAccount.OpenExplorerOnMount) -and $resultDriveLetter) {
                         Start-ExplorerWindow ($resultDriveLetter + ':\')
                     }
                 }
@@ -3381,6 +3920,25 @@ function Write-StartupAutoMountProgressLog {
 function Get-StartupRestoreDisplay([string]$ProviderId, [string]$DriveLetter, [string]$AccountId = '') {
     if (-not ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker)) { return $null }
     $progress = $script:StartupAutoMountProgress
+    if ($AccountId -and $progress.AccountStages -and $progress.AccountStages.ContainsKey($AccountId)) {
+        $st = $progress.AccountStages[$AccountId]
+        $stState = [string]$st.State
+        $stStage = [string]$st.Stage
+        $stOrigin = if ($st.StageStartedAt) { [DateTime]$st.StageStartedAt } else { [DateTime]::UtcNow }
+        $elapsedSec = [Math]::Max(0, [int]([DateTime]::UtcNow - $stOrigin).TotalSeconds)
+        switch ($stState) {
+            'Queued' { return 'Queued' }
+            'Checking' { return "Checking existing mount (${elapsedSec}s)" }
+            'Mounting' { return "$stStage (${elapsedSec}s)" }
+            'Mounted' { return 'Connected' }
+            'Error' { return "Failed: $([string]$st.Error)" }
+            'AuthRequired' { return 'Sign-in required' }
+            default { return "$stStage (${elapsedSec}s)" }
+        }
+    }
+    if ($AccountId -and $script:StartupAutoMountPending) {
+        return 'Waiting for startup restoration'
+    }
     $activeProvider = [string]$progress.ProviderId
     $activeDrive = [string]$progress.DriveLetter
     $activeAccount = [string]$progress.AccountId
@@ -3879,6 +4437,57 @@ function Update-AllUIState {
             ResponseMs = if ($storageRecord.Count -gt 0) { [int]$storageRecord[0].ResponseMilliseconds } else { -1 }
         })
     }
+    # Update Drives Summary Banner
+    if ($drivesSummaryBanner -and $allAccounts) {
+        $totalAccountsCount = $allAccounts.Count
+        $mountedAccountsCount = @($allAccounts | Where-Object {
+            $st = $accountUiStatuses[[string]$_.Id]
+            $st -and $st.IsMounted
+        }).Count
+        $errorAccountsCount = @($allAccounts | Where-Object {
+            $script:AccountMountStates.ContainsKey([string]$_.Id) -and $script:AccountMountStates[[string]$_.Id].State -eq 'Error'
+        }).Count
+
+        $bannerFill = if ($script:GlassState.Active -and $script:Palette.Name -eq 'Translucent') { $script:Palette.CardGlassBg } else { $script:Palette.CardBg }
+        $drivesSummaryBanner.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($bannerFill)
+        $drivesSummaryBanner.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+
+        if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker) {
+            $bannerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $bannerTitle.Text = "$mountedAccountsCount of $totalAccountsCount drives connected"
+            $bannerSubtitle.Text = "Restoring cloud drives at startup... ($($script:StartupAutoMountProgress.Stage))"
+        } elseif ($totalAccountsCount -gt 0) {
+            if ($mountedAccountsCount -eq $totalAccountsCount) {
+                $bannerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillMounted)
+                $bannerTitle.Text = "All $totalAccountsCount drives connected"
+                $bannerSubtitle.Text = "All virtual cloud drives are active in Windows File Explorer."
+            } else {
+                $bannerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($(if ($errorAccountsCount -gt 0) { $script:Palette.Danger } else { $script:Palette.PillWarning }))
+                $bannerTitle.Text = "$mountedAccountsCount of $totalAccountsCount drives connected"
+                $bannerSubtitle.Text = if ($errorAccountsCount -gt 0) { "$errorAccountsCount drive(s) encountered an error. Click Retry on the card." } else { "$($totalAccountsCount - $mountedAccountsCount) drive(s) ready to connect." }
+            }
+        } else {
+            $bannerIcon.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+            $bannerTitle.Text = "No cloud drives connected"
+            $bannerSubtitle.Text = "Click '+ Add Cloud Disk' to mount Google Drive or TeraBox."
+        }
+
+        $bannerChipsStack.Children.Clear()
+        foreach ($acc in $allAccounts) {
+            $st = $accountUiStatuses[[string]$acc.Id]
+            $chipBorder = [System.Windows.Controls.Border]::new()
+            $chipBorder.CornerRadius = [System.Windows.CornerRadius]::new(4)
+            $chipBorder.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+            $chipBorder.Margin = [System.Windows.Thickness]::new(3, 0, 0, 0)
+            $chipColor = if ($st -and $st.IsMounted) { $script:Palette.PillMounted } elseif ($script:AccountMountStates.ContainsKey([string]$acc.Id) -and $script:AccountMountStates[[string]$acc.Id].State -eq 'Error') { $script:Palette.Danger } else { $script:Palette.TextMuted }
+            $chipBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($chipColor)
+            $chipBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+            $chipLabel = New-Label ("$($acc.DriveLetter):") 10 $chipColor $true
+            $chipBorder.Child = $chipLabel
+            $bannerChipsStack.Children.Add($chipBorder) | Out-Null
+        }
+    }
+
     $accountCardsSignature = $script:Palette.Name + '|' + (ConvertTo-Json -InputObject @($cardSignatureItems.ToArray()) -Depth 4 -Compress)
     $refreshAccountCards = $accountCardsSignature -ne $script:AccountCardsSignature
     if ($refreshAccountCards) {
@@ -3950,12 +4559,37 @@ function Update-AllUIState {
 
             $aStatus = Get-CachedUiDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId -DriveLetter $acc.DriveLetter
             $aMountState = if ($aStatus.MountState) { $aStatus.MountState } elseif ($script:AccountMountStates.ContainsKey([string]$acc.Id)) { $script:AccountMountStates[[string]$acc.Id] } else { $null }
-            if ($script:StartupAutoMountWorker -and $script:StartupAutoMountProgress.AccountId -eq [string]$acc.Id) {
+            if ($script:StartupAutoMountPending -and -not $aStatus.IsMounted -and [bool]$acc.AutoMount) {
                 $aMountState = [ordered]@{
-                    State = 'Mounting'
-                    Stage = [string]$script:StartupAutoMountProgress.Stage
-                    StartedAt = if ($script:StartupAutoMountProgress.StartedAt) { [DateTime]$script:StartupAutoMountProgress.StartedAt } else { [DateTime]::UtcNow }
+                    State = 'Waiting'
+                    Stage = 'Waiting for startup restoration'
+                    StartedAt = [DateTime]::UtcNow
                     Error = $null
+                }
+            } elseif ($script:StartupAutoMountWorker -and [bool]$acc.AutoMount -and -not $aStatus.IsMounted) {
+                $prog = $script:StartupAutoMountProgress
+                if ($prog.AccountStages -and $prog.AccountStages.ContainsKey([string]$acc.Id)) {
+                    $st = $prog.AccountStages[[string]$acc.Id]
+                    $aMountState = [ordered]@{
+                        State = [string]$st.State
+                        Stage = [string]$st.Stage
+                        StartedAt = if ($st.StageStartedAt) { [DateTime]$st.StageStartedAt } else { [DateTime]::UtcNow }
+                        Error = [string]$st.Error
+                    }
+                } elseif ($prog.AccountId -eq [string]$acc.Id) {
+                    $aMountState = [ordered]@{
+                        State = 'Mounting'
+                        Stage = [string]$prog.Stage
+                        StartedAt = if ($prog.StartedAt) { [DateTime]$prog.StartedAt } else { [DateTime]::UtcNow }
+                        Error = $null
+                    }
+                } else {
+                    $aMountState = [ordered]@{
+                        State = 'Queued'
+                        Stage = 'Queued'
+                        StartedAt = [DateTime]::UtcNow
+                        Error = $null
+                    }
                 }
             }
 
@@ -3978,7 +4612,7 @@ function Update-AllUIState {
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Danger)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
             } else {
-                $aBtn.Content = if ($aMountState -and $aMountState.State -eq 'Mounting') { 'Mounting...' } elseif ($aMountState -and $aMountState.State -in @('Error', 'AuthRequired')) { 'Retry' } else { 'Connect' }
+                $aBtn.Content = if ($aMountState -and $aMountState.State -in @('Mounting', 'Checking')) { 'Mounting...' } elseif ($aMountState -and $aMountState.State -eq 'Queued') { 'Queued' } elseif ($aMountState -and $aMountState.State -eq 'Waiting') { 'Waiting...' } elseif ($aMountState -and $aMountState.State -in @('Error', 'AuthRequired')) { 'Retry' } else { 'Connect' }
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
             }
@@ -3998,7 +4632,7 @@ function Update-AllUIState {
                 Update-AllUIState
             })
             $aActionRow.Children.Add($aBtn) | Out-Null
-            $aBtn.IsEnabled = -not ($aMountState -and $aMountState.State -in @('Mounting', 'Disconnecting'))
+            $aBtn.IsEnabled = -not ($aMountState -and $aMountState.State -in @('Mounting', 'Disconnecting', 'Checking', 'Queued', 'Waiting'))
 
             $aInLabel = New-Label 'in' 12 $p.TextSecondary
             $aInLabel.VerticalAlignment = 'Center'
@@ -4116,8 +4750,39 @@ function Update-AllUIState {
             # running rclone process's command line, so '(read-only)' reflects
             # what actually applies to this drive, not just the saved setting.
             $roSuffix = if ($aStatus.IsReadOnly) { ' (read-only)' } else { '' }
-            $pillText = if ($aMountState -and $aMountState.State -eq 'Disconnecting') { [string][char]0x25CF + ' Disconnecting (' + $mountElapsed + 's)' } elseif ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':' + $roSuffix + ')' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
-            $pillColor = if ($aMountState -and $aMountState.State -eq 'Disconnecting') { $p.PillWarning } elseif ($aStatus.IsMounted) { $p.PillMounted } elseif ($aMountState -and $aMountState.State -eq 'Error') { $p.Danger } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { $p.PillWarning } else { $p.PillConnected }
+            $pillText = if ($aMountState -and $aMountState.State -eq 'Disconnecting') {
+                [string][char]0x25CF + ' Disconnecting (' + $mountElapsed + 's)'
+            } elseif ($aStatus.IsMounted) {
+                [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':' + $roSuffix + ')'
+            } elseif ($aMountState -and $aMountState.State -eq 'Waiting') {
+                [string][char]0x25CF + ' Waiting for startup restoration'
+            } elseif ($aMountState -and $aMountState.State -eq 'Queued') {
+                [string][char]0x25CF + ' Queued'
+            } elseif ($aMountState -and $aMountState.State -eq 'Checking') {
+                [string][char]0x25CF + ' Checking existing mount (' + $mountElapsed + 's)'
+            } elseif ($aMountState -and $aMountState.State -eq 'Mounting') {
+                [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)'
+            } elseif ($aMountState -and $aMountState.State -eq 'Error') {
+                $errText = if ($aMountState.Error) { [string]$aMountState.Error } else { 'Mount failed' }
+                [string][char]0x25CF + ' Failed: ' + $errText
+            } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') {
+                [string][char]0x25CF + ' Sign-in required'
+            } else {
+                [string][char]0x25CF + ' Ready to connect'
+            }
+            $pillColor = if ($aMountState -and $aMountState.State -eq 'Disconnecting') {
+                $p.PillWarning
+            } elseif ($aStatus.IsMounted) {
+                $p.PillMounted
+            } elseif ($aMountState -and $aMountState.State -eq 'Error') {
+                $p.Danger
+            } elseif ($aMountState -and $aMountState.State -in @('Mounting', 'Checking', 'Queued')) {
+                $p.PillWarning
+            } elseif ($aMountState -and $aMountState.State -eq 'Waiting') {
+                $p.TextMuted
+            } else {
+                $p.PillConnected
+            }
             $aStatusLbl = New-Label $pillText 11 $pillColor $true
             $aStatusLbl.HorizontalAlignment = 'Right'
             $aRightStack.Children.Add($aStatusLbl) | Out-Null
@@ -4152,9 +4817,40 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
         $failed = 0
         $errMsgs = @()
 
+        # Resolve associated cloud account for pre-flight verification
+        $matchingAccount = $null
+        try {
+            $accounts = Get-CloudAccounts
+            foreach ($a in $accounts) {
+                if ($a.DriveLetter -and $a.DriveLetter.ToUpperInvariant().TrimEnd(':') -eq $cleanLetter) {
+                    $matchingAccount = $a
+                    break
+                }
+            }
+        } catch { }
+        if (-not $matchingAccount) {
+            if ($cleanLetter -eq $script:GDriveLetter) {
+                $matchingAccount = @{ ProviderId = 'gdrive'; DisplayName = 'Google Drive'; Id = '' }
+            } elseif ($cleanLetter -eq $script:TeraBoxLetter) {
+                $matchingAccount = @{ ProviderId = 'terabox'; DisplayName = 'TeraBox'; Id = '' }
+            }
+        }
+
         foreach ($srcFile in $dlg.FileNames) {
             try {
-                $fName = [System.IO.Path]::GetFileName($srcFile)
+                $fi = [System.IO.FileInfo]::new($srcFile)
+                $fName = $fi.Name
+                $fSize = $fi.Length
+
+                if ($matchingAccount) {
+                    $preflight = Test-ProviderUploadPreflight -Account $matchingAccount -FileSizeBytes $fSize -FileName $fName
+                    if (-not $preflight.Allowed) {
+                        $failed++
+                        $errMsgs += "$fName`: $($preflight.Reason)"
+                        continue
+                    }
+                }
+
                 $destPath = Join-Path $driveRoot $fName
                 [System.IO.File]::Copy($srcFile, $destPath, $true)
                 $uploaded++
@@ -4164,11 +4860,18 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
             }
         }
 
-        if ($failed -eq 0) {
-            [System.Windows.MessageBox]::Show('Successfully uploaded ' + $uploaded + ' file(s) to ' + $cleanLetter + ': (' + $driveRoot + ').', 'Upload Complete', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            $msg = "Uploaded: $uploaded`nFailed: $failed`n`nDetails:`n" + ($errMsgs -join "`n")
+        if ($failed -eq 0 -and $uploaded -gt 0) {
+            $msg = "Staged $uploaded file(s) into local drive cache ($driveRoot).`n`n" +
+                   "The file(s) are cached locally and are being uploaded to the cloud in the background.`n`n" +
+                   "Status: Locally cached -> Uploading to provider.`n" +
+                   "You can monitor live progress on the Analytics and Disks pages."
+            [System.Windows.MessageBox]::Show($msg, 'Files Staged for Cloud Upload', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } elseif ($uploaded -gt 0 -and $failed -gt 0) {
+            $msg = "Staged: $uploaded file(s) to cache`nRejected / Failed: $failed file(s)`n`nDetails:`n" + ($errMsgs -join "`n")
             [System.Windows.MessageBox]::Show($msg, 'Upload Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        } else {
+            $msg = "Upload rejected for $failed file(s):`n`n" + ($errMsgs -join "`n`n")
+            [System.Windows.MessageBox]::Show($msg, 'Upload Prohibited by Plan Limits', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
         }
     }
 }
@@ -4328,7 +5031,10 @@ $menuOpen.Font = [System.Drawing.Font]::new($trayMenu.Font, [System.Drawing.Font
 $menuOpen.Add_Click({
     $window.Show()
     $window.WindowState = [System.Windows.WindowState]::Normal
+    $window.Topmost = $true
+    $window.Topmost = $false
     $window.Activate() | Out-Null
+    $window.Focus() | Out-Null
     Update-AllUIState
 })
 
@@ -4376,7 +5082,10 @@ $notifyIcon.ContextMenuStrip = $trayMenu
 $notifyIcon.Add_DoubleClick({
     $window.Show()
     $window.WindowState = [System.Windows.WindowState]::Normal
+    $window.Topmost = $true
+    $window.Topmost = $false
     $window.Activate() | Out-Null
+    $window.Focus() | Out-Null
     try {
         $wshell = New-Object -ComObject WScript.Shell
         $wshell.AppActivate('NS Cloud Drive') | Out-Null
@@ -4389,7 +5098,7 @@ $window.Add_Closing({
     if (-not $script:IsExiting) {
         if ($script:Settings.MinimizeToTrayOnClose) {
             $eventArgs.Cancel = $true
-            Stop-AnalyticsSampling
+            Stop-AnalyticsCollection
             $window.Hide()
             $notifyIcon.ShowBalloonTip(2000, 'NS Cloud Drive', 'Running in background. Double-click tray icon to open.', [System.Windows.Forms.ToolTipIcon]::Info)
         } else {
@@ -4414,16 +5123,12 @@ $window.Add_Closing({
 
 $window.Add_IsVisibleChanged({
     if (-not $window.IsVisible) {
-        Stop-AnalyticsSampling
-    } else {
-        Start-AnalyticsSampling
+        Stop-AnalyticsCollection
     }
 })
 $window.Add_StateChanged({
     if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) {
-        Stop-AnalyticsSampling
-    } else {
-        Start-AnalyticsSampling
+        Stop-AnalyticsCollection
     }
 })
 
@@ -4698,6 +5403,14 @@ function Invoke-AutoReconnectWatchdog {
             . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
             . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
 
+            function Get-VerifiedRclonePath {
+                $r = Find-RcloneBinary
+                if ($r -and (Test-Path -LiteralPath $r -PathType Leaf)) {
+                    return $r
+                }
+                return $null
+            }
+
             $now = [DateTime]::UtcNow
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
@@ -4804,6 +5517,7 @@ function Start-StartupAutoMountTimer {
     $script:StartupAutoMountProgress.ProviderId = ''
     $script:StartupAutoMountProgress.DriveLetter = ''
     $script:StartupAutoMountProgress.AccountId = ''
+    $script:StartupAutoMountProgress.AccountStages = [hashtable]::Synchronized(@{})
     $script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow
     $script:StartupAutoMountProgress.StageStartedAt = $script:StartupAutoMountProgress.StartedAt
     $script:StartupAutoMountPending = $true
@@ -4874,11 +5588,29 @@ function Invoke-StartupAutoMount {
         Set-StartupRestoreProgress -Progress $progress -Stage 'Checking saved mount state'
 
         if ($accounts.Count -gt 0) {
+            foreach ($initAcc in $accounts) {
+                if ($initAcc.AutoMount) {
+                    $progress.AccountStages[[string]$initAcc.Id] = [hashtable]::Synchronized(@{
+                        State = 'Queued'
+                        Stage = 'Queued'
+                        StartedAt = [DateTime]::UtcNow
+                        StageStartedAt = [DateTime]::UtcNow
+                        Error = $null
+                    })
+                }
+            }
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
                 try {
                     $accountCacheDirectory = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { $cacheDirectory }
                     $accountCacheMaxGigabytes = if ([int]$account.CacheMaxGigabytes -gt 0) { [int]$account.CacheMaxGigabytes } else { [int]$settings.CacheMaxGigabytes }
+                    $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                        State = 'Checking'
+                        Stage = 'Checking existing mount'
+                        StartedAt = [DateTime]::UtcNow
+                        StageStartedAt = [DateTime]::UtcNow
+                        Error = $null
+                    })
                     Set-StartupRestoreProgress -Progress $progress -Stage "Checking existing $($account.DriveLetter): mount" -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.ProcessRunning) {
@@ -4892,31 +5624,87 @@ function Invoke-StartupAutoMount {
                                     Error = "The existing mount process and drive were retained; the root check timed out: $($health.Error)"
                                     DriveLetter = [string]$account.DriveLetter
                                 })
+                                $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                                    State = 'Mounted'
+                                    Stage = 'Connected'
+                                    StartedAt = [DateTime]::UtcNow
+                                    StageStartedAt = [DateTime]::UtcNow
+                                    Error = $null
+                                })
                                 continue
                             }
                             throw "Existing mount is not responsive: $($health.Error)"
                         }
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounted'
+                            Stage = 'Connected'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                         continue
                     }
 
                     if ($account.ProviderId -eq 'gdrive') {
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounting'
+                            Stage = 'Connecting or starting mount'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         Set-StartupRestoreProgress -Progress $progress -Stage 'Validating Google Drive session' -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounting'
+                            Stage = 'Verifying mount'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounted'
+                            Stage = 'Connected'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounting'
+                            Stage = 'Connecting or starting mount'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         Set-StartupRestoreProgress -Progress $progress -Stage 'Validating TeraBox session' -ProviderId 'terabox' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         $environment = Get-TeraBoxRcloneEnvironment -AccountId $account.Id
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounting'
+                            Stage = 'Verifying mount'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): TeraBox mount (up to 90s)" -ProviderId 'terabox' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
+                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                            State = 'Mounted'
+                            Stage = 'Connected'
+                            StartedAt = [DateTime]::UtcNow
+                            StageStartedAt = [DateTime]::UtcNow
+                            Error = $null
+                        })
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     }
                 } catch {
@@ -4930,6 +5718,13 @@ function Invoke-StartupAutoMount {
                     # the user signs in), and guarantees no false 'Mounted'
                     # result can ever be recorded from a failed launch.
                     $restoreState = if ($restoreError -match 'No Google Drive tokens|No valid TeraBox session|No local TeraBox session') { 'AuthRequired' } else { 'Error' }
+                    $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                        State = $restoreState
+                        Stage = 'Failed'
+                        StartedAt = [DateTime]::UtcNow
+                        StageStartedAt = [DateTime]::UtcNow
+                        Error = $restoreError
+                    })
                     $results.Add([pscustomobject]@{
                         AccountId = $account.Id
                         State = $restoreState
@@ -5010,14 +5805,11 @@ function Invoke-StartupAutoMount {
     }
 }
 
-$window.Add_Loaded({
-    if (-not $Minimized) {
-        $window.Activate() | Out-Null
-        try {
-            $wshell = New-Object -ComObject WScript.Shell
-            $wshell.AppActivate('NS Cloud Drive') | Out-Null
-        } catch { }
-    }
+$script:StartupSequenceStarted = $false
+function Start-ApplicationStartupSequence {
+    if ($script:StartupSequenceStarted) { return }
+    $script:StartupSequenceStarted = $true
+
     Invoke-MemoryTrim
     if ($script:Settings.AutoMountDrives) {
         $script:StartupAutoMountPending = $true
@@ -5026,11 +5818,20 @@ $window.Add_Loaded({
     try { Start-StartupCacheRecoveryWorker } catch { }
     Update-AllUIState
 
-    # Keep the timer rooted in script scope: Dispatcher callbacks run after this Loaded
-    # handler returns, so a handler-local timer variable is unavailable under StrictMode.
     if ($script:Settings.AutoMountDrives) {
         Start-StartupAutoMountTimer
     }
+}
+
+$window.Add_Loaded({
+    if (-not $Minimized) {
+        $window.Activate() | Out-Null
+        try {
+            $wshell = New-Object -ComObject WScript.Shell
+            $wshell.AppActivate('NS Cloud Drive') | Out-Null
+        } catch { }
+    }
+    Start-ApplicationStartupSequence
 })
 
 # ==============================================================================
@@ -5048,8 +5849,15 @@ $timer.Add_Tick({
         $script:StartupAutoMountTimer.Stop()
         $script:StartupAutoMountTimer = $null
         $script:StartupAutoMountPending = $false
-        $script:StartupAutoMountError = 'Startup restoration could not be scheduled by the UI dispatcher within 15 seconds. Use Refresh to retry.'
-        $script:LastProviderStatusCheck = [DateTime]::MinValue
+        try {
+            $script:StartupAutoMountError = $null
+            Invoke-StartupAutoMount
+        } catch {
+            $script:StartupAutoMountError = Format-SanitizedDiagnosticMessage $_.Exception.Message
+            $script:LastProviderStatusCheck = [DateTime]::MinValue
+        } finally {
+            Update-AllUIState
+        }
     }
 
     if ($script:RestoreEvent) {
@@ -5057,7 +5865,10 @@ $timer.Add_Tick({
             if ($script:RestoreEvent.WaitOne(0)) {
                 $window.Show()
                 $window.WindowState = [System.Windows.WindowState]::Normal
+                $window.Topmost = $true
+                $window.Topmost = $false
                 $window.Activate() | Out-Null
+                $window.Focus() | Out-Null
                 try {
                     $wshell = New-Object -ComObject WScript.Shell
                     $wshell.AppActivate('NS Cloud Drive') | Out-Null
@@ -5075,7 +5886,8 @@ $timer.Add_Tick({
             $script:LastFullUpdate = [DateTime]::UtcNow
         }
     } else {
-        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge 30) {
+        $hiddenInterval = if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker) { 1 } else { 30 }
+        if (([DateTime]::UtcNow - $script:LastFullUpdate).TotalSeconds -ge $hiddenInterval) {
             Update-AllUIState
             $script:LastFullUpdate = [DateTime]::UtcNow
             Invoke-MemoryTrim
@@ -5113,8 +5925,14 @@ if ($MyInvocation.InvocationName -ne '.') {
         [System.Diagnostics.Debug]::WriteLine("NSCloudDrive Dispatcher Exception: $msg")
         $e.Handled = $true
     })
+    $app.MainWindow = $window
+    $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
     if ($Minimized) {
         $window.Hide()
+        Start-ApplicationStartupSequence
+        try {
+            $notifyIcon.ShowBalloonTip(3000, 'NS Cloud Drive', 'NS Cloud Drive started in the background. Cloud drives are connecting.', [System.Windows.Forms.ToolTipIcon]::Info)
+        } catch { }
         $app.Run()
     } else {
         $window.Show()
