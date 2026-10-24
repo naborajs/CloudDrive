@@ -54,6 +54,17 @@ New-Item -ItemType Directory -Path $globalSandboxDir | Out-Null
 $env:LOCALAPPDATA = $globalSandboxDir
 
 try {
+    $aclFailureReported = $false
+    try {
+        Set-StrictCredentialAcl -Path (Join-Path $globalSandboxDir 'missing-credential-path')
+    } catch {
+        $aclFailureReported = $_.Exception.Message -match 'Unable to restrict permissions on the Google credential path'
+    }
+    if (-not $aclFailureReported) {
+        throw 'Google credential ACL failures must be reported rather than silently ignored'
+    }
+    Write-Output '  [PASS] Credential ACL failures are reported explicitly'
+
     # 1. Test metadata
     $info = Get-GoogleDriveProviderInfo
     if ($info.Id -ne 'gdrive') { throw "Expected provider ID 'gdrive', found $($info.Id)" }
@@ -120,6 +131,18 @@ try {
         obtained_at = [DateTime]::UtcNow.ToString('o')
     }
     Save-GoogleDriveTokens -TokenData $testTokens
+    $googleCredentialPath = Get-GoogleCredentialFilePath
+    $googleCredentialAcl = [System.IO.File]::GetAccessControl($googleCredentialPath)
+    $googleCredentialRules = @($googleCredentialAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    $expectedGoogleSids = @(
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+        'S-1-5-18'
+    )
+    if (-not $googleCredentialAcl.AreAccessRulesProtected -or
+        @($googleCredentialRules | Where-Object { $_.IdentityReference.Value -notin $expectedGoogleSids -or $_.AccessControlType -ne 'Allow' }).Count -gt 0 -or
+        $googleCredentialRules.Count -ne 2) {
+        throw 'Google credential file ACL must be protected and allow only the current user and SYSTEM.'
+    }
     $loaded = Get-GoogleDriveStoredTokens
     if (-not $loaded) { throw 'Failed to load saved tokens' }
     if ($loaded.access_token -ne $testTokens.access_token) { throw 'Access token mismatch' }
