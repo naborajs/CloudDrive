@@ -49,7 +49,7 @@ function Complete-NSBackgroundOperation([Parameter(Mandatory = $true)][object]$O
             $output = $Operation.PowerShell.EndInvoke($Operation.Handle)
         } catch {
             $output = @()
-            $completionError = $_.Exception
+            $completionError = $_
         }
         $errors = @($Operation.PowerShell.Streams.Error)
         if ($completionError) { $errors += $completionError }
