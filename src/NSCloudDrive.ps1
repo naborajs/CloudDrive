@@ -383,6 +383,9 @@ $navTopStack.Children.Add($navDisksItem.Button) | Out-Null
 $navOptionsItem = New-NavButton ([string][char]0x2699) 'Options' $false
 $navTopStack.Children.Add($navOptionsItem.Button) | Out-Null
 
+$navAnalyticsItem = New-NavButton ([string]([char]0x2581 + '' + [char]0x2584 + '' + [char]0x2588)) 'Analytics' $false
+$navTopStack.Children.Add($navAnalyticsItem.Button) | Out-Null
+
 $navHelpItem = New-NavButton '?' 'Help' $false
 [System.Windows.Controls.DockPanel]::SetDock($navHelpItem.Button, 'Bottom')
 $navHelpItem.Button.Margin = [System.Windows.Thickness]::new(4, 0, 4, 12)
@@ -1225,6 +1228,252 @@ $helpContent.Children.Add($helpPerfCard) | Out-Null
 
 $backFromHelpBtn.Add_Click({ Show-DisksView })
 
+# ------------------------------------------------------------------------------
+# 4. ANALYTICS VIEW (real measurements only, bounded sampling, no idle work)
+# ------------------------------------------------------------------------------
+$analyticsView = [System.Windows.Controls.DockPanel]::new()
+$analyticsView.Margin = [System.Windows.Thickness]::new(24, 20, 24, 20)
+$analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+$mainArea.Children.Add($analyticsView) | Out-Null
+
+$analyticsHeader = [System.Windows.Controls.DockPanel]::new()
+[System.Windows.Controls.DockPanel]::SetDock($analyticsHeader, 'Top')
+$analyticsHeader.Margin = [System.Windows.Thickness]::new(0, 0, 0, 20)
+$analyticsView.Children.Add($analyticsHeader) | Out-Null
+
+$backFromAnalyticsBtn = [System.Windows.Controls.Button]::new()
+$backFromAnalyticsBtn.Content = '< Back to Disks'
+$backFromAnalyticsBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$backFromAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$backFromAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$backFromAnalyticsBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$backFromAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$backFromAnalyticsBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+[System.Windows.Controls.DockPanel]::SetDock($backFromAnalyticsBtn, 'Right')
+$analyticsHeader.Children.Add($backFromAnalyticsBtn) | Out-Null
+
+$analyticsTitles = [System.Windows.Controls.StackPanel]::new()
+$analyticsTitle = New-Label 'Analytics' 22 $script:Palette.TextPrimary $true
+$analyticsSubtitle = New-Label 'Live resource measurements and mount health. Sampled only while this page is open.' 12 $script:Palette.TextSecondary
+$analyticsTitles.Children.Add($analyticsTitle) | Out-Null
+$analyticsTitles.Children.Add($analyticsSubtitle) | Out-Null
+$analyticsHeader.Children.Add($analyticsTitles) | Out-Null
+
+$analyticsScroll = [System.Windows.Controls.ScrollViewer]::new()
+$analyticsScroll.VerticalScrollBarVisibility = 'Auto'
+$analyticsScroll.HorizontalScrollBarVisibility = 'Disabled'
+$analyticsView.Children.Add($analyticsScroll) | Out-Null
+
+$analyticsContent = [System.Windows.Controls.StackPanel]::new()
+$analyticsScroll.Content = $analyticsContent
+
+function New-AnalyticsCard([string]$SectionTitle) {
+    $card = [System.Windows.Controls.Border]::new()
+    $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+    $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+    $card.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $card.Padding = [System.Windows.Thickness]::new(18)
+    $card.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+
+    $st = [System.Windows.Controls.StackPanel]::new()
+    $card.Child = $st
+
+    $t = New-Label $SectionTitle 15 $script:Palette.TextPrimary $true
+    $t.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+    $st.Children.Add($t) | Out-Null
+
+    return @{ Card = $card; Stack = $st; Title = $t }
+}
+
+function New-AnalyticsRow([System.Windows.Controls.StackPanel]$Parent, [string]$LabelText) {
+    $rowLabel = New-Label $LabelText 12 $script:Palette.TextSecondary
+    $rowLabel.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+    $Parent.Children.Add($rowLabel) | Out-Null
+    return $rowLabel
+}
+
+$animMemCard = New-AnalyticsCard 'Memory and CPU (live process measurements)'
+$analyticsContent.Children.Add($animMemCard.Card) | Out-Null
+$analyticsAppRam = New-AnalyticsRow $animMemCard.Stack 'App memory: measuring...'
+$analyticsAppCpu = New-AnalyticsRow $animMemCard.Stack 'App CPU: measuring...'
+$analyticsMountRam = New-AnalyticsRow $animMemCard.Stack 'Provider/mount processes (rclone, cpx): measuring...'
+$analyticsMountCpu = New-AnalyticsRow $animMemCard.Stack 'Mount processes CPU: measuring...'
+$analyticsSysNote = New-AnalyticsRow $animMemCard.Stack 'CPU percentages are per-process samples averaged over the sampling interval (5 s) on all logical cores.'
+
+$animCacheCard = New-AnalyticsCard 'Cache disk usage (distinct from process RAM)'
+$analyticsContent.Children.Add($animCacheCard.Card) | Out-Null
+$analyticsCacheUsed = New-AnalyticsRow $animCacheCard.Stack 'Cached files on disk: measuring...'
+$analyticsCacheActive = New-AnalyticsRow $animCacheCard.Stack 'Currently in use / locked by mounts: measuring...'
+$analyticsCacheLimit = New-AnalyticsRow $animCacheCard.Stack 'Soft cache limit: measuring...'
+$analyticsCacheFree = New-AnalyticsRow $animCacheCard.Stack 'Free space on cache drive: measuring...'
+
+$animSessionCard = New-AnalyticsCard 'Accounts, mounts, and connection health'
+$analyticsContent.Children.Add($animSessionCard.Card) | Out-Null
+$analyticsAccounts = New-AnalyticsRow $animSessionCard.Stack 'Saved accounts: measuring...'
+$analyticsMounts = New-AnalyticsRow $animSessionCard.Stack 'Active mounts: measuring...'
+$analyticsHealth = New-AnalyticsRow $animSessionCard.Stack 'Per-account health: measuring...'
+$analyticsRetries = New-AnalyticsRow $animSessionCard.Stack 'Recent reconnect failures (per account): measuring...'
+
+$animUnavCard = New-AnalyticsCard 'Transfer statistics'
+$analyticsContent.Children.Add($animUnavCard.Card) | Out-Null
+$analyticsUnavTitle = New-Label 'Current and recent transfer speeds, bytes transferred, operation durations, and provider latency: Unavailable.' 12 $script:Palette.TextSecondary
+$analyticsUnavTitle.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+$animUnavCard.Stack.Children.Add($analyticsUnavTitle) | Out-Null
+$analyticsUnavNote = New-Label 'rclone VFS mounts do not expose a transfer-statistics endpoint, and hooking filesystem operations to estimate them would add idle load and unreliable estimates. Values appear only when a reliable measurement channel exists.' 11 $script:Palette.TextMuted
+$analyticsUnavNote.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+$animUnavCard.Stack.Children.Add($analyticsUnavNote) | Out-Null
+
+# Bounded history (max 120 samples, dropped as new samples arrive; only
+# populated while the Analytics page is visible, otherwise empty and idle).
+$script:AnalyticsHistory = [System.Collections.Generic.List[hashtable]]::new()
+$script:AnalyticsCpuBaseline = @{}
+$script:AnalyticsLastSample = $null
+
+function Update-AnalyticsMetrics {
+    $nowUtc = [DateTime]::UtcNow
+    $cores = 1
+    try { $cores = [Math]::Max(1, [System.Environment]::ProcessorCount) } catch { }
+
+    # --- App process (real measurements) ---
+    $appCpuPct = $null
+    try {
+        $appProc = Get-Process -Id $PID -ErrorAction Stop
+        $appCpuPct = Get-AnalyticsCpuPercent -Process $appProc -Now $nowUtc -Cores $cores
+        $appWsMb = [Math]::Round($appProc.WorkingSet64 / 1MB, 1)
+        $appPrivMb = [Math]::Round($appProc.PrivateMemorySize64 / 1MB, 1)
+        $analyticsAppRam.Text = "App memory: $appWsMb MB working set ($appPrivMb MB private)."
+        $analyticsAppCpu.Text = $(if ($null -ne $appCpuPct) { "App CPU: $appCpuPct% of all cores." } else { 'App CPU: first sample; visible on the next refresh.' })
+    } catch {
+        $analyticsAppRam.Text = 'App memory: Unavailable (process information failed).'
+    }
+
+    # --- Provider/mount processes (rclone mounts + TeraBox cpx bridges) ---
+    $mountRamText = 'Provider/mount processes (rclone, cpx): none running.'
+    $mountCpuText = 'Mount processes CPU: none running.'
+    $mountProcs = @()
+    try {
+        $mountProcs = @(Get-Process -Name 'rclone', 'cpx' -ErrorAction SilentlyContinue)
+    } catch { }
+    if ($mountProcs.Count -gt 0) {
+        $sumWs = 0L
+        foreach ($mp in $mountProcs) { try { $sumWs += [int64]$mp.WorkingSet64 } catch { } }
+        $mountRamText = "Provider/mount processes (rclone, cpx): $($mountProcs.Count) process(es), $([Math]::Round($sumWs / 1MB, 1)) MB working set total."
+        $perEntries = [System.Collections.Generic.List[string]]::new()
+        foreach ($mp in $mountProcs) {
+            try {
+                $pct = Get-AnalyticsCpuPercent -Process $mp -Now $nowUtc -Cores $cores
+                if ($null -ne $pct) { $perEntries.Add("rclone/cpx #$($mp.Id): $pct%") }
+            } catch { }
+        }
+        if ($perEntries.Count -gt 0) {
+            $mountCpuText = 'Mount processes CPU: ' + [string]::Join(' | ', $perEntries) + '.'
+        } else {
+            $mountCpuText = 'Mount processes CPU: first sample; visible on the next refresh.'
+        }
+    }
+    $analyticsMountRam.Text = $mountRamText
+    $analyticsMountCpu.Text = $mountCpuText
+
+    # --- Cache disk usage (distinct from RAM) ---
+    try {
+        $stats = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
+        $quota = Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory
+        $analyticsCacheUsed.Text = "Cached files on disk: $([Math]::Round($stats.TotalSizeBytes / 1MB, 1)) MB total ($($stats.TotalFileCount) files)."
+        $analyticsCacheActive.Text = "Currently in use / locked by mounts: $([Math]::Round($stats.InUseBytes / 1MB, 1)) MB ($($stats.InUseCount) entries). Otherwise safe to be evicted by cache policy."
+        $analyticsCacheLimit.Text = "Soft cache limit: $([Math]::Round($quota.TargetMaxBytes / 1GB, 2)) GiB (configurable via cache cleanup policy)."
+        $analyticsCacheFree.Text = "Free space on $($stats.DriveLetter)\: $([Math]::Round($stats.DriveFreeBytes / 1GB, 2)) GB$(if ($stats.IsSystemDrive) { ' (OS drive)' })."
+    } catch {
+        $analyticsCacheUsed.Text = 'Cached files on disk: Unavailable (cache inspection failed).'
+        $analyticsCacheActive.Text = 'Currently in use / locked by mounts: Unavailable.'
+        $analyticsCacheLimit.Text = 'Soft cache limit: Unavailable.'
+        $analyticsCacheFree.Text = 'Free space on cache drive: Unavailable.'
+    }
+
+    # --- Accounts, mounts, health (real state from the running app) ---
+    try {
+        $accounts = @(Get-CloudAccounts)
+        $analyticsAccounts.Text = "Saved accounts: $($accounts.Count)."
+        $mounted = 0
+        $healthLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($acc in ($accounts | Select-Object -First 6)) {
+            $letter = ([string]$acc.DriveLetter).TrimEnd(':').TrimEnd('\')
+            $st = Get-CachedUiDriveStatus -ProviderId ([string]$acc.ProviderId) -AccountId ([string]$acc.Id) -DriveLetter $letter
+            $stateText = 'Disconnected'
+            if ($st.MountState -and $st.MountState.State) { $stateText = [string]$st.MountState.State }
+            elseif ($st.IsMounted) { $stateText = 'Mounted' }
+            if ($st.IsMounted) { $mounted++ }
+            $healthLines.Add("$([string]$acc.DisplayName) [$letter]: $stateText")
+        }
+        # Legacy provider cards (no saved account) participate in mount count too.
+        foreach ($legacyKey in @('gdrive', 'terabox')) {
+            try {
+                $st = Get-CachedUiDriveStatus -ProviderId $legacyKey
+                if ($st -and $st.IsMounted) { $mounted++ }
+            } catch { }
+        }
+        $analyticsMounts.Text = "Active mounts: $mounted."
+        $analyticsHealth.Text = 'Per-account health: ' + $(if ($healthLines.Count -gt 0) { ([string]::Join(' | ', $healthLines)) } else { 'no saved accounts configured.' })
+        $failLines = [System.Collections.Generic.List[string]]::new()
+        $failCount = 0
+        try {
+            foreach ($key in ($script:ReconnectFailCount.Keys)) {
+                if ($script:ReconnectFailCount[$key] -gt 0) { $failLines.Add("${key}: $($script:ReconnectFailCount[$key])"); $failCount++ }
+            }
+        } catch { }
+        $analyticsRetries.Text = 'Recent reconnect failures (per account): ' + $(if ($failLines.Count -gt 0) { ([string]::Join(' | ', $failLines)) } else { 'none.' })
+    } catch {
+        $analyticsAccounts.Text = 'Saved accounts: Unavailable.'
+        $analyticsMounts.Text = 'Active mounts: Unavailable.'
+        $analyticsHealth.Text = 'Per-account health: Unavailable.'
+        $analyticsRetries.Text = 'Recent reconnect failures (per account): Unavailable.'
+    }
+
+    # --- Bounded history (only here; memory stays tiny) ---
+    try {
+        if ($null -ne $appCpuPct) {
+            $script:AnalyticsHistory.Add(@{
+                At = $nowUtc
+                AppCpu = [double]$appCpuPct
+                Mounts = $mounted
+                CacheMb = if (Test-Path -LiteralPath $script:CacheDirectory) { [Math]::Round((Get-CacheUsageStatistics -CacheDirectory $script:CacheDirectory).UsedBytes / 1MB, 1) } else { $null }
+            })
+            while ($script:AnalyticsHistory.Count -gt 120) { $script:AnalyticsHistory.RemoveAt(0) }
+        }
+    } catch { }
+}
+
+function Get-AnalyticsCpuPercent($Process, [DateTime]$Now, [int]$Cores = 1) {
+    # Real per-process CPU percentage from TotalProcessorTime deltas.
+    if ($null -eq $Process) { return $null }
+    try {
+        $pid = [int]$Process.Id
+        $cpuTimes = $Process.TotalProcessorTime
+        $previous = $null
+        if ($script:AnalyticsCpuBaseline.ContainsKey($pid)) { $previous = $script:AnalyticsCpuBaseline[$pid] }
+        $script:AnalyticsCpuBaseline[$pid] = @{ Cpu = $cpuTimes; At = $Now }
+        if (-not $previous) { return $null }
+        $cpuDelta = ($cpuTimes - $previous.Cpu).TotalSeconds
+        $wallDelta = ($Now - $previous.At).TotalSeconds
+        if ($wallDelta -le 0) { return $null }
+        return [Math]::Round([Math]::Min(100, ($cpuDelta / ($wallDelta * $cores)) * 100), 1)
+    } catch { return $null }
+}
+
+function Show-AnalyticsView {
+    $script:CurrentView = 'Analytics'
+    $disksView.Visibility = [System.Windows.Visibility]::Collapsed
+    $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
+    $helpView.Visibility = [System.Windows.Visibility]::Collapsed
+    $analyticsView.Visibility = [System.Windows.Visibility]::Visible
+    Update-NavActiveState
+    Update-AnalyticsMetrics
+    try {
+        $script:AnalyticsSampler.Stop()
+        $script:AnalyticsSampler.Start()
+    } catch { }
+}
+
 # ==============================================================================
 # SAFE SYSTEM DIAGNOSTICS MODAL
 # ==============================================================================
@@ -1486,6 +1735,25 @@ function Apply-UITheme([string]$ThemeName) {
         $htxt.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
 
+    # Analytics View
+    $analyticsTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $analyticsSubtitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    $analyticsUnavTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    $analyticsUnavNote.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+    $backFromAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $backFromAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $backFromAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($acard in @($animMemCard.Card, $animCacheCard.Card, $animSessionCard.Card, $animUnavCard.Card)) {
+        $acard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+        $acard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    }
+    foreach ($atitle in @($animMemCard.Title, $animCacheCard.Title, $animSessionCard.Title, $animUnavCard.Title)) {
+        $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    }
+    foreach ($arow in @($analyticsAppRam, $analyticsAppCpu, $analyticsMountRam, $analyticsMountCpu, $analyticsSysNote, $analyticsCacheUsed, $analyticsCacheActive, $analyticsCacheLimit, $analyticsCacheFree, $analyticsAccounts, $analyticsMounts, $analyticsHealth, $analyticsRetries)) {
+        $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    }
+
     Update-NavActiveState
 }
 
@@ -1494,6 +1762,7 @@ function Update-NavActiveState {
     foreach ($item in @(
         @{ Nav = $navDisksItem; View = 'Disks' },
         @{ Nav = $navOptionsItem; View = 'Options' },
+        @{ Nav = $navAnalyticsItem; View = 'Analytics' },
         @{ Nav = $navHelpItem; View = 'Help' }
     )) {
         if ($script:CurrentView -eq $item.View) {
@@ -1513,6 +1782,8 @@ function Show-DisksView {
     $disksView.Visibility = [System.Windows.Visibility]::Visible
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
+    $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 }
 
@@ -1533,6 +1804,8 @@ function Show-OptionsView {
     $disksView.Visibility = [System.Windows.Visibility]::Collapsed
     $optionsView.Visibility = [System.Windows.Visibility]::Visible
     $helpView.Visibility = [System.Windows.Visibility]::Collapsed
+    $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 
     Update-CacheUsageDisplay
@@ -1543,13 +1816,32 @@ function Show-HelpView {
     $disksView.Visibility = [System.Windows.Visibility]::Collapsed
     $optionsView.Visibility = [System.Windows.Visibility]::Collapsed
     $helpView.Visibility = [System.Windows.Visibility]::Visible
+    $analyticsView.Visibility = [System.Windows.Visibility]::Collapsed
+    try { $script:AnalyticsSampler.Stop() } catch { }
     Update-NavActiveState
 }
 
+# 5-second sampler that lives only while the Analytics page is visible.
+# Outside that page the timer is fully stopped, so the idle application has no
+# additional CPU or memory cost from the Analytics feature.
+$script:AnalyticsSampler = [System.Windows.Threading.DispatcherTimer]::new()
+$script:AnalyticsSampler.Interval = [TimeSpan]::FromSeconds(5)
+$script:AnalyticsSampler.Add_Tick({
+    try {
+        if ($script:CurrentView -ne 'Analytics') {
+            $script:AnalyticsSampler.Stop()
+            return
+        }
+        Update-AnalyticsMetrics
+    } catch { }
+})
+
 $navDisksItem.Button.Add_Click({ Show-DisksView })
 $navOptionsItem.Button.Add_Click({ Show-OptionsView })
+$navAnalyticsItem.Button.Add_Click({ Show-AnalyticsView })
 $navHelpItem.Button.Add_Click({ Show-HelpView })
 $backToDisksBtn.Add_Click({ Show-DisksView })
+$backFromAnalyticsBtn.Add_Click({ Show-DisksView })
 
 # Use a theme-aware button template so disabled controls keep their themed surface
 # instead of reverting to the Windows default white/gray face.
