@@ -29,8 +29,12 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-MultiAccountLifecycle.ps1'),
     (Join-Path $PSScriptRoot 'Test-ExplorerIntegration.ps1'),
     (Join-Path $PSScriptRoot 'Test-ThemesAndAccountCustomization.ps1'),
+    (Join-Path $PSScriptRoot 'Test-OptionsPage.ps1'),
     (Join-Path $PSScriptRoot 'Test-CloudTransferManager.ps1'),
+    (Join-Path $PSScriptRoot 'Test-TransferTelemetryAndVerification.ps1'),
     (Join-Path $PSScriptRoot 'Test-CacheManagement.ps1'),
+    (Join-Path $PSScriptRoot 'Test-MountIsolationAndAnalyticsDormancy.ps1'),
+    (Join-Path $PSScriptRoot 'Test-StartupBehavior.ps1'),
     (Join-Path $PSScriptRoot 'Test-EndToEndAcceptance.ps1'),
     (Join-Path $PSScriptRoot 'Test-WriteAndUploadVerification.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
