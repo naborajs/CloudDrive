@@ -285,6 +285,7 @@ function Get-VirtualDriveStatus(
             IsReadOnly = $isReadOnly
             ProcessRunning = $processAlive
             ProcessId = $procId
+            MountState = $null
         }
     }
 
@@ -301,6 +302,7 @@ function Get-VirtualDriveStatus(
         IsReadOnly = $false
         ProcessRunning = $processAlive
         ProcessId = $procId
+        MountState = $null
     }
 }
 
@@ -311,9 +313,13 @@ function Build-RcloneMountArguments(
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf'),
     [string]$LogFile = '',
+    [int]$CacheMaxGigabytes = 20,
     [switch]$ReadOnly = $false,
     [switch]$FixedDisk = $false
 ) {
+    if ($CacheMaxGigabytes -lt 1 -or $CacheMaxGigabytes -gt 1024) {
+        throw 'The VFS cache limit must be between 1 and 1024 GB.'
+    }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     $driveRoot = "$letter`:\"
     $safeCache = Resolve-SafeCacheDirectory $CacheDirectory
@@ -348,7 +354,7 @@ function Build-RcloneMountArguments(
         '--volname', $volName,
         '--cache-dir', $safeCache,
         '--vfs-cache-mode', 'full',
-        '--vfs-cache-max-size', '20G',
+        '--vfs-cache-max-size', "${CacheMaxGigabytes}G",
         '--vfs-cache-max-age', '24h',
         '--vfs-cache-poll-interval', '1m',
         '--vfs-write-back', '5s',
@@ -391,6 +397,7 @@ function Start-VirtualDriveMount(
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
     [hashtable]$EnvironmentVariables = @{},
     [switch]$ReadOnly = $false,
+    [int]$CacheMaxGigabytes = 20,
     [int]$TimeoutSeconds = 90
 ) {
     if (-not (Test-WinFspInstalled)) {
@@ -483,7 +490,7 @@ function Start-VirtualDriveMount(
             } catch { $mountConfigPath = '' }
         }
     }
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -ReadOnly:$ReadOnly -FixedDisk
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
@@ -524,7 +531,10 @@ function Start-VirtualDriveMount(
         if ($isMounted) {
             $filesystemCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 10
             if (-not $filesystemCheck.Success) {
-                Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
+                $cleanup = Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
+                if (-not $cleanup.Success -or -not $cleanup.Verified) {
+                    throw "Filesystem verification failed: $($filesystemCheck.Error) Cleanup could not be verified: $($cleanup.Message)"
+                }
                 throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
             }
             return [ordered]@{
@@ -544,7 +554,10 @@ function Start-VirtualDriveMount(
     }
 
     # If timeout elapsed without mount appearing
-    Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId
+    $cleanup = Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
+    if (-not $cleanup.Success -or -not $cleanup.Verified) {
+        throw "Mount operation timed out waiting for $driveRoot to appear in Windows, and cleanup could not be verified: $($cleanup.Message)"
+    }
     throw "Mount operation timed out waiting for $driveRoot to appear in Windows."
 }
 
@@ -554,6 +567,8 @@ function Stop-VirtualDriveMount(
     [string]$DriveLetter = ''
 ) {
     $stoppedAny = $false
+    $stopErrors = [System.Collections.Generic.List[string]]::new()
+    $managedProcessIds = [System.Collections.Generic.List[int]]::new()
 
     # Determine which targets to stop
     $targets = @()
@@ -582,6 +597,9 @@ function Stop-VirtualDriveMount(
     } else {
         $targets = @($script:ActiveMountProcesses.Keys)
     }
+    if (-not [string]::IsNullOrWhiteSpace($DriveLetter)) {
+        $lettersToClean += $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    }
 
     # The shared $script:MountProcess handle may point at any account's rclone
     # process (the most recently started mount). Killing it as a fallback while
@@ -598,10 +616,11 @@ function Stop-VirtualDriveMount(
             $p = $script:ActiveMountProcesses[$target]
             if ($p -and (-not $p.HasExited)) {
                 try {
+                    $managedProcessIds.Add([int]$p.Id)
                     $p.Kill()
-                    $p.WaitForExit(5000) | Out-Null
-                    $stoppedAny = $true
-                } catch { }
+                    if ($p.WaitForExit(5000)) { $stoppedAny = $true }
+                    else { $stopErrors.Add("Mount process $($p.Id) did not exit within 5 seconds.") }
+                } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
             }
             $script:ActiveMountProcesses.Remove($target)
         }
@@ -655,11 +674,13 @@ function Stop-VirtualDriveMount(
                         } else { [string]$lettersToClean[0] }
                         $targetPattern = "(?i)\bmount\b.*\s+[`"']?${ownedLetter}:\\?[`"']?(\s+|$)"
                         if ($proc.CommandLine -match $targetPattern) {
-                            try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                            try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $stoppedAny = $true } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
                         }
                     } else {
-                        try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                        try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $stoppedAny = $true } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
                     }
+                } elseif (-not $hasScopeFilter -and $proc.CommandLine -match '(?i)NSCloudDrive[\\/]+logs[\\/]+rclone-') {
+                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $stoppedAny = $true } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
                 }
                 continue
             }
@@ -678,17 +699,97 @@ function Stop-VirtualDriveMount(
                     $shouldStop = $true
                 }
                 if ($shouldStop) {
-                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue; $stoppedAny = $true } catch { }
+                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $stoppedAny = $true } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
+                }
+            } elseif (-not $hasScopeFilter) {
+                # Unscoped shutdown is limited to this application's legacy
+                # rclone processes. Never terminate unrelated rclone mounts.
+                $appLogPattern = '(?i)NSCloudDrive[\\/]+logs[\\/]+rclone-'
+                if ($proc.CommandLine -match $appLogPattern -or $managedProcessIds.Contains([int]$proc.ProcessId)) {
+                    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop; $stoppedAny = $true } catch { $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
                 }
             }
         }
-    } catch { }
+    } catch {
+        $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
+    }
 
-    [System.Threading.Thread]::Sleep(500)
+    foreach ($cl in ($lettersToClean | Select-Object -Unique)) {
+        Clear-StaleDriveLetterMapping -DriveLetter $cl
+    }
 
+    $cleanLetters = @($lettersToClean | Select-Object -Unique)
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $remainingProcesses = @()
+    $remainingDrives = @()
+    do {
+        $remainingProcesses = @()
+        $remainingDrives = @()
+        try {
+            $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -match '\bmount\b' })
+            foreach ($proc in $processes) {
+                $commandLine = [string]$proc.CommandLine
+                $ownedByAccount = ''
+                foreach ($accId in $savedAccountIds) {
+                    if (-not [string]::IsNullOrEmpty($accId) -and $commandLine.Contains($accId)) {
+                        $ownedByAccount = $accId
+                        break
+                    }
+                }
+                $matchesRequest = $false
+                if (-not [string]::IsNullOrEmpty($AccountId)) {
+                    $matchesRequest = [string]::Equals($ownedByAccount, $AccountId, [System.StringComparison]::OrdinalIgnoreCase)
+                } elseif (-not [string]::IsNullOrEmpty($ProviderId)) {
+                    if ([string]::IsNullOrEmpty($ownedByAccount) -and $commandLine -match "(?i)\b${ProviderId}:") {
+                        if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+                            $cleanLetter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                            $targetPattern = "(?i)\bmount\b.*\s+[`"']?${cleanLetter}:\\?[`"']?(\s+|$)"
+                            $matchesRequest = $commandLine -match $targetPattern
+                        } else {
+                            $matchesRequest = $true
+                        }
+                    }
+                } elseif ($commandLine -match '(?i)NSCloudDrive[\\/]+logs[\\/]+rclone-') {
+                    $matchesRequest = $true
+                }
+                if ($matchesRequest) { $remainingProcesses += $proc }
+            }
+        } catch {
+            $stopErrors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
+            break
+        }
+
+        foreach ($cl in $cleanLetters) {
+            $root = "$cl`:\"
+            if ([System.IO.DriveInfo]::GetDrives().Name -contains $root) {
+                $remainingDrives += $root
+            }
+        }
+
+        if ($remainingProcesses.Count -eq 0 -and $remainingDrives.Count -eq 0) {
+            return [ordered]@{
+                Success = $true
+                Verified = $true
+                Stopped = $stoppedAny
+                Message = if ($stoppedAny) { 'Virtual drive unmounted and verified.' } else { 'No matching virtual drive mount remained.' }
+            }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        [System.Threading.Thread]::Sleep(250)
+    } while ($true)
+
+    $details = [System.Collections.Generic.List[string]]::new()
+    if ($remainingProcesses.Count -gt 0) { $details.Add("$($remainingProcesses.Count) matching rclone mount process(es) are still running.") }
+    if ($remainingDrives.Count -gt 0) { $details.Add("Drive $([string]::Join(', ', $remainingDrives)) is still present in Windows.") }
+    foreach ($errorText in $stopErrors) {
+        if ($errorText) { $details.Add($errorText) }
+    }
     return [ordered]@{
-        Success = $true
-        Message = if ($stoppedAny) { 'Virtual drive unmounted cleanly.' } else { 'No active virtual drive mount found.' }
+        Success = $false
+        Verified = $false
+        Stopped = $stoppedAny
+        Message = [string]::Join(' ', $details.ToArray())
     }
 }
 
