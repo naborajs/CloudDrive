@@ -1,5 +1,4 @@
 using System;
-using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -44,17 +43,27 @@ namespace NSCloudDrive.Launcher
 
         static Program()
         {
-            // Resolve System.Management.Automation and related PowerShell dependencies dynamically
             AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
             {
                 try
                 {
+                    string asmName = new AssemblyName(args.Name).Name;
+                    string simpleName = asmName + ".dll";
                     string psDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32\\WindowsPowerShell\\v1.0");
-                    string simpleName = new AssemblyName(args.Name).Name + ".dll";
                     string candidate = Path.Combine(psDir, simpleName);
                     if (File.Exists(candidate))
                     {
                         return Assembly.LoadFrom(candidate);
+                    }
+
+                    string gacBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Microsoft.NET\\assembly\\GAC_MSIL", asmName);
+                    if (Directory.Exists(gacBase))
+                    {
+                        string[] files = Directory.GetFiles(gacBase, "*.dll", SearchOption.AllDirectories);
+                        if (files.Length > 0)
+                        {
+                            return Assembly.LoadFrom(files[0]);
+                        }
                     }
                 }
                 catch { }
@@ -65,7 +74,6 @@ namespace NSCloudDrive.Launcher
         [STAThread]
         static int Main(string[] args)
         {
-            // Set AppUserModelID so Windows shell, Taskbar, and Action Center attribute all windows and notifications to NS Cloud Drive
             try
             {
                 SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
@@ -99,49 +107,59 @@ namespace NSCloudDrive.Launcher
                 return 0;
             }
 
-            // Release our temporary mutex lock so the main application script can acquire it cleanly
-            if (appMutex != null)
-            {
-                try
-                {
-                    appMutex.ReleaseMutex();
-                }
-                catch { }
-                appMutex.Close();
-                appMutex = null;
-            }
-
-            // 2. Resolve script path
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string scriptPath = Path.Combine(baseDir, "src", "NSCloudDrive.ps1");
-
-            if (!File.Exists(scriptPath))
-            {
-                string fallback = Path.Combine(baseDir, "NSCloudDrive.ps1");
-                if (File.Exists(fallback))
-                {
-                    scriptPath = fallback;
-                }
-                else
-                {
-                    MessageBox.Show(
-                        string.Format("Could not find application script at:\n{0}\n\nPlease ensure the application files are intact.", scriptPath),
-                        "NS Cloud Drive - Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                    return 1;
-                }
-            }
-
-            // 3. Try In-Process Hosting first (Ensures NSCloudDrive.exe is the process for Task Manager, tray icons, and notifications)
             try
             {
-                return RunInProcess(scriptPath, args);
+                // 2. Resolve script path
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string scriptPath = Path.Combine(baseDir, "src", "NSCloudDrive.ps1");
+
+                if (!File.Exists(scriptPath))
+                {
+                    string fallback = Path.Combine(baseDir, "NSCloudDrive.ps1");
+                    if (File.Exists(fallback))
+                    {
+                        scriptPath = fallback;
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            string.Format("Could not find application script at:\n{0}\n\nPlease ensure the application files are intact.", scriptPath),
+                            "NS Cloud Drive - Error",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                        return 1;
+                    }
+                }
+
+                // 3. Execute in-process as native NSCloudDrive.exe host
+                try
+                {
+                    return RunInProcess(scriptPath, args);
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NSCloudDrive\\logs");
+                        if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
+                        File.AppendAllText(Path.Combine(logDir, "launcher-error.log"), DateTime.UtcNow.ToString("o") + " [InProcess Exception]: " + ex.ToString() + Environment.NewLine);
+                    }
+                    catch { }
+
+                    return RunOutOfProcess(scriptPath, baseDir, args);
+                }
             }
-            catch (Exception)
+            finally
             {
-                // Fallback to out-of-process hidden launcher if in-process runspace fails
-                return RunOutOfProcess(scriptPath, baseDir, args);
+                if (appMutex != null)
+                {
+                    try
+                    {
+                        appMutex.ReleaseMutex();
+                    }
+                    catch { }
+                    appMutex.Close();
+                }
             }
         }
 
@@ -159,28 +177,55 @@ namespace NSCloudDrive.Launcher
                 using (PowerShell ps = PowerShell.Create())
                 {
                     ps.Runspace = rs;
-
-                    // Build invocation script with arguments
-                    StringBuilder sb = new StringBuilder();
-                    sb.Append("& '");
-                    sb.Append(scriptPath.Replace("'", "''"));
-                    sb.Append("'");
+                    ps.AddCommand(scriptPath);
 
                     if (args != null && args.Length > 0)
                     {
                         for (int i = 0; i < args.Length; i++)
                         {
                             string a = args[i];
-                            if (!string.IsNullOrEmpty(a))
+                            if (string.Equals(a, "-Minimized", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(a, "/Minimized", StringComparison.OrdinalIgnoreCase))
                             {
-                                sb.Append(" ");
-                                sb.Append(a);
+                                ps.AddParameter("Minimized", true);
+                            }
+                            else if (a.StartsWith("-") || a.StartsWith("/"))
+                            {
+                                string paramName = a.TrimStart('-', '/');
+                                if (i + 1 < args.Length && !args[i + 1].StartsWith("-"))
+                                {
+                                    ps.AddParameter(paramName, args[i + 1]);
+                                    i++;
+                                }
+                                else
+                                {
+                                    ps.AddParameter(paramName, true);
+                                }
+                            }
+                            else
+                            {
+                                ps.AddArgument(a);
                             }
                         }
                     }
 
-                    ps.AddScript(sb.ToString());
                     ps.Invoke();
+
+                    if (ps.HadErrors)
+                    {
+                        try
+                        {
+                            string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NSCloudDrive\\logs");
+                            if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
+                            StringBuilder sb = new StringBuilder();
+                            foreach (var err in ps.Streams.Error)
+                            {
+                                sb.AppendLine(err.ToString());
+                            }
+                            File.AppendAllText(Path.Combine(logDir, "launcher-error.log"), DateTime.UtcNow.ToString("o") + " [PowerShell Errors]: " + sb.ToString() + Environment.NewLine);
+                        }
+                        catch { }
+                    }
 
                     return 0;
                 }

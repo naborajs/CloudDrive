@@ -11,7 +11,7 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon); [DllImport("shell32.dll", SetLastError = true)] public static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
+Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam); [DllImport("shell32.dll", SetLastError = true)] public static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
 
 try {
     [NSCloudDrive.Win32]::SetCurrentProcessExplicitAppUserModelID('NSCloud.NSCloudDrive')
@@ -95,12 +95,17 @@ $script:LastStartupAutoMountLogKey = ''
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
     $isNewInstance = $false
-    try {
-        $script:AppMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$isNewInstance)
-    } catch [System.Threading.AbandonedMutexException] {
+    if ([System.Diagnostics.Process]::GetCurrentProcess().ProcessName -eq 'NSCloudDrive') {
+        # Already guarded by native launcher mutex
         $isNewInstance = $true
-    } catch {
-        $isNewInstance = $true
+    } else {
+        try {
+            $script:AppMutex = [System.Threading.Mutex]::new($true, 'Local\NSCloudDrive_AppMutex', [ref]$isNewInstance)
+        } catch [System.Threading.AbandonedMutexException] {
+            $isNewInstance = $true
+        } catch {
+            $isNewInstance = $true
+        }
     }
 
     if (-not $isNewInstance) {
@@ -275,6 +280,11 @@ function Get-WpfBitmapImage([string]$Path) {
 }
 
 function Get-AppNotifyIcon([string]$Path) {
+    if ($Path -and $Path.EndsWith('.ico', [System.StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        try {
+            return [System.Drawing.Icon]::new($Path)
+        } catch { }
+    }
     $bitmap = $null
     $iconHandle = [IntPtr]::Zero
     try {
@@ -466,11 +476,31 @@ $window.FontFamily = 'Segoe UI'
 
 # App window icon
 $appLogoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
-if (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
+$appIcoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.ico'
+if (Test-Path -LiteralPath $appIcoPath -PathType Leaf) {
+    try {
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($appIcoPath))
+    } catch {
+        $window.Icon = Get-WpfBitmapImage $appLogoPath
+    }
+} elseif (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
     try {
         $window.Icon = Get-WpfBitmapImage $appLogoPath
     } catch { }
 }
+
+$window.Add_SourceInitialized({
+    try {
+        $helper = [System.Windows.Interop.WindowInteropHelper]::new($window)
+        $hwnd = $helper.Handle
+        $ico = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.ico'
+        if (Test-Path -LiteralPath $ico) {
+            $hIcon = [System.Drawing.Icon]::new($ico).Handle
+            [NSCloudDrive.Win32]::SendMessage($hwnd, 0x0080, [IntPtr]0, $hIcon) | Out-Null
+            [NSCloudDrive.Win32]::SendMessage($hwnd, 0x0080, [IntPtr]1, $hIcon) | Out-Null
+        }
+    } catch { }
+})
 
 # Main Layout Grid: Left Sidebar (Column 0), Content Area (Column 1)
 $rootGrid = [System.Windows.Controls.Grid]::new()
@@ -5114,12 +5144,19 @@ $tbRemoveBtn.Add_Click({
 $notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
 $script:CustomNotifyIcon = $null
 $appLogoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
-if (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
+$appIcoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.ico'
+$chosenIconPath = if (Test-Path -LiteralPath $appIcoPath -PathType Leaf) { $appIcoPath } else { $appLogoPath }
+if (Test-Path -LiteralPath $chosenIconPath -PathType Leaf) {
     try {
-        $script:CustomNotifyIcon = Get-AppNotifyIcon $appLogoPath
+        $script:CustomNotifyIcon = Get-AppNotifyIcon $chosenIconPath
         $notifyIcon.Icon = $script:CustomNotifyIcon
     } catch {
-        $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+        try {
+            $script:CustomNotifyIcon = Get-AppNotifyIcon $appLogoPath
+            $notifyIcon.Icon = $script:CustomNotifyIcon
+        } catch {
+            $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+        }
     }
 } else {
     $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
