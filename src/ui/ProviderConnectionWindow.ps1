@@ -1836,22 +1836,36 @@ function Show-CloudTransferModal(
                 $bytesFmt = (Format-TransferSpeed $st.BytesTransferred).Replace('/s', '')
                 $totFmt = if ($st.TotalBytes -gt 0) { (Format-TransferSpeed $st.TotalBytes).Replace('/s', '') } else { 'Unknown size' }
                 $bytesText.Text = "$bytesFmt of $totFmt transferred ($($st.Percentage)%)"
-                $speedEtaText.Text = "Speed: $($st.SpeedFormatted) • ETA: $($st.EtaFormatted)"
+                $tpText = if ($st.ThroughputFormatted) { $st.ThroughputFormatted } else { "Speed: $($st.SpeedFormatted)" }
+                $speedEtaText.Text = "$tpText • ETA: $($st.EtaFormatted)"
 
-                if ($st.Status -eq 'Running') {
-                    $statusBadge.Text = ([string][char]0x25CF + ' Streaming Relay...')
+                if ($st.Status -eq 'Running' -or $st.Status -eq 'Uploading to provider') {
+                    $badgeText = if ($st.IsLoopbackStaging) { ' Staging to local bridge...' } else { ' Uploading to provider...' }
+                    $statusBadge.Text = ([string][char]0x25CF + $badgeText)
                     $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
                     $pauseBtn.Content = 'Pause'
                     $pauseBtn.IsEnabled = $true
                     $cancelBtn.IsEnabled = $true
+                    $startBtn.IsEnabled = $false
+                } elseif ($st.Status -eq 'Locally cached or queued') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Locally cached / Queued for upload')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+                    $pauseBtn.IsEnabled = $false
+                    $cancelBtn.IsEnabled = $true
+                    $startBtn.IsEnabled = $false
+                } elseif ($st.Status -eq 'Verifying remote file') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Verifying remote file on provider...')
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
+                    $pauseBtn.IsEnabled = $false
+                    $cancelBtn.IsEnabled = $false
                     $startBtn.IsEnabled = $false
                 } elseif ($st.Status -eq 'Paused') {
                     $statusBadge.Text = ([string][char]0x25CF + ' Paused')
                     $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
                     $pauseBtn.Content = 'Resume'
                     $pauseBtn.IsEnabled = $true
-                } elseif ($st.Status -eq 'Completed') {
-                    $statusBadge.Text = ([string][char]0x25CF + ' Completed Successfully')
+                } elseif ($st.Status -eq 'Remotely confirmed' -or $st.Status -eq 'Completed') {
+                    $statusBadge.Text = ([string][char]0x25CF + ' Upload Complete (Remotely Confirmed)')
                     $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
                     $progressBar.IsIndeterminate = $false
                     $progressBar.Value = 100
