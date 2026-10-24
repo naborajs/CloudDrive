@@ -1325,10 +1325,12 @@ $analyticsRetries = New-AnalyticsRow $animSessionCard.Stack 'Recent reconnect fa
 
 $animUnavCard = New-AnalyticsCard 'Transfer statistics'
 $analyticsContent.Children.Add($animUnavCard.Card) | Out-Null
-$analyticsUnavTitle = New-Label 'Current and recent transfer speeds, bytes transferred, operation durations, and provider latency: Unavailable.' 12 $script:Palette.TextSecondary
+$analyticsIoRate = New-AnalyticsRow $animUnavCard.Stack 'Mount process I/O rate (measured): measuring...'
+$analyticsIoTotal = New-AnalyticsRow $animUnavCard.Stack 'I/O totals per mount process (since process start): measuring...'
+$analyticsUnavTitle = New-Label 'Per-operation durations and provider round-trip latency: Unavailable.' 12 $script:Palette.TextSecondary
 $analyticsUnavTitle.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
 $animUnavCard.Stack.Children.Add($analyticsUnavTitle) | Out-Null
-$analyticsUnavNote = New-Label 'rclone VFS mounts do not expose a transfer-statistics endpoint, and hooking filesystem operations to estimate them would add idle load and unreliable estimates. Values appear only when a reliable measurement channel exists.' 11 $script:Palette.TextMuted
+$analyticsUnavNote = New-Label 'rclone VFS mounts do not expose a transfer-statistics endpoint for per-operation durations or provider latency. The I/O rate and totals above are real OS byte counters of the rclone/cpx processes (all volumes combined: cache disk writes and network traffic); they move only while actual transfers happen and show Unavailable when no mount processes are running.' 11 $script:Palette.TextMuted
 $analyticsUnavNote.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
 $animUnavCard.Stack.Children.Add($analyticsUnavNote) | Out-Null
 
@@ -1336,6 +1338,9 @@ $animUnavCard.Stack.Children.Add($analyticsUnavNote) | Out-Null
 # populated while the Analytics page is visible, otherwise empty and idle).
 $script:AnalyticsHistory = [System.Collections.Generic.List[hashtable]]::new()
 $script:AnalyticsCpuBaseline = @{}
+# Per-mount-process cumulative I/O baseline (pid -> read/write byte totals and
+# timestamp) used to compute real transfer rates between samples.
+$script:AnalyticsIoBaseline = @{}
 $script:AnalyticsLastSample = $null
 
 function Update-AnalyticsMetrics {
@@ -1435,6 +1440,62 @@ function Update-AnalyticsMetrics {
         $analyticsMounts.Text = 'Active mounts: Unavailable.'
         $analyticsHealth.Text = 'Per-account health: Unavailable.'
         $analyticsRetries.Text = 'Recent reconnect failures (per account): Unavailable.'
+    }
+
+    # --- Transfer I/O (real OS byte counters of the rclone/cpx processes) ---
+    try {
+        $ioProcs = @()
+        try {
+            $ioProcs = @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe' OR Name = 'cpx.exe'" -ErrorAction SilentlyContinue)
+        } catch { $ioProcs = @() }
+
+        if ($ioProcs.Count -gt 0) {
+            $rateEntries = [System.Collections.Generic.List[string]]::new()
+            $totalEntries = [System.Collections.Generic.List[string]]::new()
+            $currentIds = [System.Collections.Generic.HashSet[int]]::new()
+            foreach ($ioProc in ($ioProcs | Select-Object -First 6)) {
+                $ioId = [int]$ioProc.ProcessId
+                [void]$currentIds.Add($ioId)
+                $ioRead = [uint64]$ioProc.ReadTransferCount
+                $ioWrite = [uint64]$ioProc.WriteTransferCount
+                $previous = if ($script:AnalyticsIoBaseline.ContainsKey($ioId)) { $script:AnalyticsIoBaseline[$ioId] } else { $null }
+                $script:AnalyticsIoBaseline[$ioId] = @{ Read = $ioRead; Write = $ioWrite; At = $nowUtc }
+
+                $procKind = if (([string]$ioProc.Name) -eq 'cpx.exe') { 'cpx' } else { 'rclone' }
+                $totalEntries.Add("$procKind #${ioId}: $([Math]::Round($ioRead / 1MB, 1)) MB read / $([Math]::Round($ioWrite / 1MB, 1)) MB written")
+
+                if ($previous) {
+                    $wallDelta = ($nowUtc - $previous.At).TotalSeconds
+                    if ($wallDelta -gt 0) {
+                        $readDelta = [double]$ioRead - [double]$previous.Read
+                        $writeDelta = [double]$ioWrite - [double]$previous.Write
+                        if ($readDelta -lt 0 -or $writeDelta -lt 0) {
+                            # Counter wrapped or process restarted mid-sample; rate is meaningless now.
+                            $rateEntries.Add("$procKind #${ioId}: first sample; visible on the next refresh.")
+                        } else {
+                            $mbPerSec = (($readDelta + $writeDelta) / 1MB) / $wallDelta
+                            $rateEntries.Add("$procKind #${ioId}: $([Math]::Round($mbPerSec, 2)) MB/s.")
+                        }
+                    }
+                } else {
+                    $rateEntries.Add("$procKind #${ioId}: first sample; visible on the next refresh.")
+                }
+            }
+
+            # Drop stale pids so the baseline cannot grow across remount cycles.
+            foreach ($oldId in @($script:AnalyticsIoBaseline.Keys)) {
+                if (-not $currentIds.Contains([int]$oldId)) { $script:AnalyticsIoBaseline.Remove($oldId) }
+            }
+
+            $analyticsIoRate.Text = 'Mount process I/O rate (measured): ' + [string]::Join(' | ', $rateEntries)
+            $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): ' + [string]::Join(' | ', $totalEntries)
+        } else {
+            $analyticsIoRate.Text = 'Mount process I/O rate (measured): Unavailable (no rclone or cpx processes running).'
+            $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): Unavailable.'
+        }
+    } catch {
+        $analyticsIoRate.Text = 'Mount process I/O rate (measured): Unavailable (measurement failed).'
+        $analyticsIoTotal.Text = 'I/O totals per mount process (since process start): Unavailable.'
     }
 
     # --- Bounded history (only here; memory stays tiny) ---
@@ -2174,7 +2235,7 @@ function Apply-UITheme([string]$ThemeName) {
     foreach ($atitle in @($animMemCard.Title, $animCacheCard.Title, $animSessionCard.Title, $animUnavCard.Title)) {
         $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
-    foreach ($arow in @($analyticsAppRam, $analyticsAppCpu, $analyticsMountRam, $analyticsMountCpu, $analyticsSysNote, $analyticsCacheUsed, $analyticsCacheActive, $analyticsCacheLimit, $analyticsCacheFree, $analyticsAccounts, $analyticsMounts, $analyticsHealth, $analyticsRetries)) {
+    foreach ($arow in @($analyticsAppRam, $analyticsAppCpu, $analyticsMountRam, $analyticsMountCpu, $analyticsSysNote, $analyticsIoRate, $analyticsIoTotal, $analyticsUnavTitle, $analyticsUnavNote, $analyticsCacheUsed, $analyticsCacheActive, $analyticsCacheLimit, $analyticsCacheFree, $analyticsAccounts, $analyticsMounts, $analyticsHealth, $analyticsRetries)) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
 
