@@ -39,8 +39,8 @@ foreach ($tName in @('PureBlack', 'Translucent', 'PureWhite')) {
     if ($tName -eq 'PureWhite' -and $pal['Background'] -ne '#FFFFFF') {
         throw "PureWhite modal background must be #FFFFFF, got: $($pal['Background'])"
     }
-    if ($tName -eq 'Translucent' -and $pal['Background'] -ne '#181B22') {
-        throw "Translucent modal background must be #181B22, got: $($pal['Background'])"
+    if ($tName -eq 'Translucent' -and $pal['Background'] -ne '#26181B22') {
+        throw "Translucent modal background must retain its softened alpha fill (#26181B22), got: $($pal['Background'])"
     }
 }
 Write-Output '  [PASS] Modal theme palettes for Pure Black, Translucent, and Pure White verified'
@@ -126,7 +126,7 @@ Write-Output '  [PASS] Global settings persistence (Theme, CacheMaxGigabytes) ve
 
 # 5. Test Live Theme Switching in STA session
 #    The Translucent fill has TWO valid values by design: the plain fallback
-#    (#13161CE6) and the softened liquid-glass fill (#55161B2A) applied when
+#    (#13161CE6) and the softened liquid-glass fill (#161B2A35) applied when
 #    Windows composition supports the real acrylic backdrop (Win10 1803+).
 $themeSwitchCheck = powershell.exe -NoProfile -STA -Command "& {
     . (Resolve-Path '.\src\NSCloudDrive.ps1')
@@ -136,7 +136,7 @@ $themeSwitchCheck = powershell.exe -NoProfile -STA -Command "& {
     `$bgWhite = `$window.Background.ToString()
     Apply-UITheme 'Translucent'
     `$bgTrans = `$window.Background.ToString()
-    if (`$bgBlack -eq '#FF000000' -and `$bgWhite -eq '#FFF8FAFC' -and (`$bgTrans -eq '#13161CE6' -or `$bgTrans -eq '#E613161C' -or `$bgTrans -eq '#161B2A55')) {
+    if (`$bgBlack -eq '#FF000000' -and `$bgWhite -eq '#FFF8FAFC' -and (`$bgTrans -eq '#13161CE6' -or `$bgTrans -eq '#E613161C' -or `$bgTrans -eq '#161B2A35')) {
         'SwitchOK'
     } else {
         'Failed: Black=' + `$bgBlack + ', White=' + `$bgWhite + ', Trans=' + `$bgTrans
