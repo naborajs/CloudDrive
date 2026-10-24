@@ -75,6 +75,16 @@ try {
     if ($state1 -match '[+=/]') {
         throw "State contains unescaped URL characters: $state1"
     }
+    $oauthSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\providers\GoogleDriveProvider.ps1') -Raw
+    if ($oauthSource -notmatch 'aria-label="NS Cloud Drive"' -or $oauthSource -notmatch 'Authorization received') {
+        throw 'The built-in loopback callback must show the local NS Cloud Drive brand and a truthful authorization-received status.'
+    }
+    if ($oauthSource -notmatch '-not \$state -or \$state -ne \$expectedState') {
+        throw 'The OAuth callback must continue rejecting missing or mismatched state values.'
+    }
+    if ($oauthSource -match 'Google Drive Connected|Authentication was successful!') {
+        throw 'The OAuth callback must not claim the account is connected before token and identity verification finish.'
+    }
 
     # Test PKCE verifier and RFC 7636 Appendix B test vector
     $verifier = New-PkceVerifier
