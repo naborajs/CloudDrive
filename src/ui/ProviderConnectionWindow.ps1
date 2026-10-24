@@ -150,6 +150,7 @@ function Show-GoogleClientConfigModal([System.Windows.Window]$Owner = $null) {
     $rightBtns.Children.Add($saveBtn) | Out-Null
     $rightBtns.Children.Add($cancelBtn) | Out-Null
 
+    [void](Enable-ModalGlassBackdrop $cfgWin)
     [void]$cfgWin.ShowDialog()
     return [ordered]@{ Success = $script:CfgSuccess }
 }
@@ -322,6 +323,7 @@ function Show-SettingsModal([System.Windows.Window]$Owner = $null, [scriptblock]
     $cacheStack.Children.Add($cacheBtns) | Out-Null
     $stack.Children.Add($cacheCard) | Out-Null
 
+    [void](Enable-ModalGlassBackdrop $setWin)
     [void]$setWin.ShowDialog()
 }
 
@@ -349,17 +351,17 @@ function Get-ModalThemePalette([string]$ThemeName = '') {
         }
     } elseif ($t -eq 'Translucent') {
         return @{
-            Background = '#181B22'
-            Border = '#2D3342'
-            CardBg = '#222734'
-            CardBorder = '#363E50'
+            Background = '#26181B22'
+            Border = '#71363E50'
+            CardBg = '#99222734'
+            CardBorder = '#88363E50'
             TextPrimary = '#FFFFFF'
             TextMuted = '#94A3B8'
-            InputBg = '#1C202B'
-            InputBorder = '#363E50'
+            InputBg = '#B31C202B'
+            InputBorder = '#88363E50'
             InputText = '#FFFFFF'
-            CancelBg = '#2B3142'
-            CancelBorder = '#363E50'
+            CancelBg = '#B32B3142'
+            CancelBorder = '#88363E50'
             CancelText = '#DBDEE1'
         }
     } else {
@@ -545,8 +547,24 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $tbBorder.Add_MouseLeftButtonDown($SelectTB)
     $listStack.Children.Add($tbBorder) | Out-Null
 
+    [void](Enable-ModalGlassBackdrop $addWin)
     [void]$addWin.ShowDialog()
     return [ordered]@{ SelectedProvider = $script:SelectedProvider }
+}
+
+function Enable-ModalGlassBackdrop([System.Windows.Window]$Window) {
+    if ($null -eq $Window) { return $false }
+    try {
+        if ((Resolve-AppTheme (Get-NSCloudDriveSettings).Theme) -ne 'Translucent' -or
+            -not (Get-Command 'Enable-GlassBackdrop' -ErrorAction SilentlyContinue)) { return $false }
+        $enabled = [bool](Enable-GlassBackdrop -Window $Window)
+        if ($enabled) {
+            $Window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#A8181B22')
+        }
+        return $enabled
+    } catch {
+        return $false
+    }
 }
 
 function Show-CloudAccountSetupModal(
@@ -754,6 +772,7 @@ function Show-CloudAccountSetupModal(
         }
     })
 
+    [void](Enable-ModalGlassBackdrop $setupWin)
     [void]$setupWin.ShowDialog()
     return $script:SavedAccountResult
 }
@@ -805,16 +824,15 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
             if (-not $reason) { $reason = 'Google did not return a verifiable account identity.' }
 
             $identityOk = $false
-            if ($verify.IsValid) {
+            if ($verify.IsValid -and $userEmail -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
                 $flagVerified = [bool](Get-SafeProperty $verify 'IdentityVerified' $false)
                 if ($flagVerified) {
                     $identityOk = $true
-                } elseif ( ($userEmail -match '@') -or ($userName -and $userName -ne 'Google Drive User') ) {
-                    # Identity text that is neither empty nor the generic
-                    # placeholder came from Google APIs or persisted metadata
-                    # that was itself verified when the account was saved.
-                    $identityOk = $true
+                } else {
+                    $reason = 'Google returned an email address, but its identity could not be verified.'
                 }
+            } elseif ($verify.IsValid -and -not $userEmail) {
+                $reason = 'Google did not return a verified email address for this account.'
             }
 
             if ($identityOk) { break }
@@ -1020,6 +1038,7 @@ function Show-DiagnosticsDialog([string]$Title, [string]$DiagnosticsContent, [Sy
     $tb.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
     $dock.Children.Add($tb) | Out-Null
 
+    [void](Enable-ModalGlassBackdrop $diagWindow)
     [void]$diagWindow.ShowDialog()
 }
 
@@ -1147,6 +1166,15 @@ function Show-ProviderConnectionWindow(
         }
     }
 
+    $UpdateStateFromProviderResult = {
+        param($Result)
+        $resultState = [string](Get-SafeProperty $Result 'State' 'Error')
+        if ($resultState -notin (Get-ConnectionStates)) { $resultState = 'Error' }
+        $resultError = [string](Get-SafeProperty $Result 'Error' 'The provider returned an incomplete status response.')
+        if ([string]::IsNullOrWhiteSpace($resultError)) { $resultError = 'The provider returned an incomplete status response.' }
+        & $UpdateState $resultState $resultError
+    }
+
     if ($ProviderId -eq 'terabox') {
         $openBrowserBtn = [System.Windows.Controls.Button]::new()
         $openBrowserBtn.Content = 'Sign In with Embedded Browser'
@@ -1192,7 +1220,7 @@ function Show-ProviderConnectionWindow(
                         $uDisp = if ($verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' (Get-SafeProperty $verify.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
                         & $UpdateState 'Connected' "Connected as $uDisp"
                     } else {
-                        & $UpdateState $verify.State $verify.Error
+                        & $UpdateStateFromProviderResult $verify
                     }
                 } else {
                     & $UpdateState 'Disconnected' $authRes.Error
@@ -1233,7 +1261,7 @@ function Show-ProviderConnectionWindow(
                 $uName = if ($res.UserInfo) { [string](Get-SafeProperty $res.UserInfo 'UserName' 'TeraBox User') } else { 'TeraBox User' }
                 & $UpdateState 'Connected' "Verified connection for $uName"
             } else {
-                & $UpdateState $res.State $res.Error
+                & $UpdateStateFromProviderResult $res
             }
         } else {
             $res = Test-GoogleDriveBackendSession
@@ -1241,7 +1269,7 @@ function Show-ProviderConnectionWindow(
                 $uDisp = if ($res.UserInfo) { [string](Get-SafeProperty $res.UserInfo 'DisplayName' (Get-SafeProperty $res.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
                 & $UpdateState 'Connected' "Verified connection for $uDisp"
             } else {
-                & $UpdateState $res.State $res.Error
+                & $UpdateStateFromProviderResult $res
             }
         }
     })
@@ -1280,6 +1308,7 @@ function Show-ProviderConnectionWindow(
         }
     }
 
+    [void](Enable-ModalGlassBackdrop $win)
     [void]$win.ShowDialog()
 }
 
@@ -1886,5 +1915,6 @@ function Show-CloudTransferModal(
     & $refreshSource
     & $refreshDest
 
+    [void](Enable-ModalGlassBackdrop $win)
     [void]$win.ShowDialog()
 }
