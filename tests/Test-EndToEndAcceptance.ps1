@@ -67,7 +67,7 @@ try {
     }
 
     # Verify both accounts exist in registry
-    $all = Get-CloudAccounts
+    $all = @(Get-CloudAccounts)
     $found1 = $all | Where-Object { $_.Id -eq $testAcc1Id }
     $found2 = $all | Where-Object { $_.Id -eq $testAcc2Id }
     $found3 = $all | Where-Object { $_.Id -eq $testAcc3Id }
