@@ -52,7 +52,38 @@ try {
         DiagnosticLogging = 'Off'
         HealthCheckIntervalSec = 4
         ProviderDriveLetters = @{ gdrive = 'G'; terabox = 'T' }
-        Accounts = @()
+        Accounts = @(
+            [ordered]@{
+                Id = 'google-account-a'
+                ProviderId = 'gdrive'
+                DisplayName = 'Naboraj Sarkar'
+                AccountEmail = 'naboraj-a@example.test'
+                DriveLetter = 'G'
+                AutoMount = $false
+                OpenExplorerOnMount = $false
+                ReadOnly = $false
+            },
+            [ordered]@{
+                Id = 'google-account-b'
+                ProviderId = 'gdrive'
+                DisplayName = 'Bidyutraj Sarkar'
+                AccountEmail = 'bidyutraj-b@example.test'
+                DriveLetter = 'H'
+                AutoMount = $false
+                OpenExplorerOnMount = $false
+                ReadOnly = $false
+            },
+            [ordered]@{
+                Id = 'terabox-account'
+                ProviderId = 'terabox'
+                DisplayName = 'Synthetic TeraBox'
+                AccountEmail = 'terabox-user@example.test'
+                DriveLetter = 'T'
+                AutoMount = $false
+                OpenExplorerOnMount = $false
+                ReadOnly = $false
+            }
+        )
     }
     $settings | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $settingsDirectory 'settings.json') -Encoding UTF8
 
@@ -86,7 +117,19 @@ function Invoke-StartupAutoMount {
 }
 `$failedAccountLiveStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -AccountId 'probe-account' -DriveLetter 'H'
 `$failedLegacyLiveStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -DriveLetter 'G'
+`$script:ProviderStatusSnapshot = [pscustomobject]@{
+    GoogleStatus = `$mountedSnapshot
+    AccountStatuses = @{}
+}
+`$unmappedAccountStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -AccountId 'google-account-a' -DriveLetter 'G'
+`$script:ProviderStatusSnapshot = [pscustomobject]@{
+    GoogleStatus = `$mountedSnapshot
+    AccountStatuses = @{ 'google-account-a' = `$mountedSnapshot }
+}
+`$script:AccountMountStates['google-account-a'] = [ordered]@{ State = 'Error'; Stage = 'Mapping validation'; Error = 'stale drive mapping'; DriveLetter = 'G' }
+`$mismatchedAccountStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -AccountId 'google-account-a' -DriveLetter 'G'
 `$script:AccountMountStates.Remove('probe-account')
+`$script:AccountMountStates.Remove('google-account-a')
 `$script:LegacyMountStates.Remove('gdrive')
 `$script:ProviderStatusSnapshot = [pscustomobject]@{ GoogleStatus = `$incompleteStatus }
 `$cachedStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
@@ -95,6 +138,20 @@ if (-not `$cachedStatus.Contains('MountState') -or `$null -ne `$cachedStatus['Mo
     throw 'An incomplete provider status was not normalized with safe MountState and unavailable IsReadOnly values.'
 }
 Update-AllUIState
+`$accountCards = @(`$accountsStack.Children | Where-Object { `$_ -is [System.Windows.Controls.Border] })
+`$renderedAccountCards = @(
+    foreach (`$card in `$accountCards) {
+        `$infoStack = `$card.Child.Children[1]
+        `$iconContainer = `$card.Child.Children[0]
+        `$badge = @(`$iconContainer.Children | Where-Object { `$_ -is [System.Windows.Controls.Border] } | Select-Object -First 1)[0]
+        [pscustomobject]@{
+            Provider = [string]`$infoStack.Children[0].Text
+            Name = [string]`$infoStack.Children[1].Text
+            Email = [string]`$infoStack.Children[2].Text
+            IconFile = [System.IO.Path]::GetFileName([string]`$badge.Child.Source.UriSource.LocalPath)
+        }
+    }
+)
 `$script:StartupAutoMountPending = `$true
 `$script:StartupAutoMountWorker = `$null
 `$script:StartupAutoMountProgress.Stage = 'Waiting for startup dispatcher'
@@ -167,6 +224,15 @@ try {
         CachedStatusMountState = `$cachedStatus['MountState']
         CachedStatusHasReadOnly = `$cachedStatus.Contains('IsReadOnly')
         CachedStatusReadOnly = `$cachedStatus['IsReadOnly']
+        UnmappedAccountIsMounted = [bool]`$unmappedAccountStatus.IsMounted
+        UnmappedAccountProcessRunning = [bool]`$unmappedAccountStatus.ProcessRunning
+        MismatchedAccountIsMounted = [bool]`$mismatchedAccountStatus.IsMounted
+        MismatchedAccountProcessRunning = [bool]`$mismatchedAccountStatus.ProcessRunning
+        AccountCardCount = `$renderedAccountCards.Count
+        AccountCardProviders = @(`$renderedAccountCards | ForEach-Object { `$_.Provider })
+        AccountCardNames = @(`$renderedAccountCards | ForEach-Object { `$_.Name })
+        AccountCardEmails = @(`$renderedAccountCards | ForEach-Object { `$_.Email })
+        AccountCardIcons = @(`$renderedAccountCards | ForEach-Object { `$_.IconFile })
         LogsNavigationError = `$logsNavigationError
         LogsLoadCompleted = `$logsLoadCompletedBeforeNavigation
         LogsViewCollapsedAfterNavigation = (`$logsView.Visibility -eq [System.Windows.Visibility]::Collapsed)
@@ -217,8 +283,17 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     }
     if ($result.Pending -or $result.HasWorker -or $result.DispatchError -or $result.RestoreStage -ne 'Recovery checks complete' -or
         -not $result.CachedStatusHasMountState -or $null -ne $result.CachedStatusMountState -or
-        -not $result.CachedStatusHasReadOnly -or $null -ne $result.CachedStatusReadOnly) {
+        -not $result.CachedStatusHasReadOnly -or $null -ne $result.CachedStatusReadOnly -or
+        $result.UnmappedAccountIsMounted -or $result.UnmappedAccountProcessRunning -or
+        $result.MismatchedAccountIsMounted -or $result.MismatchedAccountProcessRunning) {
         throw "Startup timer did not complete cleanly: $($result | ConvertTo-Json -Compress)"
+    }
+    if ($result.AccountCardCount -ne 3 -or
+        ($result.AccountCardProviders -join '|') -ne 'Google Drive|Google Drive|TeraBox' -or
+        ($result.AccountCardNames -join '|') -ne 'Naboraj Sarkar|Bidyutraj Sarkar|Synthetic TeraBox' -or
+        ($result.AccountCardEmails -join '|') -ne 'naboraj-a@example.test|bidyutraj-b@example.test|terabox-user@example.test' -or
+        ($result.AccountCardIcons -join '|') -ne 'googledrive.png|googledrive.png|terabox.png') {
+        throw "Account cards merged identities or rendered provider metadata/icons incorrectly: $($result | ConvertTo-Json -Compress)"
     }
     if ($result.TeraBoxProgress -notmatch '^Validating TeraBox session \(0:25\)$' -or
         $result.GoogleProgress -notmatch '^Waiting for Google Drive restore \(0:25\)$') {
@@ -250,6 +325,8 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
     Write-Output '  [PASS] Logs paging, account filtering, search, and navigation work in the isolated WPF dispatcher.'
     Write-Output '  [PASS] Cached account and legacy mounts remain visible after transient health-check errors.'
+    Write-Output '  [PASS] The WPF account cards keep two Google identities and TeraBox separate with provider-matched icons.'
+    Write-Output '  [PASS] A provider-wide legacy status is not attributed to an account without account-specific mount evidence.'
 } finally {
     if ($child -and -not $child.HasExited) {
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
