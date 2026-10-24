@@ -52,6 +52,29 @@ try {
     if ($reloaded.ProviderDriveLetters.terabox -ne 'X') { throw 'Expected terabox to be X' }
     Write-Output '  [PASS] Custom settings persistence verified'
 
+    $settingsPath = Get-NSCloudDriveSettingsPath
+    $validSettingsJson = [System.IO.File]::ReadAllText($settingsPath)
+    $malformedSettingsJson = '{"Accounts": ['
+    try {
+        [System.IO.File]::WriteAllText($settingsPath, $malformedSettingsJson, [System.Text.UTF8Encoding]::new($false))
+        $loadFailedExplicitly = $false
+        try {
+            [void](Get-NSCloudDriveSettings)
+        } catch {
+            $loadFailedExplicitly = $_.Exception.Message -match 'original file was preserved'
+        }
+        if (-not $loadFailedExplicitly) { throw 'Malformed settings should fail explicitly instead of returning defaults' }
+        if ([System.IO.File]::ReadAllText($settingsPath) -ne $malformedSettingsJson) {
+            throw 'Malformed settings were changed while reporting the load failure'
+        }
+    } finally {
+        [System.IO.File]::WriteAllText($settingsPath, $validSettingsJson, [System.Text.UTF8Encoding]::new($false))
+    }
+    $writeArtifacts = @(Get-ChildItem -LiteralPath (Split-Path -Parent $settingsPath) -File |
+        Where-Object { $_.Name -like 'settings.json.*.tmp' -or $_.Name -like 'settings.json.*.bak' })
+    if ($writeArtifacts.Count -ne 0) { throw 'Atomic settings persistence left temporary or backup files behind' }
+    Write-Output '  [PASS] Malformed settings are preserved and writes leave no temporary artifacts'
+
     # 3. Test Get-PreferredDriveLetter and Set-PreferredDriveLetter
     $gdriveLetter = Get-PreferredDriveLetter 'gdrive'
     if ($gdriveLetter -ne 'S') { throw "Expected S, got $gdriveLetter" }
