@@ -3097,9 +3097,48 @@ function Update-AllUIState {
 
             $aRemBtn = New-QuickIconButton ([string][char]0x2715) 'Disconnect and Remove'
             $aRemBtn.Add_Click({
+                # Never tear an account down while a startup restore or reconnect
+                # worker may be saving/mounting it concurrently; the worker would
+                # resurrect a phantom mount for a deleted account.
+                if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
                 Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
                 Remove-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter ([string]$currAcc.DriveLetter)
-                Remove-CloudAccount -AccountId $currAcc.Id | Out-Null
+                try {
+                    if (([string]$currAcc.ProviderId) -eq 'gdrive') {
+                        Remove-GoogleDriveSession -AccountId ([string]$currAcc.Id)
+                    } elseif (([string]$currAcc.ProviderId) -eq 'terabox') {
+                        Remove-TeraBoxSession -AccountId ([string]$currAcc.Id)
+                    }
+                } catch { }
+                try {
+                    Remove-CloudAccount -AccountId $currAcc.Id | Out-Null
+                } catch {
+                    [System.Windows.MessageBox]::Show((Format-SanitizedDiagnosticMessage $_.Exception.Message), 'Account removal failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    return
+                }
+                # Deleting the settings record is not enough: every resource
+                # created per account id must be removed with it, or stale
+                # credentials, caches, bridge homes, and browser profiles stay
+                # attributed to a dead account forever. Each step is best
+                # effort - a leftover directory never blocks a removal.
+                try {
+                    Remove-Item -LiteralPath (Join-Path $script:CacheDirectory ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
+                } catch { }
+                if (([string]$currAcc.ProviderId) -eq 'terabox') {
+                    try {
+                        Remove-Item -LiteralPath (Get-TeraBoxBridgeHomeDirectory -AccountId ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+                try {
+                    Remove-Item -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\webview2-profile') ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
+                } catch { }
+                try {
+                    $accountLogDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+                    foreach ($logName in @("rclone-$($currAcc.Id).log", "rclone-$($currAcc.Id).1.log")) {
+                        Remove-Item -LiteralPath (Join-Path $accountLogDir $logName) -Force -ErrorAction SilentlyContinue
+                    }
+                } catch { }
+                if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id)) { $script:AccountMountStates.Remove([string]$currAcc.Id) }
                 Update-AllUIState
             })
             $aActionRow.Children.Add($aRemBtn) | Out-Null
@@ -3114,7 +3153,11 @@ function Update-AllUIState {
             $aGrid.Children.Add($aRightStack) | Out-Null
 
             $mountElapsed = if ($aMountState -and $aMountState.StartedAt) { [Math]::Max(0, [int]([DateTime]::UtcNow - [DateTime]$aMountState.StartedAt).TotalSeconds) } else { 0 }
-            $pillText = if ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':)' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
+            # Surface the mount's real access mode: IsReadOnly comes from the
+            # running rclone process's command line, so '(read-only)' reflects
+            # what actually applies to this drive, not just the saved setting.
+            $roSuffix = if ($aStatus.IsReadOnly) { ' (read-only)' } else { '' }
+            $pillText = if ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':' + $roSuffix + ')' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
             $pillColor = if ($aStatus.IsMounted) { $p.PillMounted } elseif ($aMountState -and $aMountState.State -eq 'Error') { $p.Danger } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { $p.PillWarning } else { $p.PillConnected }
             $aStatusLbl = New-Label $pillText 11 $pillColor $true
             $aStatusLbl.HorizontalAlignment = 'Right'
@@ -3745,6 +3788,7 @@ function Invoke-AutoReconnectWatchdog {
                     DriveLetter = [string]$_.DriveLetter
                     DisplayName = [string]$_.DisplayName
                     AutoMount = [bool]$_.AutoMount
+                    ReadOnly = [bool]$_.ReadOnly
                 }
             })
         }
@@ -3828,7 +3872,8 @@ function Invoke-AutoReconnectWatchdog {
                         if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     } else {
                         continue
                     }
@@ -3837,7 +3882,8 @@ function Invoke-AutoReconnectWatchdog {
                     if ($account.ProviderId -eq 'gdrive') {
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     }
 
                     [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
@@ -3935,7 +3981,8 @@ function Invoke-StartupAutoMount {
                         $progress.Stage = "Starting $($account.DriveLetter): Google Drive mount (up to 90s)"
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
                         $progress.Stage = 'Validating TeraBox session'
@@ -3943,14 +3990,25 @@ function Invoke-StartupAutoMount {
                         $progress.Stage = "Starting $($account.DriveLetter): TeraBox mount (up to 90s)"
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     }
                 } catch {
+                    $restoreError = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                    # A mount failure caused by missing per-account credentials is
+                    # an authentication-stage failure, not a generic error: the
+                    # Google rclone environment builder throws when the account
+                    # has no tokens, and the TeraBox bridge fails when the
+                    # account has no session. Mapping these to AuthRequired makes
+                    # the card show 'Sign-in required' (with a bounded retry when
+                    # the user signs in), and guarantees no false 'Mounted'
+                    # result can ever be recorded from a failed launch.
+                    $restoreState = if ($restoreError -match 'No Google Drive tokens|No valid TeraBox session|No local TeraBox session') { 'AuthRequired' } else { 'Error' }
                     $results.Add([pscustomobject]@{
                         AccountId = $account.Id
-                        State = 'Error'
-                        Error = Format-SanitizedDiagnosticMessage $_.Exception.Message
+                        State = $restoreState
+                        Error = $restoreError
                         DriveLetter = [string]$account.DriveLetter
                     })
                 }
