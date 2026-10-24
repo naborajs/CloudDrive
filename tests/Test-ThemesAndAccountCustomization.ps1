@@ -125,6 +125,9 @@ try {
 Write-Output '  [PASS] Global settings persistence (Theme, CacheMaxGigabytes) verified'
 
 # 5. Test Live Theme Switching in STA session
+#    The Translucent fill has TWO valid values by design: the plain fallback
+#    (#13161CE6) and the softened liquid-glass fill (#55161B2A) applied when
+#    Windows composition supports the real acrylic backdrop (Win10 1803+).
 $themeSwitchCheck = powershell.exe -NoProfile -STA -Command "& {
     . (Resolve-Path '.\src\NSCloudDrive.ps1')
     Apply-UITheme 'PureBlack'
@@ -133,7 +136,7 @@ $themeSwitchCheck = powershell.exe -NoProfile -STA -Command "& {
     `$bgWhite = `$window.Background.ToString()
     Apply-UITheme 'Translucent'
     `$bgTrans = `$window.Background.ToString()
-    if (`$bgBlack -eq '#FF000000' -and `$bgWhite -eq '#FFF8FAFC' -and (`$bgTrans -eq '#13161CE6' -or `$bgTrans -eq '#E613161C')) {
+    if (`$bgBlack -eq '#FF000000' -and `$bgWhite -eq '#FFF8FAFC' -and (`$bgTrans -eq '#13161CE6' -or `$bgTrans -eq '#E613161C' -or `$bgTrans -eq '#161B2A55')) {
         'SwitchOK'
     } else {
         'Failed: Black=' + `$bgBlack + ', White=' + `$bgWhite + ', Trans=' + `$bgTrans
