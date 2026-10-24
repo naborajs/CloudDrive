@@ -306,7 +306,15 @@ function Invoke-TeraBoxHttp(
                 throw "HTTP request timed out after $TimeoutSec seconds."
             }
         } else {
-            $task.Wait()
+            # Background worker path (no WPF pump): bounded wait. An unbounded
+            # Wait() here stalled a startup-restore worker indefinitely when a
+            # TeraBox edge node hung the connection, keeping that provider's
+            # mount from ever starting. If the task faults, Wait rethrows the
+            # original exception exactly like an unbounded wait would.
+            if (-not $task.Wait([Math]::Max(5, $TimeoutSec) * 1000)) {
+                try { $client.CancelPendingRequests() } catch { }
+                throw "HTTP request timed out after $TimeoutSec seconds."
+            }
         }
 
         $resp = $task.Result
@@ -335,7 +343,13 @@ function Invoke-TeraBoxHttp(
         if ($Window -and (Get-Command 'Wait-WpfTask' -ErrorAction SilentlyContinue)) {
             [void](Wait-WpfTask -Task $readTask -TimeoutMs 5000 -Window $Window)
         } else {
-            $readTask.Wait()
+            # The HttpClient timeout does not cover ReadAsStringAsync once the
+            # response headers have arrived, so this read must carry its own
+            # bound (same startup-restore stall as the send path above).
+            if (-not $readTask.Wait(5000)) {
+                try { $client.CancelPendingRequests() } catch { }
+                throw 'HTTP response body read timed out after 5 seconds.'
+            }
         }
 
         $body = $readTask.Result
