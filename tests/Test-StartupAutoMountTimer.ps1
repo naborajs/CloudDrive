@@ -77,6 +77,17 @@ function Invoke-StartupAutoMount {
     DriveRoot = 'G:\'
     ProcessId = `$null
 }
+`$mountedSnapshot = [ordered]@{ IsMounted = `$true; ProcessRunning = `$true; DriveLetter = 'H'; DriveRoot = 'H:\'; ProcessId = 12345 }
+`$script:AccountMountStates['probe-account'] = [ordered]@{ State = 'Error'; Stage = 'Root probe timed out'; Error = 'probe timeout'; DriveLetter = 'H' }
+`$script:LegacyMountStates['gdrive'] = [ordered]@{ State = 'Error'; Stage = 'Root probe timed out'; Error = 'probe timeout'; DriveLetter = 'G' }
+`$script:ProviderStatusSnapshot = [pscustomobject]@{
+    GoogleStatus = `$mountedSnapshot
+    AccountStatuses = @{ 'probe-account' = `$mountedSnapshot }
+}
+`$failedAccountLiveStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -AccountId 'probe-account' -DriveLetter 'H'
+`$failedLegacyLiveStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive' -DriveLetter 'G'
+`$script:AccountMountStates.Remove('probe-account')
+`$script:LegacyMountStates.Remove('gdrive')
 `$script:ProviderStatusSnapshot = [pscustomobject]@{ GoogleStatus = `$incompleteStatus }
 `$cachedStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
 if (-not `$cachedStatus.Contains('MountState') -or `$null -ne `$cachedStatus['MountState'] -or
@@ -150,6 +161,8 @@ try {
         LogsLoadCompleted = `$logsLoadCompletedBeforeNavigation
         LogsViewCollapsedAfterNavigation = (`$logsView.Visibility -eq [System.Windows.Visibility]::Collapsed)
         LogsStatus = `$logsStatusBeforeNavigation
+        PreservesAccountProcessAfterError = (`$failedAccountLiveStatus.IsMounted -and `$failedAccountLiveStatus.ProcessRunning -and `$failedAccountLiveStatus.MountState.State -eq 'Error')
+        PreservesLegacyProcessAfterError = (`$failedLegacyLiveStatus.IsMounted -and `$failedLegacyLiveStatus.ProcessRunning -and `$failedLegacyLiveStatus.MountState.State -eq 'Error')
         LogsText = `$logsTextBeforeNavigation
     }
     [System.IO.File]::WriteAllText(`$env:NSCD_TEST_RESULT, (`$result | ConvertTo-Json -Compress))
@@ -204,6 +217,9 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
         $result.LogsStatus -match 'failed|timed out') {
         throw "Logs navigation or bounded background loading did not complete cleanly: $($result | ConvertTo-Json -Compress)"
     }
+    if (-not $result.PreservesAccountProcessAfterError -or -not $result.PreservesLegacyProcessAfterError) {
+        throw "A live account or legacy mount was hidden after a transient health-check error: $($result | ConvertTo-Json -Compress)"
+    }
     $waitStart = [regex]::Match([string]$result.DispatcherWaitStart, '\((\d+):(\d{2})\)$')
     $waitAfter = [regex]::Match([string]$result.DispatcherWaitAfter, '\((\d+):(\d{2})\)$')
     if (-not $waitStart.Success -or -not $waitAfter.Success) {
@@ -218,6 +234,7 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     Write-Output '  [PASS] Restore status is provider-specific and its elapsed time is monotonic across stages.'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
     Write-Output '  [PASS] Logs loads in the isolated WPF dispatcher and navigation away completes cleanly.'
+    Write-Output '  [PASS] Cached account and legacy mounts remain visible after transient health-check errors.'
 } finally {
     if ($child -and -not $child.HasExited) {
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
