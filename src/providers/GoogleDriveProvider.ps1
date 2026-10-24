@@ -96,16 +96,14 @@ function New-PkceChallenge([string]$Verifier) {
 function Get-GoogleDriveStoredTokens([string]$AccountId = '') {
     $credPath = Get-GoogleCredentialFilePath -AccountId $AccountId
     if (-not (Test-Path -LiteralPath $credPath -PathType Leaf)) {
-        if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
-            $defaultPath = Get-GoogleCredentialFilePath
-            if (Test-Path -LiteralPath $defaultPath -PathType Leaf) {
-                $credPath = $defaultPath
-            } else {
-                return $null
-            }
-        } else {
-            return $null
-        }
+        # Account-scoped reads must NEVER silently fall back to the shared
+        # legacy token file: that file belongs to the legacy single-account
+        # connection and may hold a DIFFERENT Google user's tokens. Falling
+        # back here would validate, refresh, and even mount that other user's
+        # Drive under this account's id and drive letter. A missing
+        # account-specific file is a clean "no tokens for this account"
+        # answer; consumers report a sign-in requirement for it.
+        return $null
     }
 
     try {
@@ -990,9 +988,12 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                     $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
                     $quotaUsed = if ($aboutObj.used) { [int64]$aboutObj.used } else { 0L }
 
-                    # Retrieve account metadata from settings if available, else generic fallback
-                    $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Find-CloudAccountById' -ErrorAction SilentlyContinue)) {
-                        Find-CloudAccountById -Id $AccountId
+                    # Retrieve account metadata from the saved account record
+                    # when available; only a brand-new (unsaved) account keeps
+                    # the generic placeholder - which creation-time callers
+                    # then refuse to treat as a verified identity.
+                    $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Get-CloudAccount' -ErrorAction SilentlyContinue)) {
+                        Get-CloudAccount -AccountId $AccountId
                     } else { $null }
                     $fallbackName = if ($acc -and $acc.DisplayName) { [string]$acc.DisplayName } else { 'Google Drive User' }
                     $fallbackEmail = if ($acc -and $acc.AccountEmail) { [string]$acc.AccountEmail } elseif ($acc -and $acc.Username -and $acc.Username -match '@') { [string]$acc.Username } else { '' }
@@ -1021,8 +1022,8 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
 
         # If we have a refresh token and rclone binary, session is valid via rclone token auto-renewal
         if ($tokens.refresh_token -and $rclone) {
-            $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Find-CloudAccountById' -ErrorAction SilentlyContinue)) {
-                Find-CloudAccountById -Id $AccountId
+            $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Get-CloudAccount' -ErrorAction SilentlyContinue)) {
+                Get-CloudAccount -AccountId $AccountId
             } else { $null }
             $fallbackName = if ($acc -and $acc.DisplayName) { [string]$acc.DisplayName } else { 'Google Drive User' }
             $fallbackEmail = if ($acc -and $acc.AccountEmail) { [string]$acc.AccountEmail } else { '' }
@@ -1097,6 +1098,38 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     }
 
     }
+
+    # Account-scoped connection identity cross-check: when this check is bound
+    # to a saved account, the identity Google just verified must BELONG to
+    # that account. A mismatch means the credential store produced a
+    # different account's tokens (e.g. the saved file was replaced or an old
+    # connection's material leaked in); reporting a sign-in requirement here
+    # is what prevents mounting another user's Drive under this account's
+    # letter. Compared only when BOTH values look like actual email
+    # addresses, so display-label edits can never trigger a false positive.
+    if (-not [string]::IsNullOrEmpty($AccountId) -and $userEmail -match '@') {
+        try {
+            $savedAccount = if (Get-Command 'Get-CloudAccount' -ErrorAction SilentlyContinue) { Get-CloudAccount -AccountId $AccountId } else { $null }
+            $savedEmail = if ($savedAccount -and $savedAccount.AccountEmail) { [string]$savedAccount.AccountEmail } else { '' }
+            if ($savedEmail -match '@' -and -not [string]::Equals($savedEmail, $userEmail, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return (& $SetCacheAndReturn ([ordered]@{
+                    IsValid = $false
+                    State = 'AuthRequired'
+                    Error = "The authorized Google account ($userEmail) does not match this saved account ($savedEmail). Disconnect and reconnect this account's sign-in from its card."
+                    IdentityVerified = $false
+                    IdentitySource = $(if ($identitySource) { $identitySource } else { 'drive-api' })
+                    IdentityError = 'The signing-in Google identity does not belong to this saved account.'
+                    UserInfo = [ordered]@{
+                        DisplayName = $userDisplayName
+                        EmailAddress = $userEmail
+                        QuotaUsed = $quotaUsed
+                        QuotaTotal = $quotaTotal
+                    }
+                }))
+            }
+        } catch { }
+    }
+
     return (& $SetCacheAndReturn ([ordered]@{
         IsValid = $true
         State = 'Connected'
