@@ -46,6 +46,10 @@ try {
     Assert-True ($all.Count -eq 3) "all entries readable (found $($all.Count))"
     $tail = @(Read-ApplicationLogEntries 1)
     Assert-True ($tail.Count -eq 1 -and ([string]$tail[0].message) -eq 'third entry') 'tail read is bounded and newest-included'
+    $olderPage = @(Read-ApplicationLogEntries -MaxEntries 1 -SkipEntries 1)
+    Assert-True ($olderPage.Count -eq 1 -and ([string]$olderPage[0].message) -eq 'second entry') 'older page skips the newest entry'
+    $oldestPage = @(Read-ApplicationLogEntries -MaxEntries 1 -SkipEntries 2)
+    Assert-True ($oldestPage.Count -eq 1 -and ([string]$oldestPage[0].accountId) -eq 'acc1') 'pagination can reach the oldest retained entry'
 
     # ---- 3. Rotation bounds storage ----
     $script:ApplicationLogRotateBytes = 100   # shrink for the test only
@@ -80,7 +84,9 @@ try {
     Assert-True ($mainSource -match 'Write-NSCloudLog -Severity \$restoreSeverity -AccountId \$key -Operation ''startup-restore''') 'startup restore outcomes are logged'
     Assert-True ($mainSource -match "Write-NSCloudLog -Severity 'Error' -Operation 'status-refresh'") 'status refresh failures are logged'
     Assert-True ($mainSource -match '\$script:LastLoggedAutoMountErrorText') 'startup failure logs are deduplicated'
-    Assert-True ($mainSource -match 'Read-ApplicationLogEntries 800') 'background page load is bounded to the newest 800 entries'
+    Assert-True ($mainSource -match 'Read-ApplicationLogEntries -MaxEntries \(\$pageSize \+ 1\) -SkipEntries \$skipEntries') 'background page load requests a bounded page and one look-ahead entry'
+    Assert-True ($mainSource -match '\$script:LogsPageSize = 200') 'log pages have a bounded page size'
+    Assert-True ($mainSource -match '\$logsOlderBtn\.Add_Click' -and $mainSource -match '\$logsNewerBtn\.Add_Click') 'older and newer log page controls are wired'
     Assert-True ($mainSource -match 'Start-NSBackgroundOperation') 'log file parsing runs off the WPF dispatcher'
     Assert-True ($mainSource -match 'LogsLoadTimer') 'log page polls for completion without blocking navigation'
     Assert-True ($mainSource -match 'TotalSeconds -gt 10') 'slow log loading is cancelled with a visible timeout'
@@ -94,6 +100,9 @@ try {
     Assert-True ($mainSource -match 'Stored locally: %LOCALAPPDATA%') 'privacy notice states what is stored'
     Assert-True ($mainSource -match 'replaced with \[REDACTED\]') 'privacy notice states redaction honestly'
     Assert-True ($mainSource -match 'rotates at 2 MB') 'privacy notice states the retention bound'
+    $readerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\models\ConnectionState.ps1') -Raw
+    Assert-True ($readerSource -match 'function Read-ApplicationLogEntries\(\[int\]\$MaxEntries = 200, \[int\]\$SkipEntries = 0') 'log reader supports bounded pagination'
+    Assert-True ($readerSource -notmatch '\[System\.IO\.File\]::ReadAllLines\(\$logPath\)') 'log reader does not load the entire file into memory'
 
     Write-Output '  [PASS] Logs page contract verified.'
 } finally {
