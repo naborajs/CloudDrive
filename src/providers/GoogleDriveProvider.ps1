@@ -532,6 +532,7 @@ function Invoke-GoogleRcloneAuthorize([string]$AccountId = '', [int]$TimeoutSeco
     while (-not $proc.HasExited) {
         if ($sw.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
             try { $proc.Kill() } catch { }
+            try { $proc.Dispose() } catch { }
             return [ordered]@{
                 Success = $false
                 Error = "Google Drive authorization timed out after $TimeoutSeconds seconds."
@@ -872,6 +873,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             IsValid = $false
             State = 'Disconnected'
             Error = 'No Google Drive tokens found. Please connect your account.'
+            IdentityVerified = $false
+            IdentitySource = ''
+            IdentityError = $null
             UserInfo = $null
         }
         $script:GoogleDriveSessionCache[$cacheKey] = [ordered]@{ CheckedAt = [DateTime]::UtcNow; Result = $res }
@@ -884,6 +888,12 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     $quotaUsed = [int64]0
     $quotaTotal = [int64]0
     $hasQuotaInfo = $false
+    # Sanitized, secret-free diagnostics for the identity lookup. Populated
+    # from real API failures so the UI can show the exact reason (HTTP status,
+    # Google error reason, safe response details) instead of a vague
+    # "identity could not be verified" rejection. Never contains tokens.
+    $identityDiagnostics = [System.Collections.Generic.List[string]]::new()
+    $identitySource = ''
 
     # Fast-path: check if access token is expired based on obtained_at and expires_in
     $isTokenExpired = $false
@@ -919,8 +929,15 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             if ($rootResp -and $rootResp.PSObject.Properties['owners'] -and $rootResp.owners.Count -gt 0) {
                 $userDisplayName = [string]$rootResp.owners[0].displayName
                 $userEmail = [string]$rootResp.owners[0].emailAddress
+                if ($userDisplayName -or $userEmail) { $identitySource = 'drive-api' }
             }
-        } catch { }
+        } catch {
+            try {
+                $apiDiag = Get-GoogleApiErrorDetails $_
+                if ($apiDiag -and $apiDiag.ActionableError) { $identityDiagnostics.Add([string]$apiDiag.ActionableError) }
+                elseif ($_) { $identityDiagnostics.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
+            } catch { }
+        }
     }
 
     if (-not $userDisplayName -and -not $userEmail -and (-not $isTokenExpired -or $hasCustomClient)) {
@@ -939,8 +956,15 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                     $hasQuotaInfo = $true
                     if ($aboutResp.storageQuota.usage) { $quotaUsed = [int64]$aboutResp.storageQuota.usage }
                 }
+                if ($userDisplayName -or $userEmail) { $identitySource = 'drive-api' }
             }
-        } catch { }
+        } catch {
+            try {
+                $apiDiag = Get-GoogleApiErrorDetails $_
+                if ($apiDiag -and $apiDiag.ActionableError) { $identityDiagnostics.Add([string]$apiDiag.ActionableError) }
+                elseif ($_) { $identityDiagnostics.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message))) }
+            } catch { }
+        }
     }
 
     $SetCacheAndReturn = {
@@ -957,7 +981,10 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $safeRemote
-                $result = Invoke-GoogleRcloneCommand -FilePath $rclone -Arguments "about --json ${safeRemote}:" -EnvironmentVariables $envVars -TimeoutSeconds 4
+                # Identity lookups may need a token refresh under the shared rclone
+                # client, which can take 30-35 seconds under rate limits. A 4-second
+                # cutoff made this check look failed even when the session was fine.
+                $result = Invoke-GoogleRcloneCommand -FilePath $rclone -Arguments "about --json ${safeRemote}:" -EnvironmentVariables $envVars -TimeoutSeconds 20
                 if ($result.ExitCode -eq 0 -and (-not [string]::IsNullOrWhiteSpace($result.StandardOutput))) {
                     $aboutObj = $result.StandardOutput | ConvertFrom-Json
                     $quotaTotal = if ($aboutObj.total) { [int64]$aboutObj.total } else { 0L }
@@ -974,6 +1001,13 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                         IsValid = $true
                         State = 'Connected'
                         Error = $null
+                        # This identity came from stored metadata, not from a live
+                        # Google API response. For a brand-new (unsaved) account it
+                        # is only the generic placeholder, so callers that need a
+                        # verified identity (account creation) must not accept it.
+                        IdentityVerified = $false
+                        IdentitySource = 'rclone-metadata'
+                        IdentityError = $(if ($identityDiagnostics.Count -gt 0) { [string]::Join(' ', $identityDiagnostics) } else { $null })
                         UserInfo = [ordered]@{
                             DisplayName = $fallbackName
                             EmailAddress = $fallbackEmail
@@ -997,6 +1031,10 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
                 IsValid = $true
                 State = 'Connected'
                 Error = $null
+                # Token-only validation: no live identity was returned by Google.
+                IdentityVerified = $false
+                IdentitySource = 'stored-token'
+                IdentityError = $(if ($identityDiagnostics.Count -gt 0) { [string]::Join(' ', $identityDiagnostics) } else { $null })
                 UserInfo = [ordered]@{
                     DisplayName = $fallbackName
                     EmailAddress = $fallbackEmail
@@ -1010,6 +1048,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             IsValid = $false
             State = 'AuthenticationExpired'
             Error = 'Google Drive access token has expired or was revoked. Please reconnect your account.'
+            IdentityVerified = $false
+            IdentitySource = ''
+            IdentityError = $(if ($identityDiagnostics.Count -gt 0) { [string]::Join(' ', $identityDiagnostics) } else { $null })
             UserInfo = $null
         }))
     }
@@ -1060,6 +1101,9 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         IsValid = $true
         State = 'Connected'
         Error = $null
+        IdentityVerified = $true
+        IdentitySource = $(if ($identitySource) { $identitySource } else { 'drive-api' })
+        IdentityError = $null
         UserInfo = [ordered]@{
             DisplayName = if ($userDisplayName) { $userDisplayName } else { 'Google Drive User' }
             EmailAddress = if ($userEmail) { $userEmail } else { '' }
@@ -1067,6 +1111,21 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
             QuotaTotal = $quotaTotal
         }
     }))
+}
+
+# Summarizes the best available sanitized reason for a failed Google identity
+# lookup so the UI can show the exact failure (HTTP status, Google error
+# reason, safe response details) instead of a generic rejection. Returns ''
+# when nothing was captured. Never contains tokens or authorization codes.
+function Get-GoogleIdentityFailureReason($Verify) {
+    if ($null -eq $Verify) { return '' }
+    try {
+        $primary = Get-SafeProperty $Verify 'Error' ''
+        if ($primary) { return (Format-SanitizedDiagnosticMessage ([string]$primary)) }
+        $secondary = Get-SafeProperty $Verify 'IdentityError' ''
+        if ($secondary) { return (Format-SanitizedDiagnosticMessage ([string]$secondary)) }
+    } catch { }
+    return ''
 }
 
 function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
