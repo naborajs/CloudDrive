@@ -579,7 +579,7 @@ function Show-CloudAccountSetupModal(
     $provName = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
     $setupWin.Title = if ($isEdit) { "Configure $provName Account" } else { "Add $provName Disk" }
     $setupWin.Width = 470
-    $setupWin.Height = 440
+    $setupWin.Height = 570
     $setupWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $setupWin.Owner = $Owner }
     $setupWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
@@ -588,7 +588,11 @@ function Show-CloudAccountSetupModal(
 
     $stack = [System.Windows.Controls.StackPanel]::new()
     $stack.Margin = [System.Windows.Thickness]::new(24)
-    $setupWin.Content = $stack
+    $settingsScrollViewer = [System.Windows.Controls.ScrollViewer]::new()
+    $settingsScrollViewer.VerticalScrollBarVisibility = 'Auto'
+    $settingsScrollViewer.HorizontalScrollBarVisibility = 'Disabled'
+    $settingsScrollViewer.Content = $stack
+    $setupWin.Content = $settingsScrollViewer
 
     # Header
     $title = New-UIElement-Label $(if ($isEdit) { "Configure $provName Disk" } else { "Add $provName Disk" }) 16 $p.TextPrimary $true
@@ -694,8 +698,39 @@ function Show-CloudAccountSetupModal(
     } else {
         $false
     }
+    $chkReadOnly.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
     $stack.Children.Add($chkReadOnly) | Out-Null
 
+    $globalSettings = Get-NSCloudDriveSettings
+    $lblCacheDirectory = New-UIElement-Label 'Per-drive cache base folder (isolated subfolder is created)' 12 $p.TextPrimary $true
+    $stack.Children.Add($lblCacheDirectory) | Out-Null
+    $txtCacheDirectory = [System.Windows.Controls.TextBox]::new()
+    $txtCacheDirectory.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtCacheDirectory.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $txtCacheDirectory.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $txtCacheDirectory.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $txtCacheDirectory.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputText)
+    $txtCacheDirectory.Text = if ($InitialAccount -and $InitialAccount.ContainsKey('CacheDirectory') -and $InitialAccount.CacheDirectory) {
+        [string]$InitialAccount.CacheDirectory
+    } else {
+        [string]$globalSettings.CacheDirectory
+    }
+    $stack.Children.Add($txtCacheDirectory) | Out-Null
+
+    $lblCacheLimit = New-UIElement-Label 'VFS cache limit (GB, 1-1024)' 12 $p.TextPrimary $true
+    $stack.Children.Add($lblCacheLimit) | Out-Null
+    $txtCacheLimit = [System.Windows.Controls.TextBox]::new()
+    $txtCacheLimit.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtCacheLimit.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
+    $txtCacheLimit.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $txtCacheLimit.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $txtCacheLimit.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputText)
+    $txtCacheLimit.Text = if ($InitialAccount -and $InitialAccount.ContainsKey('CacheMaxGigabytes') -and [int]$InitialAccount.CacheMaxGigabytes -gt 0) {
+        [string]$InitialAccount.CacheMaxGigabytes
+    } else {
+        [string]$globalSettings.CacheMaxGigabytes
+    }
+    $stack.Children.Add($txtCacheLimit) | Out-Null
     # Buttons
     $btnDock = [System.Windows.Controls.DockPanel]::new()
     $stack.Children.Add($btnDock) | Out-Null
@@ -733,6 +768,16 @@ function Show-CloudAccountSetupModal(
         if ([string]::IsNullOrEmpty($name)) {
             $name = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
         }
+        $cacheDirectory = $txtCacheDirectory.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($cacheDirectory)) {
+            [System.Windows.MessageBox]::Show('Choose a cache folder before saving this drive.', 'Invalid cache folder', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+        $cacheMaxGigabytes = 0
+        if (-not [int]::TryParse($txtCacheLimit.Text.Trim(), [ref]$cacheMaxGigabytes) -or $cacheMaxGigabytes -lt 1 -or $cacheMaxGigabytes -gt 1024) {
+            [System.Windows.MessageBox]::Show('The VFS cache limit must be a whole number from 1 to 1024 GB.', 'Invalid cache limit', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
 
         $letter = $prefDefault
         if ($cmbLetter.SelectedItem -and $cmbLetter.SelectedItem.Tag) {
@@ -754,6 +799,8 @@ function Show-CloudAccountSetupModal(
             AutoMount = [bool]$chkAutoMount.IsChecked
             OpenExplorerOnMount = [bool]$chkOpenExplorer.IsChecked
             ReadOnly = [bool]$chkReadOnly.IsChecked
+            CacheDirectory = $cacheDirectory
+            CacheMaxGigabytes = $cacheMaxGigabytes
             CustomIcon = if ($InitialAccount -and $InitialAccount.ContainsKey('CustomIcon')) { [string]$InitialAccount.CustomIcon } else { $null }
             Created = if ($isEdit -and $InitialAccount.ContainsKey('Created')) { [string]$InitialAccount.Created } else { [DateTime]::UtcNow.ToString('o') }
         }
