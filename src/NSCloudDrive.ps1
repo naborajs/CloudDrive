@@ -2970,8 +2970,24 @@ function Start-StartupCacheRecoveryWorker {
         param([string]$sourceRoot, [string]$cacheDirectory)
         $ErrorActionPreference = 'Stop'
         . (Join-Path $sourceRoot 'services\CacheManager.ps1')
-        Invoke-StartupCacheRecovery -CacheDirectory $cacheDirectory | Out-Null
-        [pscustomobject]@{ Success = $true }
+        $targets = [System.Collections.Generic.List[string]]::new()
+        $targetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($account in @(Get-CloudAccounts)) {
+            $providerId = ([string]$account.ProviderId).ToLowerInvariant()
+            $accountId = [string]$account.Id
+            if ($providerId -notin @('gdrive', 'terabox') -or $accountId -notmatch "^${providerId}_[A-Za-z0-9_-]{1,128}$") {
+                continue
+            }
+            $accountCacheBase = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { $cacheDirectory }
+            $accountCachePath = Join-Path $accountCacheBase $accountId
+            if ($targetSet.Add($accountCachePath)) { $targets.Add($accountCachePath) }
+        }
+        foreach ($legacyMountKey in @('gdrive', 'terabox')) {
+            $legacyCachePath = Join-Path $cacheDirectory $legacyMountKey
+            if ($targetSet.Add($legacyCachePath)) { $targets.Add($legacyCachePath) }
+        }
+        $recovery = Invoke-StartupCacheRecovery -CacheDirectory $cacheDirectory -MountCacheDirectories @($targets.ToArray())
+        [pscustomobject]@{ Success = ($recovery.Errors.Count -eq 0); Result = $recovery }
     }
 }
 
@@ -3006,8 +3022,26 @@ function Complete-AvailableStartupWorkers {
     }
 
     if ($script:StartupCacheRecoveryWorker -and (Test-NSBackgroundOperationCompleted $script:StartupCacheRecoveryWorker)) {
-        try { Complete-NSBackgroundOperation $script:StartupCacheRecoveryWorker | Out-Null } catch { }
-        $script:StartupCacheRecoveryWorker = $null
+        try {
+            $completed = Complete-NSBackgroundOperation $script:StartupCacheRecoveryWorker
+            if ($completed.HadErrors) {
+                $message = if ($completed.Errors.Count -gt 0) {
+                    [string]$completed.Errors[0].Exception.Message
+                } else {
+                    'Startup cache recovery failed.'
+                }
+                Write-NSCloudLog -Severity 'Warning' -Operation 'startup-cache-recovery' -Message $message
+            } elseif ($completed.Output.Count -gt 0) {
+                $recovery = $completed.Output[-1].Result
+                foreach ($errorMessage in $recovery.Errors) {
+                    Write-NSCloudLog -Severity 'Warning' -Operation 'startup-cache-recovery' -Message ([string]$errorMessage)
+                }
+            }
+        } catch {
+            Write-NSCloudLog -Severity 'Warning' -Operation 'startup-cache-recovery' -Message ([string]$_.Exception.Message)
+        } finally {
+            $script:StartupCacheRecoveryWorker = $null
+        }
     }
 
     if ($script:StartupAutoMountWorker -and (Test-NSBackgroundOperationCompleted $script:StartupAutoMountWorker)) {
