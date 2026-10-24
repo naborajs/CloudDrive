@@ -107,6 +107,22 @@ try {
     if ((Get-SafeProperty @{ 'foo' = 'bar' } 'foo') -ne 'bar') { throw 'Expected hashtable lookup' }
     if ($null -ne (Get-SafeProperty @{ 'foo' = 'bar' } 'baz')) { throw 'Expected absent hashtable key to return null' }
     Write-Output '  [PASS] Get-SafeProperty and strict mode response parsing verified'
+
+    # 8. Every network wait in the provider is bounded. An unbounded Wait()
+    #    stalled a background startup-restore worker indefinitely (seen live when
+    #    a TeraBox edge node hung after sending response headers), blocking the
+    #    provider's mount forever.
+    $tbSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\providers\TeraBoxProvider.ps1') -Raw
+    if (([regex]::Matches($tbSource, '\.Wait\(\)')).Count -ne 0) {
+        throw 'TeraBoxProvider still contains an unbounded Task.Wait() in its network path.'
+    }
+    if ($tbSource -notmatch '\$task\.Wait\(\[Math\]::Max\(5, \$TimeoutSec\) \* 1000\)') {
+        throw 'The send path no longer uses the bounded Wait(ms) form.'
+    }
+    if ($tbSource -notmatch '\$readTask\.Wait\(5000\)') {
+        throw 'The response-body read no longer uses the bounded Wait(ms) form.'
+    }
+    Write-Output '  [PASS] All TeraBox HTTP waits are bounded (no unbounded Task.Wait() remains)'
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
