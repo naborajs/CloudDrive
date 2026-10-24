@@ -903,7 +903,7 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
         }
 
         if ($userEmail) {
-            $existing = Get-CloudAccounts
+            $existing = @(Get-CloudAccounts)
             foreach ($account in $existing) {
                 if ($account.ProviderId -eq 'gdrive' -and $account.AccountEmail -and [string]::Equals([string]$account.AccountEmail, $userEmail, [StringComparison]::OrdinalIgnoreCase)) {
                     Remove-GoogleDriveSession -AccountId $accId
@@ -1366,13 +1366,9 @@ function Show-ProviderConnectionWindow(
 function Get-AvailableTransferAccounts {
     $list = @()
     try {
-        $accs = Get-CloudAccounts
+        $accs = @(Get-CloudAccounts)
         if ($accs) {
-            foreach ($a in $accs) {
-                if ($a.Id -notlike 'test_*' -and $a.AccountEmail -notin @('personal@gmail.com', 'work@company.com', 'terabox_user')) {
-                    $list += $a
-                }
-            }
+            foreach ($a in $accs) { $list += $a }
         }
     } catch { }
 
