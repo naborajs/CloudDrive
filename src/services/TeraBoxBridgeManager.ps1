@@ -248,7 +248,12 @@ function Start-TeraBoxBridge {
 
     # If an unhealthy or unresponsive cpx bridge is running, terminate it before starting fresh
     try {
-        Stop-TeraBoxBridge -Port $Port -AccountId $AccountId -BridgePassword $existingPw
+        # Discard the sentinel output of the shutdown helper: called uncaptured
+        # it leaked its 'return $true' into this function's pipeline, so the
+        # cold-start result became an Object[] of two items and the consumer's
+        # StrictMode property access on 'Success' threw
+        # PropertyNotFoundException instead of returning the status dictionary.
+        [void](Stop-TeraBoxBridge -Port $Port -AccountId $AccountId -BridgePassword $existingPw)
         Start-Sleep -Milliseconds 250
     } catch { }
 
