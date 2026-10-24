@@ -54,6 +54,17 @@ try {
 `$env:LOCALAPPDATA = `$env:NSCD_TEST_ROOT
 . $quotedMainScript
 `$script:StartupAutoMountPending = `$true
+`$script:StartupAutoMountWorker = `$null
+`$script:StartupAutoMountProgress.Stage = 'Waiting for startup dispatcher'
+`$script:StartupAutoMountProgress.ProviderId = ''
+`$script:StartupAutoMountProgress.DriveLetter = ''
+`$script:StartupAutoMountProgress.AccountId = ''
+`$script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow.AddSeconds(-3)
+`$script:StartupAutoMountProgress.StageStartedAt = `$script:StartupAutoMountProgress.StartedAt
+`$dispatcherWaitStart = Get-StartupRestoreDisplay -ProviderId 'terabox' -DriveLetter 'T'
+Start-Sleep -Milliseconds 1200
+`$dispatcherWaitAfter = Get-StartupRestoreDisplay -ProviderId 'terabox' -DriveLetter 'T'
+`$script:StartupAutoMountPending = `$true
 `$script:StartupAutoMountWorker = [pscustomobject]@{ StartedAt = [DateTime]::UtcNow.AddSeconds(-7) }
 `$script:StartupAutoMountProgress.ProviderId = 'terabox'
 `$script:StartupAutoMountProgress.DriveLetter = 'T'
@@ -77,6 +88,8 @@ try {
         HasWorker = (`$null -ne `$script:StartupAutoMountWorker)
         DispatchError = `$script:StartupAutoMountError
         RestoreStage = [string]`$script:StartupAutoMountProgress.Stage
+        DispatcherWaitStart = `$dispatcherWaitStart
+        DispatcherWaitAfter = `$dispatcherWaitAfter
         TeraBoxProgress = `$tbProgressLabel
         GoogleProgress = `$gdProgressLabel
     }
@@ -111,6 +124,17 @@ try {
         $result.GoogleProgress -notmatch '^Waiting for Google Drive restore \(0:25\)$') {
         throw "Startup restore labels do not isolate the active provider or stage timer: $($result | ConvertTo-Json -Compress)"
     }
+    $waitStart = [regex]::Match([string]$result.DispatcherWaitStart, '\((\d+):(\d{2})\)$')
+    $waitAfter = [regex]::Match([string]$result.DispatcherWaitAfter, '\((\d+):(\d{2})\)$')
+    if (-not $waitStart.Success -or -not $waitAfter.Success) {
+        throw "Startup dispatcher wait did not show elapsed time: $($result | ConvertTo-Json -Compress)"
+    }
+    $waitStartSeconds = ([int]$waitStart.Groups[1].Value * 60) + [int]$waitStart.Groups[2].Value
+    $waitAfterSeconds = ([int]$waitAfter.Groups[1].Value * 60) + [int]$waitAfter.Groups[2].Value
+    if ($waitAfterSeconds -le $waitStartSeconds) {
+        throw "Startup dispatcher timer did not advance: $($result | ConvertTo-Json -Compress)"
+    }
+    Write-Output '  [PASS] Startup dispatcher wait timer advances before the worker starts.'
     Write-Output '  [PASS] Restore status is provider-specific and its elapsed time is stage-scoped.'
     Write-Output '  [PASS] Startup dispatcher completes and publishes its final restore stage without a scope error.'
 } finally {
