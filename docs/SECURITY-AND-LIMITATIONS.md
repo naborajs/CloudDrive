@@ -1,8 +1,10 @@
 # Security and Limitations
 
-**Status:** Production-Ready Architecture, Verified Threat Model, and Hardened Implementation.
+**Status:** Security notes for an experimental PowerShell/WPF preview. This is not a security certification or a production-readiness claim.
 
-## 1. Comprehensive Threat Model
+The repository has synthetic and structural regression tests, but no penetration test, clean-install review, external rclone/CPX binary audit, or live-provider/mount acceptance. A scoped security-review agent found no vulnerabilities in the changes it reviewed; that result does not cover every product component or external dependency.
+
+## 1. Threat Model and Verification Boundaries
 
 ### A. Assets Requiring Protection
 - **OAuth 2.0 Credentials:** Google Drive access tokens and long-lived refresh tokens.
@@ -23,8 +25,8 @@
 - **RFC 7636 PKCE:** Enforces Proof Key for Code Exchange with SHA-256 code challenge (`S256`) and cryptographically random 43-character `code_verifier`. Protects against authorization-code interception.
 - **Cryptographic State Parameter:** Every OAuth flow generates a cryptographically secure random `state` token verified upon callback to defeat Cross-Site Request Forgery (CSRF).
 - **DPAPI Credential Storage:** Provider tokens and session keys are encrypted at rest using Windows Data Protection API (DPAPI) scoped exclusively to `DataProtectionScope.CurrentUser`.
-- **Directory & File ACL Inheritance:** Credential storage folders (`%LOCALAPPDATA%\NSCloudDrive\credentials`) and credential files enforce explicit Windows Access Control Lists (`SetAccessRuleProtection($true, $false)`) granting `FullControl` solely to the current user SID and `SYSTEM`. Directory ACLs configure `ContainerInherit` and `ObjectInherit` so newly generated credentials inherit restrictive permissions automatically.
-- **Immediate Token Revocation:** Disconnecting an account triggers an immediate HTTP POST revocation request directly to Google's revocation endpoint, invalidating consent tokens on the provider side.
+- **Directory & File ACLs:** Credential storage uses protected ACLs intended to grant `FullControl` to the current user SID and `SYSTEM`. ACL changes use Windows .NET access-control APIs and are applied before credentials are written; failures stop the save. Synthetic tests verify the resulting ACLs on this Windows host.
+- **Token revocation:** Disconnect attempts Google's revocation endpoint, but the request is best-effort. Network/provider failure is not proof that the token was revoked remotely.
 
 ### D. Process Execution & Command Injection Defense
 - **Win32 Argument Escaping (`Format-SafeProcessArgument`):** External process invocations format arguments adhering to Win32 command line parser rules. Quotes and backslashes preceding quotes are rigorously escaped (`\"`, `\\"`), preventing argument breakout and injection.
@@ -34,26 +36,26 @@
 
 ### E. File, Cache & Operating System Protection
 - **OS Drive Protection:** `Test-CacheDirectorySafety` validates that cloud caches are placed on non-OS volumes (dedicated NTFS storage recommended) and warns users if cache paths reside on `%SystemDrive%`.
-- **In-Use File Lock Protection (`Test-FileInUse`):** Cache eviction and cleanup routines inspect file stream locks via `[System.IO.File]::Open(..., ReadWrite, None)`. Any file currently being read, streamed, or uploaded is strictly skipped from eviction.
-- **LRU Cache Quota Bounding:** When the cache exceeds the configured quota (e.g. 20 GB default, selectable up to 200 GB), an eviction sweep removes unpinned, inactive cache chunks in Least-Recently-Used order based on `LastAccessTimeUtc`.
-- **Interrupted File Recovery:** On application startup, `Invoke-StartupCacheRecovery` cleans up abandoned `.partial`, `.tmp`, and `.rclone-tmp` files without touching active cache entries.
+- **In-Use File Lock Protection (`Test-FileInUse`):** The cleanup helper checks for an exclusive read/write lock before deleting a file. This is not a complete guarantee for pending uploads, remote writes, or every open-handle pattern.
+- **Cache eviction:** `Invoke-SafeCacheCleanup` and startup recovery now restrict traversal to recognized provider/account cache namespaces. Eviction remains locally destructive within those namespaces and still requires isolated testing with real mount/cache behavior.
+- **Interrupted File Recovery:** Startup recovery checks temporary-file patterns under those recognized provider/account cache directories; it does not scan the whole configured cache root.
 - **Zero Local Overwrites During Transfers:** Cloud-to-cloud transfers operate in streaming relay mode via `rclone copy` / `rclone move`, piping data between cloud providers without buffering intermediate full-size files on the host operating system drive.
 
 ### F. Network & Secret Sanitization
-- **Strict TLS Verification:** Native TLS certificate validation is enforced for all REST queries and provider endpoints. No certificate verification bypasses or insecure flags are permitted.
+- **TLS:** Source checks found no configured certificate-validation bypass in the reviewed scripts. This does not independently verify every external binary or network path.
 - **Multi-Pattern Diagnostic Redaction (`Format-SanitizedDiagnosticMessage`):** All exception messages, log lines, transfer status records, and diagnostic outputs pass through a deterministic secret sanitizer that redacts:
   - OAuth access tokens (`ya29.*`) and refresh tokens (`1//.*`).
   - TeraBox session cookies (`ndus=*`, `BDUSS=*`).
   - Authorization headers (`Bearer *`, `Basic *`).
   - JSON credential fields (`access_token`, `refresh_token`, `client_secret`, `password`, `code`).
   - Query parameters and request cookies (`Cookie: *`, `Set-Cookie: *`).
-- **Zero Secret Output:** Diagnostics, console streams, and UI status badges never emit plain-text secrets or credential fragments.
+- **Redaction limits:** Sanitization covers common formats and headers; it cannot guarantee that every provider-specific secret or malformed diagnostic is redacted.
 
 ---
 
 ## 2. Multi-Account Isolation Architecture
 
-NS Cloud Drive supports running multiple cloud accounts concurrently with complete separation:
+The implementation is designed to isolate accounts, and synthetic tests cover parts of that boundary. Live concurrent-provider isolation is not verified:
 1. **Isolated Token Files:** Each account stores credentials in an account-specific file:
    - `google-tokens-<safeAccountId>.xml`
    - `terabox-session-<safeAccountId>.xml`
@@ -64,7 +66,9 @@ NS Cloud Drive supports running multiple cloud accounts concurrently with comple
 3. **Independent Drive Letter Allocation:** Each account is mapped to its own virtual drive letter (`G:`, `T:`, `H:`, `I:`, etc.) with collision detection and automatic fallback to the next available drive letter.
 4. **Independent VFS Cache Trees:** VFS cache folders are compartmentalized by account ID within the root cache directory:
    - `D:\CloudCache\<AccountId>\vfs`
-5. **Independent Process Lifecycles:** Unmounting or removing one account terminates only the corresponding `rclone.exe` child process; other mounted drives continue operating without interruption.
+5. **Independent Process Lifecycles:** Account-scoped process ownership and disconnect behavior have mocked regression coverage. Real simultaneous account mount/unmount behavior has not been verified here.
+
+Do not infer concurrent TeraBox support from Google account isolation tests. TeraBox depends on an unofficial backend and its independent-session behavior has not been confirmed against multiple real accounts.
 
 ---
 
@@ -75,31 +79,26 @@ NS Cloud Drive supports running multiple cloud accounts concurrently with comple
 - **Shared vs. Custom Client Credentials:** By default, Google Drive discovers publisher-bundled credentials (`config/google-oauth.json`) or auto-discovers client secrets in Downloads. Users may also provide their own Google Cloud OAuth Client ID for dedicated quota.
 
 ### B. TeraBox
-- **Community WebDAV Bridge:** TeraBox full-drive access operates via the local CPX WebDAV bridge daemon (`cpx.exe terabox-bridge`). TeraBox web sessions do not have a documented OAuth contract and depend on session cookies captured during legitimate login.
-- **Open Platform API Limitations:** TeraBox's official Open Platform API (`open.terabox.com`) restricts third-party application access to `/From: Other Applications/<App_Name>/` rather than user root, requiring the loopback WebDAV bridge for full-drive mounting.
-- **Upload File Size Bounds:** Free TeraBox accounts enforce a 4 GB single-file upload limit (128 GB for Premium accounts). The provider enforces this server-side.
+- **Community backend:** The TeraBox path depends on unofficial session-based components. No live TeraBox authorization or mount was validated, and no support claim should be inferred.
+- **Open Platform API limitations:** The official API requires provider-issued credentials and is documented as restricting application access to an app-specific folder. It is not verified as a replacement for full-drive access.
 
 ### C. Virtual Filesystem (WinFsp & VFS Cache)
-- **Local Application Compatibility:** While virtual drives appear in Windows File Explorer as fixed NTFS volumes (`FixedDisk`), operations with high random I/O (such as active Git repositories, large database files, or active software compilation) should remain on local SSDs, copying completed assets to cloud drives.
-- **Offline Access:** Files not present in the local VFS cache require active network connectivity to stream on-demand. Cached files remain readable offline until eviction.
+- **Integration status:** Mount arguments and readiness checks have regression coverage, but drive visibility, Windows filesystem behavior, reconnects, and transfers were not tested against a real provider in this validation.
+- **Offline access:** Files not in a provider/cache layer generally require network access. Offline-read guarantees have not been tested.
 
 ---
 
-## 4. Verification and Automated Test Evidence
+## 4. Verification Evidence and Gaps
 
-The security model is verified continuously by the automated test suite (`tests/Run-AllTests.ps1`) comprising 15 comprehensive test suites:
-1. `Test-ConnectionState.ps1`: Fail-closed state transitions and secret sanitization across JSON, queries, and raw tokens.
-2. `Test-TeraBoxProvider.ps1`: Session DPAPI persistence, strict directory ACLs, and fail-closed credential validation.
-3. `Test-TeraBoxBridgeManager.ps1`: Loopback daemon configuration, DPAPI secret encryption, and WebDAV rclone environment isolation.
-4. `Test-GoogleDriveProvider.ps1`: RFC 7636 PKCE S256 test vectors, loopback authorization, token isolation, and dynamic rclone remotes.
-5. `Test-VirtualDriveManager.ps1`: WinFsp detection, drive conflict resolution, VFS mount argument escaping, and process lifecycle cleanup.
-6. `Test-SettingsManager.ps1`: Multi-account CRUD, preferred drive letter validation, and Windows startup registry settings.
-7. `Test-DesktopUIRegression.ps1`: Layout width constraints, STA window construction, and single-instance mutex handling.
-8. `Test-EmbeddedBrowserWindow.ps1`: Microsoft Edge WebView2 runtime verification, isolated profile directory, and non-blocking dispatcher pump.
-9. `Test-MultiAccountIsolation.ps1`: Isolation across multiple concurrent Google Drive and TeraBox accounts, remotes, and drive mappings.
-10. `Test-ThemesAndAccountCustomization.ps1`: Three-theme rendering (Pure Black, Translucent, Pure White) and safe diagnostic metrics.
-11. `Test-CloudTransferManager.ps1`: Streaming relay transfer, speed smoothing, zero-division protection, path traversal normalization, and argument injection defense.
-12. `Test-CacheManagement.ps1`: In-use file lock protection, LRU cache eviction, OS drive detection, and startup recovery of orphaned chunks.
-13. `Test-EndToEndAcceptance.ps1`: Multi-account persistence, isolated DPAPI tokens, dynamic rclone remotes, and Win32 `EmptyWorkingSet` memory trimming (168 MB down to < 10 MB).
-14. `Test-WriteAndUploadVerification.ps1`: VFS full write-back, read-write default, upload verification, and live backend querying.
-15. `Test-RcloneConfigPassword.ps1`: Synthetic DPAPI credential storage, private ACL enforcement, and plaintext-at-rest checks.
+The following focused tests passed during this work:
+
+- `Test-SettingsManager.ps1`: isolated CRUD, malformed-settings preservation, and settings-write regression checks.
+- `Test-CacheManagement.ps1`: temporary-directory tests for account-scoped startup recovery, cache eviction boundaries, and lock handling.
+- `Test-GoogleDriveProvider.ps1`: synthetic OAuth/PKCE, DPAPI token isolation, and protected credential ACL checks.
+- `Test-TeraBoxProvider.ps1`: synthetic DPAPI storage and mocked offline provider validation.
+- `Test-LogsPage.ps1`, `Test-AnalyticsPage.ps1`: sandboxed log behavior and structural UI checks; no live UI freeze/performance test.
+- `Test-MultiAccountLifecycle.ps1`, `Test-StartupAutoMountTimer.ps1`, `Test-BackgroundOperationManager.ps1`: mocked lifecycle, timer, and worker tests.
+
+The full `Run-AllTests.ps1` suite was not run because mount/provider processes were active. No real Google account, TeraBox account, Explorer filesystem operation, upload/download, clean installation, or Windows packaging test was performed. `Test-EndToEndAcceptance.ps1`'s working-set trim call is not an idle-memory benchmark and does not establish a memory target.
+
+The read-only process snapshot found no running NS Cloud Drive UI process, so application startup/idle RAM and CPU could not be measured. The observed `rclone`/`cpx` processes are required mount/provider processes and were left untouched. These observations are not comparable before/after measurements.
