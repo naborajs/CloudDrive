@@ -228,7 +228,7 @@ function Get-VirtualDriveStatus(
         $letter = $script:ProviderDriveMapping[$mountKey]
     } elseif (-not [string]::IsNullOrEmpty($AccountId)) {
         try {
-            $accs = Get-CloudAccounts
+            $accs = @(Get-CloudAccounts)
             $matched = $accs | Where-Object { $_.Id -eq $AccountId } | Select-Object -First 1
             if ($matched -and $matched.DriveLetter) {
                 $letter = $matched.DriveLetter
