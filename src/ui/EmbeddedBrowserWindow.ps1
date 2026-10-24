@@ -287,6 +287,12 @@ function Show-TeraBoxEmbeddedLoginWindow(
     $TryConnect = {
         param([bool]$Automatic = $true)
 
+        # Declare at scriptblock scope so the DispatcherTimer tick callback
+        # (a nested closure) can capture it reliably. Without this, a
+        # variable defined inside the success branch below could not be
+        # retrieved by the tick handler, producing a dispatcher exception.
+        $closeTimer = $null
+
         if ($script:BrowserWindowClosed -or $script:LoginCompleted -or $script:CheckingSession) {
             return
         }
