@@ -460,27 +460,43 @@ function Test-WindowsStartupEnabled {
     return $false
 }
 
-function Set-WindowsStartupEnabled([bool]$Enable, [string]$ScriptPath = '') {
+function Set-WindowsStartupEnabled([bool]$Enable, [string]$ScriptPath = '', [string]$ExecutablePath = '') {
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     if (-not (Test-Path -LiteralPath $runKey)) {
         New-Item -Path $runKey -Force | Out-Null
     }
 
     if ($Enable) {
-        $targetScript = if (-not [string]::IsNullOrEmpty($ScriptPath)) {
-            $ScriptPath
-        } else {
-            (Join-Path $PSScriptRoot '..\NSCloudDrive.ps1')
-        }
-        $targetScript = [System.IO.Path]::GetFullPath($targetScript)
         $settings = Get-NSCloudDriveSettings
         $minParam = if ($settings -and $settings.StartMinimized) { ' -Minimized' } else { '' }
-        $psExe = if (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
-            Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+        if (-not [string]::IsNullOrEmpty($ScriptPath)) {
+            $targetScript = [System.IO.Path]::GetFullPath($ScriptPath)
+            $psExe = if (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
+                Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            } else {
+                'powershell.exe'
+            }
+            $commandValue = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$targetScript`"$minParam"
         } else {
-            'powershell.exe'
+            $rootExe = if (-not [string]::IsNullOrEmpty($ExecutablePath)) {
+                $ExecutablePath
+            } else {
+                Join-Path $PSScriptRoot '..\..\NSCloudDrive.exe'
+            }
+            if (Test-Path -LiteralPath $rootExe -PathType Leaf) {
+                $fullExe = [System.IO.Path]::GetFullPath($rootExe)
+                $commandValue = "`"$fullExe`"$minParam"
+            } else {
+                $targetScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\NSCloudDrive.ps1'))
+                $psExe = if (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
+                    Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                } else {
+                    'powershell.exe'
+                }
+                $commandValue = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$targetScript`"$minParam"
+            }
         }
-        $commandValue = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File `"$targetScript`"$minParam"
         Set-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive' -Value $commandValue -Type String
     } else {
         Remove-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive' -ErrorAction SilentlyContinue
