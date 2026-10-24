@@ -12,6 +12,12 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'EmbeddedBrowserWindow.ps1')
 
+# Prevents nested account-creation flows. During authorization this module
+# pumps WPF dispatcher frames, so a second Add Cloud Disk click can otherwise
+# start a second full flow inside the first one; that nest is what turns a
+# simple failure dialog into a broken window stack.
+$script:CloudAccountCreationBusy = $false
+
 function New-UIElement-Label([string]$Text, [int]$Size = 13, [string]$Color = '#172033', [bool]$Bold = $false) {
     $block = [System.Windows.Controls.TextBlock]::new()
     $block.Text = $Text
@@ -457,9 +463,25 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $gdLeft.Children.Add($gdText) | Out-Null
 
     $SelectGD = {
+        if ($script:CloudAccountCreationBusy) { return }
         $script:SelectedProvider = 'gdrive'
+        # Defer the provider flow to the Closed event so the modal is fully
+        # torn down before the long-running authorization starts, and so any
+        # failure inside the flow is reported as a dialog instead of bubbling
+        # through the WPF event pipeline.
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 'gdrive' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
         $addWin.Close()
-        if ($OnProviderSelected) { & $OnProviderSelected 'gdrive' }
     }
     $gdBtn.Add_Click($SelectGD)
     $gdBorder.Add_MouseLeftButtonDown($SelectGD)
@@ -502,9 +524,22 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $tbLeft.Children.Add($tbText) | Out-Null
 
     $SelectTB = {
+        if ($script:CloudAccountCreationBusy) { return }
         $script:SelectedProvider = 'terabox'
+        # Same Closed-event deferral as the Google Drive card above.
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 'terabox' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
         $addWin.Close()
-        if ($OnProviderSelected) { & $OnProviderSelected 'terabox' }
     }
     $tbBtn.Add_Click($SelectTB)
     $tbBorder.Add_MouseLeftButtonDown($SelectTB)
@@ -724,6 +759,26 @@ function Show-CloudAccountSetupModal(
 }
 
 function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
+    if ($script:CloudAccountCreationBusy) {
+        [System.Windows.MessageBox]::Show('An account is already being created. Finish or cancel the current flow before starting another.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return $null
+    }
+    $script:CloudAccountCreationBusy = $true
+    try {
+        return (New-CloudAccountRecord -Owner $Owner -ProviderId $ProviderId)
+    } catch {
+        # A failed creation attempt must never bubble into the WPF event
+        # pipeline (unhandled exception) and must never escalate into an
+        # application crash. The exception text is sanitized and actionable.
+        $reason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $reason`n`nThe application remains usable. No account data was modified. You can retry.", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        return $null
+    } finally {
+        $script:CloudAccountCreationBusy = $false
+    }
+}
+
+function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
     if ($ProviderId -eq 'gdrive') {
         $accId = "gdrive_" + [Guid]::NewGuid().ToString('N')
         $authRes = Invoke-GoogleDriveAuthorization -AccountId $accId
@@ -732,13 +787,53 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
             return $null
         }
 
-        $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens -AccountId $accId
-        $userEmail = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'EmailAddress' '') } else { '' }
-        $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' '') } else { '' }
-        if (-not $verify.IsValid -or (-not $userEmail -and (-not $userName -or $userName -eq 'Google Drive User'))) {
+        # Identity verification with an explicit retry path. The fresh
+        # authorization result is safely stored for the new account id under
+        # DPAPI, so verification can be retried without signing in again.
+        # The final 'Google Drive User' placeholder from the rclone fallback
+        # is never treated as a verified identity for an unsaved account.
+        $identityOk = $false
+        $userEmail = ''
+        $userName = ''
+        $reason = ''
+        $retryAttempt = 0
+        while ($true) {
+            $verify = Test-GoogleDriveBackendSession -TokensOverride $authRes.Tokens -AccountId $accId
+            $userEmail = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'EmailAddress' '') } else { '' }
+            $userName = if ($verify.IsValid -and $verify.UserInfo) { [string](Get-SafeProperty $verify.UserInfo 'DisplayName' '') } else { '' }
+            $reason = Get-GoogleIdentityFailureReason $verify
+            if (-not $reason) { $reason = 'Google did not return a verifiable account identity.' }
+
+            $identityOk = $false
+            if ($verify.IsValid) {
+                $flagVerified = [bool](Get-SafeProperty $verify 'IdentityVerified' $false)
+                if ($flagVerified) {
+                    $identityOk = $true
+                } elseif ( ($userEmail -match '@') -or ($userName -and $userName -ne 'Google Drive User') ) {
+                    # Identity text that is neither empty nor the generic
+                    # placeholder came from Google APIs or persisted metadata
+                    # that was itself verified when the account was saved.
+                    $identityOk = $true
+                }
+            }
+
+            if ($identityOk) { break }
+
+            $prompt = "Google authorization succeeded, but the account identity could not be verified. No account will be added.`n`nReason: $reason`n`nThe authorization was received. Retry the identity check without signing in again?"
+            $choice = [System.Windows.MessageBox]::Show($prompt, 'Google Drive', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            if ($choice -eq [System.Windows.MessageBoxResult]::Yes -and $retryAttempt -lt 2) {
+                $retryAttempt++
+                continue
+            }
+            break
+        }
+
+        if (-not $identityOk) {
+            # Discard the failed attempt cleanly: the fresh tokens are revoked
+            # and removed so no half-authorized residue stays on disk, and the
+            # user gets the exact failure reason to act on.
             Remove-GoogleDriveSession -AccountId $accId
-            $reason = if ($verify.Error) { [string]$verify.Error } else { 'Google did not return a verifiable account identity.' }
-            [System.Windows.MessageBox]::Show("Google authorization succeeded, but the account identity could not be verified. No account was added. $reason", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            [System.Windows.MessageBox]::Show("Google authorization succeeded, but the account identity could not be verified. No account was added.`n`nReason: $reason`n`nThe received authorization was discarded for security. No saved accounts were changed. You can retry via Add Cloud Disk.", 'Google Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
             return $null
         }
 
