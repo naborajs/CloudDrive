@@ -200,6 +200,85 @@ function Test-TeraBoxBridgeHealth {
     }
 }
 
+function Get-TeraBoxBridgeStatus {
+    [CmdletBinding()]
+    param(
+        [string]$AccountId = '',
+        [int]$Port = 0,
+        [string]$BridgePassword = $null,
+        [int]$TimeoutSec = 3
+    )
+
+    if ($Port -le 0) { $Port = Get-TeraBoxBridgePort -AccountId $AccountId }
+    $homeDir = Get-TeraBoxBridgeHomeDirectory -AccountId $AccountId
+    if (-not $BridgePassword) { $BridgePassword = Get-TeraBoxBridgeExistingPassword -HomeDirectory $homeDir }
+
+    if (-not $BridgePassword) {
+        return [ordered]@{
+            Success = $false
+            Error = 'No bridge password found for account'
+            Plan = $null
+            IsPremium = $false
+            MaxFileSizeBytes = 4000000000L # 4 GB safe fallback for free tier
+            QuotaTotal = 0L
+            QuotaUsed = 0L
+            Uploads = 0L
+            UploadBytes = 0L
+            Reads = 0L
+            ReadBytes = 0L
+            Errors = 0L
+            LastError = $null
+            Throttled = 0L
+        }
+    }
+
+    try {
+        $headers = @{}
+        $auth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("cpx:$BridgePassword"))
+        $headers['Authorization'] = "Basic $auth"
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/.cloudplayx/status" -Headers $headers -TimeoutSec $TimeoutSec -ErrorAction Stop
+
+        $planStr = if ($resp.PSObject.Properties['plan'] -and $resp.plan) { [string]$resp.plan } else { 'Free' }
+        $isPremium = ($planStr -match '(?i)premium|vip')
+        $maxBytes = if ($isPremium) { 128L * 1000 * 1000 * 1000 } else { 4L * 1000 * 1000 * 1000 }
+
+        return [ordered]@{
+            Success = $true
+            Transport = if ($resp.PSObject.Properties['transport']) { [string]$resp.transport } else { 'web' }
+            User = if ($resp.PSObject.Properties['user']) { [string]$resp.user } else { '' }
+            Plan = $planStr
+            IsPremium = [bool]$isPremium
+            MaxFileSizeBytes = [int64]$maxBytes
+            QuotaTotal = if ($resp.PSObject.Properties['quotaTotal'] -and $resp.quotaTotal) { [int64]$resp.quotaTotal } else { 0L }
+            QuotaUsed = if ($resp.PSObject.Properties['quotaUsed'] -and $resp.quotaUsed) { [int64]$resp.quotaUsed } else { 0L }
+            Uploads = if ($resp.PSObject.Properties['uploads']) { [int64]$resp.uploads } else { 0L }
+            UploadBytes = if ($resp.PSObject.Properties['uploadBytes']) { [int64]$resp.uploadBytes } else { 0L }
+            Reads = if ($resp.PSObject.Properties['reads']) { [int64]$resp.reads } else { 0L }
+            ReadBytes = if ($resp.PSObject.Properties['readBytes']) { [int64]$resp.readBytes } else { 0L }
+            Errors = if ($resp.PSObject.Properties['errors']) { [int64]$resp.errors } else { 0L }
+            LastError = if ($resp.PSObject.Properties['lastError']) { [string]$resp.lastError } else { $null }
+            Throttled = if ($resp.PSObject.Properties['throttled']) { [int64]$resp.throttled } else { 0L }
+        }
+    } catch {
+        return [ordered]@{
+            Success = $false
+            Error = $_.Exception.Message
+            Plan = 'Free'
+            IsPremium = $false
+            MaxFileSizeBytes = 4000000000L # 4 GB safe fallback
+            QuotaTotal = 0L
+            QuotaUsed = 0L
+            Uploads = 0L
+            UploadBytes = 0L
+            Reads = 0L
+            ReadBytes = 0L
+            Errors = 0L
+            LastError = $null
+            Throttled = 0L
+        }
+    }
+}
+
 function Start-TeraBoxBridge {
     [CmdletBinding()]
     param(
