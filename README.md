@@ -10,8 +10,10 @@
 - **Air Live Drive-Inspired Desktop UI**: Clean, modern interface featuring a navigation sidebar (`Disks`, `Options`, `Help`), provider badge icons, direct `Connect` / `Disconnect` buttons, drive letter combo (`in [ G: v ]`), quick action buttons (📁 Explorer, ⚙ Settings, ⬆ Upload, ✕ Remove), live storage capacity progress bars, and an embedded `Options` view.
 - **Three Supported Themes**:
   - **Pure Black** (`#000000`): High-contrast OLED dark theme.
-  - **Translucent** (`#13161CE6`): Modern dark acrylic glass style.
+  - **Translucent Liquid Glass**: Windows DWM system backdrop / acrylic blur with reduced-opacity window, navigation, cards, and dialogs where supported; falls back to the normal dark theme when composition is unavailable.
   - **Pure White** (`#F8FAFC`): Clean, crisp light theme with refined contrast.
+- **On-Demand Analytics**: A compact dashboard reports account and mounted-drive counts, app RAM/CPU, and a storage chart only from verified provider quota data. Provider checks run off the UI thread only while Analytics is visible; unavailable quotas are shown as unavailable.
+- **Responsive Local Logs**: Recent application events load asynchronously, with bounded entries, filtering, secret redaction, and visible timeout/error states.
 - **Cloud-to-Cloud Streaming Transfers**:
   - Dedicated transfer dialog (`+ Transfer Files`) with dual cloud directory browsers.
   - Streaming relay mode (`rclone copy` / `rclone move`) pipes data directly between cloud remotes in bounded memory chunks (4–8 MiB) without buffering full files on the local operating system drive.
