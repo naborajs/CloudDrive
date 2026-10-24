@@ -1664,6 +1664,22 @@ $logsRefreshBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $logsRefreshBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $logsButtons.Children.Add($logsRefreshBtn) | Out-Null
 
+$logsNewerBtn = [System.Windows.Controls.Button]::new()
+$logsNewerBtn.Content = 'Newer entries'
+$logsNewerBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$logsNewerBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$logsNewerBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$logsNewerBtn.IsEnabled = $false
+$logsButtons.Children.Add($logsNewerBtn) | Out-Null
+
+$logsOlderBtn = [System.Windows.Controls.Button]::new()
+$logsOlderBtn.Content = 'Older entries'
+$logsOlderBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$logsOlderBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$logsOlderBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$logsOlderBtn.IsEnabled = $false
+$logsButtons.Children.Add($logsOlderBtn) | Out-Null
+
 $logsOpenFolderBtn = [System.Windows.Controls.Button]::new()
 $logsOpenFolderBtn.Content = 'Open logs folder'
 $logsOpenFolderBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
@@ -1767,6 +1783,9 @@ $script:LogsPrivacyLines = @(
 foreach ($line in $script:LogsPrivacyLines) { $logsPrivacyStack.Children.Add($line) | Out-Null }
 
 $script:LogsRenderedEntries = @()
+$script:LogsPageOffset = 0
+$script:LogsPageSize = 200
+$script:LogsHasOlderEntries = $false
 $script:LogsLoadOperation = $null
 $script:LogsLoadStartedAt = $null
 $script:LogsLoadTimer = [System.Windows.Threading.DispatcherTimer]::new()
@@ -1820,7 +1839,10 @@ function Render-LogsViewContent {
         try { $lines.Add((Format-LogsEntryLine $entry)) } catch { }
     }
     $logsTextBox.Text = if ($lines.Count -gt 0) { [string]::Join([Environment]::NewLine, $lines) } else { 'No matching log entries. Events are written when accounts mount, restore, or reconnect.' }
-    $logsStatusLine.Text = "Showing $($filtered.Count) of $($entries.Count) stored entries (view reads the newest 800)."
+    $pageNumber = [int][Math]::Floor($script:LogsPageOffset / $script:LogsPageSize) + 1
+    $logsStatusLine.Text = "Page $pageNumber; showing $($filtered.Count) of $($entries.Count) entries (newest first, bounded pages)."
+    $logsNewerBtn.IsEnabled = $script:LogsPageOffset -gt 0
+    $logsOlderBtn.IsEnabled = $script:LogsHasOlderEntries
 }
 
 function Stop-LogsViewLoad {
@@ -1836,12 +1858,16 @@ function Update-LogsViewContent {
     if ($script:LogsLoadOperation) { return }
     $logsStatusLine.Text = 'Loading recent log entries...'
     $logsTextBox.Text = 'Loading logs...'
+    $logsNewerBtn.IsEnabled = $false
+    $logsOlderBtn.IsEnabled = $false
     try {
-        $script:LogsLoadOperation = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
-            param([string]$sourceRoot)
+        $script:LogsLoadOperation = Start-NSBackgroundOperation -ArgumentList @(
+            $PSScriptRoot, [int]$script:LogsPageSize, [int]$script:LogsPageOffset
+        ) -ScriptBlock {
+            param([string]$sourceRoot, [int]$pageSize, [int]$skipEntries)
             $ErrorActionPreference = 'Stop'
             . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
-            Read-ApplicationLogEntries 800
+            Read-ApplicationLogEntries -MaxEntries ($pageSize + 1) -SkipEntries $skipEntries
         }
         $script:LogsLoadStartedAt = [DateTime]::UtcNow
         $script:LogsLoadTimer.Start()
@@ -1882,7 +1908,12 @@ $script:LogsLoadTimer.Add_Tick({
             $logsTextBox.Text = "Unable to load logs: $(Format-SanitizedDiagnosticMessage $message)"
             return
         }
-        $script:LogsRenderedEntries = @($completed.Output)
+        $loadedEntries = @($completed.Output)
+        $script:LogsHasOlderEntries = $loadedEntries.Count -gt $script:LogsPageSize
+        if ($script:LogsHasOlderEntries) {
+            $loadedEntries = @($loadedEntries | Select-Object -Skip 1)
+        }
+        $script:LogsRenderedEntries = $loadedEntries
         Render-LogsViewContent
     } catch {
         Stop-LogsViewLoad
@@ -1901,6 +1932,7 @@ function Show-LogsView {
     Stop-AnalyticsStorageWorker
     $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
     Update-NavActiveState
+    $script:LogsPageOffset = 0
     Update-LogsViewContent
 }
 
@@ -2592,10 +2624,24 @@ function Clear-NSCloudLogsFolder {
         $logsTextBox.Text = "Unable to clear logs: $message"
         return
     }
+    $script:LogsPageOffset = 0
     Update-LogsViewContent
 }
 
-$logsRefreshBtn.Add_Click({ Update-LogsViewContent })
+$logsRefreshBtn.Add_Click({
+    $script:LogsPageOffset = 0
+    Update-LogsViewContent
+})
+$logsOlderBtn.Add_Click({
+    if (-not $script:LogsHasOlderEntries) { return }
+    $script:LogsPageOffset += $script:LogsPageSize
+    Update-LogsViewContent
+})
+$logsNewerBtn.Add_Click({
+    if ($script:LogsPageOffset -le 0) { return }
+    $script:LogsPageOffset = [Math]::Max(0, ($script:LogsPageOffset - $script:LogsPageSize))
+    Update-LogsViewContent
+})
 $logsClearBtn.Add_Click({ Clear-NSCloudLogsFolder })
 $logsOpenFolderBtn.Add_Click({
     try {
