@@ -2596,6 +2596,15 @@ function Complete-AvailableStartupWorkers {
                     Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
                 }
             }
+            if ($completed.HadErrors) {
+                # A worker-level failure (not a per-provider mount failure) must
+                # surface, otherwise an empty result list looks like a clean
+                # restore even when nothing was verified.
+                $message = if ($completed.Errors.Count -gt 0) { Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message) } else { 'The startup restore worker stopped unexpectedly.' }
+                try {
+                    Write-NSCloudLog -Severity 'Error' -Operation 'startup-restore' -Message "Startup restore worker failed: $message" -Recovered $false
+                } catch { }
+            }
         } catch { }
         $script:StartupAutoMountWorker = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
@@ -4013,6 +4022,19 @@ function Invoke-StartupAutoMount {
         . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
         . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
 
+        # This background block dot-sources service/provider modules only; the
+        # finder below is therefore NOT the UI script's Get-VerifiedRclonePath
+        # (which lives in NSCloudDrive.ps1 and is absent in this runspace).
+        # Without a local definition the legacy TeraBox restore threw
+        # CommandNotFoundException and no TeraBox mount could ever start.
+        function Get-VerifiedRclonePath {
+            $r = Find-RcloneBinary
+            if ($r -and (Test-Path -LiteralPath $r -PathType Leaf)) {
+                return $r
+            }
+            return $null
+        }
+
         $settings = Get-NSCloudDriveSettings
         if (-not $settings.AutoMountDrives) { return }
         $results = [System.Collections.Generic.List[object]]::new()
@@ -4075,41 +4097,71 @@ function Invoke-StartupAutoMount {
                 }
             }
         } else {
-            # Fallback for legacy single-provider settings.
+            # Fallback for legacy single-provider settings. Semantics mirror the
+            # per-account branch exactly: an already-running mount process must
+            # hold its assigned letter and pass a filesystem health probe before
+            # success is recorded ('ExistingProcess'), a fresh start is the only
+            # path that records 'Mounted', and an invalid session records its
+            # true state (including 'AuthRequired') instead of a false success.
             try {
                 $progress.ProviderId = 'gdrive'
                 $progress.DriveLetter = [string](Get-PreferredDriveLetter 'gdrive')
                 $progress.Stage = 'Validating Google Drive session'
                 $googleCheck = Test-GoogleDriveBackendSession
                 $googleStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
-                if ($googleCheck.IsValid -and -not $googleStatus.ProcessRunning) {
-                    $environment = Get-GoogleDriveRcloneEnvironment
-                    $progress.Stage = "Starting $($progress.DriveLetter): Google Drive mount (up to 90s)"
-                    Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
-                        -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
-                        -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                if ($googleCheck.IsValid) {
+                    if ($googleStatus.ProcessRunning) {
+                        if (-not $googleStatus.IsMounted) { throw 'A mount process exists, but its assigned drive is not present.' }
+                        $health = Test-VirtualDriveFilesystem -DriveRoot $googleStatus.DriveRoot -TimeoutSeconds 10
+                        if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
+                        $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$googleStatus.DriveLetter })
+                    } else {
+                        $environment = Get-GoogleDriveRcloneEnvironment
+                        $progress.Stage = "Starting $($progress.DriveLetter): Google Drive mount (up to 90s)"
+                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
+                            -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                        $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
+                    }
+                } else {
+                    $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = [string]$googleCheck.State; Error = $googleCheck.Error; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
                 }
-                $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = if ($googleCheck.IsValid) { 'Mounted' } else { $googleCheck.State }; Error = $googleCheck.Error })
             } catch {
-                $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message) })
+                $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
             }
 
             try {
                 $progress.ProviderId = 'terabox'
                 $progress.DriveLetter = [string](Get-PreferredDriveLetter 'terabox')
                 $progress.Stage = 'Validating TeraBox session'
-                $teraBoxCheck = Test-TeraBoxBackendSession
                 $teraBoxStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
-                if ($teraBoxCheck.IsValid -and (Get-VerifiedRclonePath) -and -not $teraBoxStatus.ProcessRunning) {
-                    $environment = Get-TeraBoxRcloneEnvironment
-                    $progress.Stage = "Starting $($progress.DriveLetter): TeraBox mount (up to 90s)"
-                    Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
-                        -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
-                        -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                if ($teraBoxStatus.ProcessRunning) {
+                    # Same parity rules as gdrive: an existing process must hold
+                    # its letter and answer a filesystem probe; success here is
+                    # 'ExistingProcess', never 'Mounted'.
+                    if (-not $teraBoxStatus.IsMounted) { throw 'A mount process exists, but its assigned drive is not present.' }
+                    $health = Test-VirtualDriveFilesystem -DriveRoot $teraBoxStatus.DriveRoot -TimeoutSeconds 10
+                    if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
+                    $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$teraBoxStatus.DriveLetter })
+                } elseif ((Get-VerifiedRclonePath)) {
+                    $teraBoxCheck = Test-TeraBoxBackendSession
+                    if (-not $teraBoxCheck.IsValid) {
+                        $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = [string]$teraBoxCheck.State; Error = $teraBoxCheck.Error; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
+                    } else {
+                        $environment = Get-TeraBoxRcloneEnvironment
+                        $progress.Stage = "Starting $($progress.DriveLetter): TeraBox mount (up to 90s)"
+                        Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
+                            -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
+                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                        $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
+                    }
+                } else {
+                    # No verified rclone binary: nothing can be mounted, so this
+                    # is an error rather than a silent success.
+                    $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Error'; Error = 'No verified rclone binary was found for the TeraBox mount.'; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
                 }
-                $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = if ($teraBoxCheck.IsValid) { 'Mounted' } else { $teraBoxCheck.State }; Error = $teraBoxCheck.Error })
             } catch {
-                $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message) })
+                $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
             }
         }
 
