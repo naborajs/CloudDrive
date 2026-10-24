@@ -137,6 +137,123 @@ function Format-TransferSpeed([double]$BytesPerSec) {
     }
 }
 
+function Format-TransferThroughput([double]$BytesPerSec, [bool]$IsLoopbackStaging = $false) {
+    if ($BytesPerSec -le 0) {
+        return "0 B/s (0.0 Mbps)"
+    }
+    $mbps = [Math]::Round(($BytesPerSec * 8) / 1000000.0, 1)
+    $speedStr = Format-TransferSpeed $BytesPerSec
+    if ($IsLoopbackStaging) {
+        return "Staging to local bridge: $speedStr ($mbps Mbps) • Cloud upload pending"
+    }
+    return "$speedStr ($mbps Mbps)"
+}
+
+function Test-ProviderUploadPreflight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Account,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$FileSizeBytes,
+
+        [string]$FileName = ''
+    )
+
+    $providerId = if ($Account.ContainsKey('ProviderId')) { [string]$Account.ProviderId } else { 'gdrive' }
+    $accountId = if ($Account.ContainsKey('Id')) { [string]$Account.Id } else { '' }
+    $cleanFileName = if ($FileName) { $FileName } else { 'Selected file' }
+
+    if ($providerId -eq 'terabox') {
+        # Check TeraBox plan limits via CPX status endpoint
+        $bridgeStatus = $null
+        try {
+            $bridgeStatus = Get-TeraBoxBridgeStatus -AccountId $accountId
+        } catch { }
+
+        $plan = if ($bridgeStatus -and $bridgeStatus.Plan) { $bridgeStatus.Plan } else { 'Free' }
+        $isPremium = if ($bridgeStatus) { [bool]$bridgeStatus.IsPremium } else { $false }
+        $maxFileLimit = if ($bridgeStatus -and $bridgeStatus.MaxFileSizeBytes -gt 0) {
+            [int64]$bridgeStatus.MaxFileSizeBytes
+        } elseif ($isPremium) {
+            128L * 1000 * 1000 * 1000 # 128 GB
+        } else {
+            4L * 1000 * 1000 * 1000   # 4 GB
+        }
+
+        if ($FileSizeBytes -gt $maxFileLimit) {
+            $fileGb = [Math]::Round($FileSizeBytes / 1GB, 2)
+            $limitGb = if ($maxFileLimit -eq 4000000000L) { '4.0 GB' } elseif ($maxFileLimit -eq 128000000000L) { '128 GB' } else { "$([Math]::Round($maxFileLimit / 1GB, 1)) GB" }
+            return [ordered]@{
+                Allowed = $false
+                Reason = "File '$cleanFileName' ($fileGb GB) exceeds your TeraBox $plan plan limit of $limitGb per file. Upload cancelled to prevent data loss."
+                ErrorCode = 'PlanFileLimit'
+                LimitBytes = $maxFileLimit
+                ProviderId = $providerId
+                Plan = $plan
+            }
+        }
+
+        # Check quota if known
+        if ($bridgeStatus -and $bridgeStatus.QuotaTotal -gt 0L) {
+            $freeQuota = [Math]::Max(0L, ($bridgeStatus.QuotaTotal - $bridgeStatus.QuotaUsed))
+            if ($FileSizeBytes -gt $freeQuota) {
+                $reqGb = [Math]::Round($FileSizeBytes / 1GB, 2)
+                $availGb = [Math]::Round($freeQuota / 1GB, 2)
+                return [ordered]@{
+                    Allowed = $false
+                    Reason = "Insufficient TeraBox cloud storage quota. Required: $reqGb GB, Available: $availGb GB."
+                    ErrorCode = 'QuotaExceeded'
+                    LimitBytes = $freeQuota
+                    ProviderId = $providerId
+                    Plan = $plan
+                }
+            }
+        }
+
+        return [ordered]@{
+            Allowed = $true
+            Reason = ''
+            ErrorCode = ''
+            LimitBytes = $maxFileLimit
+            ProviderId = $providerId
+            Plan = $plan
+        }
+    } elseif ($providerId -eq 'gdrive') {
+        # Google Drive single file max size is 5 TB
+        $gdriveMaxFileLimit = 5497558138880L # 5 TB
+        if ($FileSizeBytes -gt $gdriveMaxFileLimit) {
+            return [ordered]@{
+                Allowed = $false
+                Reason = "File '$cleanFileName' exceeds Google Drive's 5 TB single file limit."
+                ErrorCode = 'PlanFileLimit'
+                LimitBytes = $gdriveMaxFileLimit
+                ProviderId = $providerId
+                Plan = 'Standard'
+            }
+        }
+
+        return [ordered]@{
+            Allowed = $true
+            Reason = ''
+            ErrorCode = ''
+            LimitBytes = $gdriveMaxFileLimit
+            ProviderId = $providerId
+            Plan = 'Standard'
+        }
+    } else {
+        return [ordered]@{
+            Allowed = $true
+            Reason = ''
+            ErrorCode = ''
+            LimitBytes = 0L
+            ProviderId = $providerId
+            Plan = 'Standard'
+        }
+    }
+}
+
 function Format-EtaTimeSpan([Nullable[int]]$Seconds) {
     if ($null -eq $Seconds) {
         return "Calculating..."
@@ -205,37 +322,41 @@ function Get-CloudDirectoryContents {
         [Parameter(Mandatory = $true)]
         [hashtable]$Account,
 
-        [string]$Path = ''
+        [string]$Path = '',
+
+        [switch]$BypassLocalMount = $false
     )
 
     $providerId = if ($Account.ContainsKey('ProviderId')) { $Account.ProviderId } else { 'gdrive' }
     $accountId = if ($Account.ContainsKey('Id')) { $Account.Id } else { '' }
 
-    # Fast-path: If the drive is already mounted locally in Windows Explorer, read directly from the mount
-    try {
-        $mountStatus = Get-VirtualDriveStatus -AccountId $accountId -ProviderId $providerId
-        if ($mountStatus -and $mountStatus.IsMounted -and (Test-Path -LiteralPath $mountStatus.DriveRoot)) {
-            $cleanPath = Normalize-CloudPath -Path $Path
-            $localDir = if ($cleanPath) { Join-Path $mountStatus.DriveRoot ($cleanPath.Replace('/', '\')) } else { $mountStatus.DriveRoot }
-            if (Test-Path -LiteralPath $localDir) {
-                $items = @()
-                $children = Get-ChildItem -LiteralPath $localDir -ErrorAction SilentlyContinue
-                foreach ($child in $children) {
-                    $isDir = $child.PSIsContainer
-                    $relPath = if ($cleanPath) { "$cleanPath/$($child.Name)" } else { $child.Name }
-                    $items += [ordered]@{
-                        Name = $child.Name
-                        Path = $relPath
-                        IsDir = [bool]$isDir
-                        Size = if ($isDir) { 0L } else { [int64]$child.Length }
-                        MimeType = ''
-                        ModTime = $child.LastWriteTime.ToString('o')
+    # Fast-path: If the drive is already mounted locally in Windows Explorer and bypass was not requested
+    if (-not $BypassLocalMount) {
+        try {
+            $mountStatus = Get-VirtualDriveStatus -AccountId $accountId -ProviderId $providerId
+            if ($mountStatus -and $mountStatus.IsMounted -and (Test-Path -LiteralPath $mountStatus.DriveRoot)) {
+                $cleanPath = Normalize-CloudPath -Path $Path
+                $localDir = if ($cleanPath) { Join-Path $mountStatus.DriveRoot ($cleanPath.Replace('/', '\')) } else { $mountStatus.DriveRoot }
+                if (Test-Path -LiteralPath $localDir) {
+                    $items = @()
+                    $children = Get-ChildItem -LiteralPath $localDir -ErrorAction SilentlyContinue
+                    foreach ($child in $children) {
+                        $isDir = $child.PSIsContainer
+                        $relPath = if ($cleanPath) { "$cleanPath/$($child.Name)" } else { $child.Name }
+                        $items += [ordered]@{
+                            Name = $child.Name
+                            Path = $relPath
+                            IsDir = [bool]$isDir
+                            Size = if ($isDir) { 0L } else { [int64]$child.Length }
+                            MimeType = ''
+                            ModTime = $child.LastWriteTime.ToString('o')
+                        }
                     }
+                    return $items
                 }
-                return $items
             }
-        }
-    } catch { }
+        } catch { }
+    }
 
     $rclonePath = Find-RcloneBinary
     if (-not $rclonePath -or -not (Test-Path -LiteralPath $rclonePath -PathType Leaf)) {
@@ -309,6 +430,79 @@ function Get-CloudDirectoryContents {
 }
 
 # ==============================================================================
+# REMOTE CLOUD FILE VERIFICATION
+# ==============================================================================
+
+function Test-RemoteCloudFileVerification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Account,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RemotePath,
+
+        [int64]$ExpectedSizeBytes = -1L
+    )
+
+    $cleanPath = Normalize-CloudPath -Path $RemotePath
+    $parentPath = ''
+    $fileName = $cleanPath
+    if ($cleanPath.Contains('/')) {
+        $idx = $cleanPath.LastIndexOf('/')
+        $parentPath = $cleanPath.Substring(0, $idx)
+        $fileName = $cleanPath.Substring($idx + 1)
+    }
+
+    try {
+        $items = Get-CloudDirectoryContents -Account $Account -Path $parentPath -BypassLocalMount
+        $found = $null
+        foreach ($item in $items) {
+            if ($item.Name -eq $fileName) {
+                $found = $item
+                break
+            }
+        }
+
+        if (-not $found) {
+            return [ordered]@{
+                Verified = $false
+                Status = 'Failed'
+                Reason = "File '$fileName' not found on remote cloud provider after upload completed."
+                RemoteSizeBytes = 0L
+                ExpectedSizeBytes = $ExpectedSizeBytes
+            }
+        }
+
+        if ($ExpectedSizeBytes -ge 0L -and $found.Size -ne $ExpectedSizeBytes) {
+            return [ordered]@{
+                Verified = $false
+                Status = 'Failed'
+                Reason = "Remote file size mismatch for '$fileName': remote has $($found.Size) bytes, expected $ExpectedSizeBytes bytes."
+                RemoteSizeBytes = $found.Size
+                ExpectedSizeBytes = $ExpectedSizeBytes
+            }
+        }
+
+        return [ordered]@{
+            Verified = $true
+            Status = 'Remotely confirmed'
+            Reason = ''
+            RemoteSizeBytes = $found.Size
+            ExpectedSizeBytes = $ExpectedSizeBytes
+        }
+    } catch {
+        return [ordered]@{
+            Verified = $false
+            Status = 'Remote state unknown'
+            Reason = "Could not verify remote file '$fileName': $($_.Exception.Message)"
+            RemoteSizeBytes = 0L
+            ExpectedSizeBytes = $ExpectedSizeBytes
+        }
+    }
+}
+
+# ==============================================================================
 # START CLOUD-TO-CLOUD TRANSFER
 # ==============================================================================
 
@@ -349,6 +543,25 @@ function Start-CloudTransfer {
 
     $cleanSrcPath = Normalize-CloudPath -Path $SourcePath
     $cleanDstPath = Normalize-CloudPath -Path $DestinationPath
+
+    # Pre-flight check on destination account plan and file size limits
+    if ($DestinationAccount) {
+        $srcSize = 0L
+        try {
+            $srcItems = Get-CloudDirectoryContents -Account $SourceAccount -Path $cleanSrcPath
+            if ($srcItems -and $srcItems.Count -eq 1 -and (-not $srcItems[0].IsDir)) {
+                $srcSize = [int64]$srcItems[0].Size
+            }
+        } catch { }
+
+        if ($srcSize -gt 0L) {
+            $fName = if ($cleanSrcPath.Contains('/')) { $cleanSrcPath.Substring($cleanSrcPath.LastIndexOf('/') + 1) } else { $cleanSrcPath }
+            $preflight = Test-ProviderUploadPreflight -Account $DestinationAccount -FileSizeBytes $srcSize -FileName $fName
+            if (-not $preflight.Allowed) {
+                throw $preflight.Reason
+            }
+        }
+    }
 
     $srcSpec = if ($cleanSrcPath) { "${srcRemote}:${cleanSrcPath}" } else { "${srcRemote}:" }
     $dstSpec = if ($cleanDstPath) { "${dstRemote}:${cleanDstPath}" } else { "${dstRemote}:" }
@@ -393,6 +606,8 @@ function Start-CloudTransfer {
     $logBuffer = [System.Collections.Generic.List[string]]::new()
     $errorBuffer = [System.Collections.Generic.List[string]]::new()
 
+    $isLoopbackStaging = ($DestinationAccount.ContainsKey('ProviderId') -and $DestinationAccount.ProviderId -eq 'terabox')
+
     $jobRecord = [ordered]@{
         JobId = $jobId
         Process = $null
@@ -404,7 +619,9 @@ function Start-CloudTransfer {
         DestinationPath = $DestinationPath
         IsMove = [bool]$IsMove
         ConflictAction = $ConflictAction
-        Status = 'Running'
+        Status = 'Uploading to provider'
+        VerificationStatus = 'Uploading to provider'
+        IsLoopbackStaging = [bool]$isLoopbackStaging
         IsPaused = $false
         BytesTransferred = 0L
         TotalBytes = 0L
@@ -502,12 +719,27 @@ function Get-CloudTransferStatus {
         if ($proc.HasExited) {
             $job.EndTime = [DateTime]::UtcNow
             if ($proc.ExitCode -eq 0) {
-                $job.Status = 'Completed'
-                $job.Percentage = 100.0
-                $job.EtaSeconds = 0
+                if ($job.VerificationStatus -ne 'Remotely confirmed' -and $job.Status -ne 'Failed') {
+                    $job.Status = 'Verifying remote file'
+                    $job.VerificationStatus = 'Verifying remote file'
+                    $destItemName = if ($job.SourcePath.Contains('/')) { $job.SourcePath.Substring($job.SourcePath.LastIndexOf('/') + 1) } else { $job.SourcePath }
+                    $destFullPath = if ($job.DestinationPath) { "$($job.DestinationPath)/$destItemName" } else { $destItemName }
+                    $vRes = Test-RemoteCloudFileVerification -Account $job.DestinationAccount -RemotePath $destFullPath -ExpectedSizeBytes $job.TotalBytes
+                    if ($vRes.Verified) {
+                        $job.Status = 'Remotely confirmed'
+                        $job.VerificationStatus = 'Remotely confirmed'
+                        $job.Percentage = 100.0
+                        $job.EtaSeconds = 0
+                    } else {
+                        $job.Status = 'Failed'
+                        $job.VerificationStatus = 'Failed'
+                        $job.LastError = $vRes.Reason
+                    }
+                }
             } else {
                 if ($job.Status -ne 'Cancelled') {
                     $job.Status = 'Failed'
+                    $job.VerificationStatus = 'Failed'
                     if (-not $job.LastError) {
                         $job.LastError = "Process exited with code $($proc.ExitCode)"
                     }
@@ -516,15 +748,19 @@ function Get-CloudTransferStatus {
         }
     }
 
+    $isLoopback = if ($job.ContainsKey('IsLoopbackStaging')) { [bool]$job.IsLoopbackStaging } else { $false }
     $speedFmt = Format-TransferSpeed $job.SmoothedSpeed
+    $throughputFmt = Format-TransferThroughput -BytesPerSec $job.SmoothedSpeed -IsLoopbackStaging $isLoopback
     $etaFmt = Format-EtaTimeSpan $job.EtaSeconds
 
     return [ordered]@{
         JobId = $job.JobId
         Status = $job.Status
+        VerificationStatus = $job.VerificationStatus
         IsPaused = $job.IsPaused
         Mode = $job.Mode
         IsServerSide = $job.IsServerSide
+        IsLoopbackStaging = $isLoopback
         SourceAccount = $job.SourceAccount.DisplayName
         DestinationAccount = $job.DestinationAccount.DisplayName
         SourcePath = $job.SourcePath
@@ -533,6 +769,7 @@ function Get-CloudTransferStatus {
         TotalBytes = $job.TotalBytes
         Percentage = $job.Percentage
         SpeedFormatted = $speedFmt
+        ThroughputFormatted = $throughputFmt
         EtaFormatted = $etaFmt
         SmoothedSpeed = $job.SmoothedSpeed
         AverageSpeed = $job.AverageSpeed
