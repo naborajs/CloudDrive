@@ -122,7 +122,10 @@ try {
     if ($tbSource -notmatch '\$readTask\.Wait\(5000\)') {
         throw 'The response-body read no longer uses the bounded Wait(ms) form.'
     }
-    Write-Output '  [PASS] All TeraBox HTTP waits are bounded (no unbounded Task.Wait() remains)'
+    if ($tbSource -notmatch 'TeraBox user \.\.\.\$suffix') {
+        throw 'TeraBox fallback identities must use plain ASCII punctuation to avoid mojibake.'
+    }
+    Write-Output '  [PASS] TeraBox waits are bounded and fallback identity text is encoding-safe'
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
     Remove-Item -LiteralPath $globalSandboxDir -Recurse -Force -ErrorAction SilentlyContinue
