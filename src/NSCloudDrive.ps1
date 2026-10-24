@@ -60,6 +60,7 @@ $script:StartupCacheRecoveryWorker = $null
 $script:StartupAutoMountWorker = $null
 $script:StartupAutoMountTimer = $null
 $script:StartupAutoMountError = $null
+$script:DriveDisconnectWorkers = @{}
 $script:AccountCardsSignature = ''
 $script:AnalyticsStorageRecords = @()
 $script:BitmapImageCache = @{}
@@ -2645,6 +2646,34 @@ Apply-UITheme $script:Settings.Theme
 # ==============================================================================
 # UI STATE SYNCHRONIZER
 # ==============================================================================
+function Ensure-UiDriveStatusShape([object]$Status) {
+    if ($null -eq $Status) { return $null }
+    $defaults = [ordered]@{
+        IsMounted = $false
+        ProcessRunning = $false
+        DriveLetter = ''
+        DriveRoot = ''
+        IsReadOnly = $false
+        ProcessId = $null
+        MountState = $null
+    }
+    if ($Status -is [System.Collections.IDictionary]) {
+        foreach ($key in $defaults.Keys) {
+            if (-not $Status.Contains($key)) { $Status[$key] = $defaults[$key] }
+        }
+        return $Status
+    }
+
+    $normalized = [ordered]@{}
+    foreach ($property in $Status.PSObject.Properties) {
+        $normalized[$property.Name] = Get-SafeProperty $Status $property.Name $null
+    }
+    foreach ($key in $defaults.Keys) {
+        if (-not $normalized.Contains($key)) { $normalized[$key] = $defaults[$key] }
+    }
+    return $normalized
+}
+
 function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [string]$DriveLetter = '') {
     if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $script:AccountMountStates.ContainsKey($AccountId)) {
         $mountState = $script:AccountMountStates[$AccountId]
@@ -2665,19 +2694,236 @@ function Get-CachedUiDriveStatus([string]$ProviderId, [string]$AccountId = '', [
                 $letter = if ($DriveLetter) { $DriveLetter } else { [string]$legacyState.DriveLetter }
                 return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $legacyState }
             }
+            if ($legacyState -and $legacyState.State -eq 'Disconnecting') {
+                $snapshot = $script:ProviderStatusSnapshot
+                $cachedStatus = if ($providerKey -eq 'gdrive' -and $snapshot) { $snapshot.GoogleStatus } elseif ($providerKey -eq 'terabox' -and $snapshot) { $snapshot.TeraBoxStatus } else { $null }
+                $letter = if ($DriveLetter) { $DriveLetter } elseif ($legacyState.DriveLetter) { [string]$legacyState.DriveLetter } else { [string](Get-PreferredDriveLetter $providerKey) }
+                return [ordered]@{
+                    IsMounted = [bool](Get-SafeProperty $cachedStatus 'IsMounted' $false)
+                    ProcessRunning = [bool](Get-SafeProperty $cachedStatus 'ProcessRunning' $false)
+                    DriveLetter = $letter
+                    DriveRoot = "$letter`:\"
+                    IsReadOnly = [bool](Get-SafeProperty $cachedStatus 'IsReadOnly' $false)
+                    ProcessId = Get-SafeProperty $cachedStatus 'ProcessId' $null
+                    MountState = $legacyState
+                }
+            }
         }
     }
     $snapshot = $script:ProviderStatusSnapshot
     if ($snapshot) {
-        if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $snapshot.PSObject.Properties['AccountStatuses'] -and $snapshot.AccountStatuses -and $snapshot.AccountStatuses.ContainsKey($AccountId)) {
-            return $snapshot.AccountStatuses[$AccountId]
+        $accountStatuses = Get-SafeProperty $snapshot 'AccountStatuses' $null
+        if (-not [string]::IsNullOrWhiteSpace($AccountId) -and $accountStatuses -and $accountStatuses.ContainsKey($AccountId)) {
+            return (Ensure-UiDriveStatusShape $accountStatuses[$AccountId])
         }
-        if ($ProviderId -eq 'gdrive' -and $snapshot.GoogleStatus) { return $snapshot.GoogleStatus }
-        if ($ProviderId -eq 'terabox' -and $snapshot.TeraBoxStatus) { return $snapshot.TeraBoxStatus }
+        $statusProperty = if ($ProviderId -eq 'gdrive') { 'GoogleStatus' } elseif ($ProviderId -eq 'terabox') { 'TeraBoxStatus' } else { '' }
+        $providerStatus = if ($statusProperty) { Get-SafeProperty $snapshot $statusProperty $null } else { $null }
+        if ($providerStatus) { return (Ensure-UiDriveStatusShape $providerStatus) }
     }
 
     $letter = if ($DriveLetter) { $DriveLetter } elseif ($ProviderId -eq 'gdrive') { $script:GDriveLetter } else { $script:TeraBoxLetter }
-    return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null }
+    return [ordered]@{ IsMounted = $false; ProcessRunning = $false; DriveLetter = $letter; DriveRoot = "$letter`:\"; IsReadOnly = $false; ProcessId = $null; MountState = $null }
+}
+
+function Start-ScopedDriveDisconnect(
+    [string]$ProviderId,
+    [string]$DriveLetter,
+    [string]$AccountId = '',
+    [switch]$RemoveAccount,
+    [switch]$RemoveLegacySession,
+    [switch]$ReconnectAfterSuccess
+) {
+    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) {
+        return $false
+    }
+    $key = if ($AccountId) { $AccountId } else { "__legacy_${ProviderId}_$($DriveLetter.TrimEnd(':'))" }
+    if ($script:DriveDisconnectWorkers.ContainsKey($key)) { return $false }
+
+    $cleanLetter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $account = if ($AccountId) { Get-CloudAccount -AccountId $AccountId } else { $null }
+    $accountCacheDirectory = if ($account -and $account.CacheDirectory) { [string]$account.CacheDirectory } else { [string]$script:CacheDirectory }
+    if ($AccountId) {
+        $script:AccountMountStates[$AccountId] = [ordered]@{
+            State = 'Disconnecting'; Stage = 'Stopping selected drive'
+            Error = $null; DriveLetter = $cleanLetter; StartedAt = [DateTime]::UtcNow
+            UpdatedAt = [DateTime]::UtcNow
+        }
+    } else {
+        $script:LegacyMountStates[$ProviderId.ToLowerInvariant()] = [ordered]@{
+            State = 'Disconnecting'; Stage = 'Stopping selected drive'
+            Error = $null; DriveLetter = $cleanLetter; StartedAt = [DateTime]::UtcNow
+            UpdatedAt = [DateTime]::UtcNow
+        }
+    }
+
+    try {
+        $operation = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $ProviderId, $AccountId, $cleanLetter) -ScriptBlock {
+            param([string]$sourceRoot, [string]$providerId, [string]$accountId, [string]$driveLetter)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+            $stop = Stop-VirtualDriveMount -ProviderId $providerId -AccountId $accountId -DriveLetter $driveLetter
+            if (-not $stop.Success -or -not $stop.Verified) {
+                throw [System.InvalidOperationException]::new([string]$stop.Message)
+            }
+            $status = Get-VirtualDriveStatus -ProviderId $providerId -AccountId $accountId -DriveLetter $driveLetter
+            if ($status.ProcessRunning -or $status.IsMounted) {
+                throw [System.InvalidOperationException]::new("The selected drive $driveLetter`: remains mounted.")
+            }
+            return [pscustomobject]@{
+                Verified = $true
+                ProviderId = $providerId
+                AccountId = $accountId
+                DriveLetter = $driveLetter
+                Status = $status
+                Message = [string]$stop.Message
+            }
+        }
+        $script:DriveDisconnectWorkers[$key] = [pscustomobject]@{
+            Operation = $operation
+            ProviderId = $ProviderId
+            AccountId = $AccountId
+            DriveLetter = $cleanLetter
+            CacheDirectory = $accountCacheDirectory
+            RemoveAccount = [bool]$RemoveAccount
+            RemoveLegacySession = [bool]$RemoveLegacySession
+            ReconnectAfterSuccess = [bool]$ReconnectAfterSuccess
+        }
+        return $true
+    } catch {
+        $message = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+        if ($AccountId) {
+            $script:AccountMountStates[$AccountId] = [ordered]@{
+                State = 'Error'; Stage = 'Disconnect could not start'
+                Error = $message; DriveLetter = $cleanLetter; StartedAt = $null
+                UpdatedAt = [DateTime]::UtcNow
+            }
+        } else {
+            $script:LegacyMountStates[$ProviderId.ToLowerInvariant()] = [ordered]@{
+                State = 'Error'; Stage = 'Disconnect could not start'
+                Error = $message; DriveLetter = $cleanLetter; StartedAt = $null
+                UpdatedAt = [DateTime]::UtcNow
+            }
+        }
+        return $false
+    }
+}
+
+function Complete-AvailableDriveDisconnectWorkers {
+    foreach ($key in @($script:DriveDisconnectWorkers.Keys)) {
+        $request = $script:DriveDisconnectWorkers[$key]
+        if (-not $request -or -not (Test-NSBackgroundOperationCompleted $request.Operation)) { continue }
+        $script:DriveDisconnectWorkers.Remove($key)
+        $errorMessage = $null
+        $result = $null
+        try {
+            $completed = Complete-NSBackgroundOperation $request.Operation
+            if ($completed.HadErrors) {
+                $errorMessage = if ($completed.Errors.Count -gt 0) {
+                    Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message)
+                } else { 'The disconnect worker failed.' }
+            } elseif ($completed.Output.Count -gt 0) {
+                $result = $completed.Output[-1]
+                if (-not (Get-SafeProperty $result 'Verified' $false)) {
+                    $errorMessage = 'Windows did not verify that the selected drive disconnected.'
+                }
+            } else {
+                $errorMessage = 'The disconnect worker returned no verification result.'
+            }
+        } catch {
+            $errorMessage = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+        }
+
+        if ($errorMessage) {
+            if ($request.AccountId) {
+                $script:AccountMountStates[$request.AccountId] = [ordered]@{
+                    State = 'Error'; Stage = 'Disconnect failed'; Error = $errorMessage
+                    DriveLetter = $request.DriveLetter; StartedAt = $null
+                    UpdatedAt = [DateTime]::UtcNow
+                }
+            } else {
+                $script:LegacyMountStates[$request.ProviderId.ToLowerInvariant()] = [ordered]@{
+                    State = 'Error'; Stage = 'Disconnect failed'; Error = $errorMessage
+                    DriveLetter = $request.DriveLetter; StartedAt = $null
+                    UpdatedAt = [DateTime]::UtcNow
+                }
+            }
+            try {
+                Write-NSCloudLog -Severity 'Error' -Provider $request.ProviderId -AccountId $request.AccountId `
+                    -Operation 'disconnect' -Message $errorMessage -Recovered $false
+            } catch { }
+            [System.Windows.MessageBox]::Show($errorMessage, 'Disconnect failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            Update-AllUIState
+            continue
+        }
+
+        $snapshot = $script:ProviderStatusSnapshot
+        if ($request.AccountId) {
+            $script:AccountMountStates[$request.AccountId] = [ordered]@{
+                State = 'Disconnected'; Stage = 'Drive removal verified'; Error = $null
+                DriveLetter = $request.DriveLetter; StartedAt = $null
+                UpdatedAt = [DateTime]::UtcNow
+            }
+            $accountStatuses = Get-SafeProperty $snapshot 'AccountStatuses' $null
+            if ($accountStatuses -and $accountStatuses.ContainsKey($request.AccountId)) {
+                $accountStatuses[$request.AccountId] = $result.Status
+            }
+            Remove-ProviderExplorerIcon -ProviderId $request.ProviderId -DriveLetter $request.DriveLetter
+        } else {
+            $script:LegacyMountStates[$request.ProviderId.ToLowerInvariant()] = [ordered]@{
+                State = 'Disconnected'; Stage = 'Drive removal verified'; Error = $null
+                DriveLetter = $request.DriveLetter; StartedAt = $null
+                UpdatedAt = [DateTime]::UtcNow
+            }
+            if ($snapshot) {
+                if ($request.ProviderId -eq 'gdrive' -and $snapshot.PSObject.Properties['GoogleStatus']) { $snapshot.GoogleStatus = $result.Status }
+                elseif ($request.ProviderId -eq 'terabox' -and $snapshot.PSObject.Properties['TeraBoxStatus']) { $snapshot.TeraBoxStatus = $result.Status }
+            }
+            Remove-ProviderExplorerIcon -ProviderId $request.ProviderId -DriveLetter $request.DriveLetter
+        }
+
+        if ($request.RemoveAccount) {
+            try {
+                if (-not (Remove-CloudAccount -AccountId $request.AccountId)) {
+                    throw 'The saved account could not be removed after its drive disconnected.'
+                }
+                if ($request.ProviderId -eq 'gdrive') {
+                    Remove-GoogleDriveSession -AccountId $request.AccountId
+                } elseif ($request.ProviderId -eq 'terabox') {
+                    Remove-TeraBoxSession -AccountId $request.AccountId
+                }
+                Remove-Item -LiteralPath (Join-Path $request.CacheDirectory $request.AccountId) -Recurse -Force -ErrorAction SilentlyContinue
+                if ($request.ProviderId -eq 'terabox') {
+                    Remove-Item -LiteralPath (Get-TeraBoxBridgeHomeDirectory -AccountId $request.AccountId) -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\webview2-profile') $request.AccountId) -Recurse -Force -ErrorAction SilentlyContinue
+                foreach ($logName in @("rclone-$($request.AccountId).log", "rclone-$($request.AccountId).1.log")) {
+                    Remove-Item -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs') $logName) -Force -ErrorAction SilentlyContinue
+                }
+                $script:AccountMountStates.Remove($request.AccountId)
+            } catch {
+                $message = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                [System.Windows.MessageBox]::Show($message, 'Account removal failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+        } elseif ($request.RemoveLegacySession) {
+            try {
+                if ($request.ProviderId -eq 'gdrive') { Remove-GoogleDriveSession }
+                elseif ($request.ProviderId -eq 'terabox') { Remove-TeraBoxSession }
+            } catch {
+                $message = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                [System.Windows.MessageBox]::Show($message, 'Account removal failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+        }
+
+        try {
+            Write-NSCloudLog -Severity 'Info' -Provider $request.ProviderId -AccountId $request.AccountId `
+                -Operation 'disconnect' -Message "Verified disconnect of $($request.DriveLetter):." -Recovered $true
+        } catch { }
+        $script:LastProviderStatusCheck = [DateTime]::MinValue
+        if ($request.ReconnectAfterSuccess -and $request.AccountId) {
+            Invoke-AutoReconnectWatchdog -AccountId $request.AccountId
+        }
+        Update-AllUIState
+    }
 }
 
 function Start-ProviderStatusRefreshWorker {
@@ -2730,6 +2976,8 @@ function Start-StartupCacheRecoveryWorker {
 }
 
 function Complete-AvailableStartupWorkers {
+    Complete-AvailableDriveDisconnectWorkers
+
     if ($script:ProviderStatusWorker -and (Test-NSBackgroundOperationCompleted $script:ProviderStatusWorker)) {
         try {
             $completed = Complete-NSBackgroundOperation $script:ProviderStatusWorker
@@ -2766,13 +3014,16 @@ function Complete-AvailableStartupWorkers {
         try {
             $completed = Complete-NSBackgroundOperation $script:StartupAutoMountWorker
             foreach ($result in $completed.Output) {
-                if (-not $result -or -not $result.AccountId) { continue }
-                $key = [string]$result.AccountId
+                $key = [string](Get-SafeProperty $result 'AccountId' '')
+                if (-not $key) { continue }
+                $resultState = [string](Get-SafeProperty $result 'State' 'Error')
+                $resultError = Get-SafeProperty $result 'Error' $null
+                $resultDriveLetter = [string](Get-SafeProperty $result 'DriveLetter' '')
                 $script:AccountMountStates[$key] = [ordered]@{
-                    State = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Mounted' } elseif ($result.State -eq 'Error') { 'Error' } else { [string]$result.State }
-                    Stage = if ($result.State -in @('Mounted', 'ExistingProcess')) { 'Filesystem verified' } else { 'Startup restore finished' }
-                    Error = if ($result.Error) { [string]$result.Error } else { $null }
-                    DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { '' }
+                    State = if ($resultState -in @('Mounted', 'ExistingProcess')) { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } else { $resultState }
+                    Stage = if ($resultState -in @('Mounted', 'ExistingProcess')) { 'Filesystem verified' } else { 'Startup restore finished' }
+                    Error = if ($resultError) { [string]$resultError } else { $null }
+                    DriveLetter = $resultDriveLetter
                     StartedAt = $null
                     UpdatedAt = [DateTime]::UtcNow
                 }
@@ -2781,15 +3032,21 @@ function Complete-AvailableStartupWorkers {
                 # funnel where worker results reach the UI).
                 try {
                     $restoreSeverity = 'Info'
-                    if ($result.State -eq 'Error') { $restoreSeverity = 'Error' }
-                    elseif ($result.State -eq 'AuthRequired') { $restoreSeverity = 'Warning' }
-                    $restoreRecovered = if ($result.State -in @('Mounted', 'ExistingProcess')) { $true } elseif ($result.State -eq 'Error') { $false } else { $null }
+                    if ($resultState -eq 'Error') { $restoreSeverity = 'Error' }
+                    elseif ($resultState -eq 'AuthRequired') { $restoreSeverity = 'Warning' }
+                    $restoreRecovered = if ($resultState -in @('Mounted', 'ExistingProcess')) { $true } elseif ($resultState -eq 'Error') { $false } else { $null }
                     Write-NSCloudLog -Severity $restoreSeverity -AccountId $key -Operation 'startup-restore' `
-                        -Message ("Account restore finished: $(if ($result.State) { [string]$result.State } else { 'unknown' })$(if ($result.DriveLetter) { " on $($result.DriveLetter):" })$(if ($result.Error) { " - $($result.Error)" })") `
+                        -Message ("Account restore finished: $resultState$(if ($resultDriveLetter) { " on ${resultDriveLetter}:" })$(if ($resultError) { " - $resultError" })") `
                         -Recovered $restoreRecovered
                 } catch { }
-                if ($result.State -in @('Mounted', 'ExistingProcess')) {
-                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
+                if ($resultState -in @('Mounted', 'ExistingProcess')) {
+                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter $resultDriveLetter
+                }
+                if ($resultState -eq 'Mounted' -and $resultDriveLetter) {
+                    $restoredAccount = Get-CloudAccount -AccountId $key
+                    if ($restoredAccount -and $restoredAccount.OpenExplorerOnMount) {
+                        Start-ExplorerWindow ($resultDriveLetter + ':\')
+                    }
                 }
             }
             if ($completed.HadErrors) {
@@ -2810,14 +3067,17 @@ function Complete-AvailableStartupWorkers {
         try {
             $completed = Complete-NSBackgroundOperation $script:ReconnectWorker
             foreach ($result in $completed.Output) {
-                if (-not $result -or -not $result.WorkerKey) { continue }
-                $key = [string]$result.WorkerKey
+                $key = [string](Get-SafeProperty $result 'WorkerKey' '')
+                if (-not $key) { continue }
+                $resultState = [string](Get-SafeProperty $result 'State' 'Error')
+                $resultError = Get-SafeProperty $result 'Error' $null
+                $resultDriveLetter = [string](Get-SafeProperty $result 'DriveLetter' '')
                 if ($key -notlike '__*') {
                     $script:AccountMountStates[$key] = [ordered]@{
-                        State = if ($result.State -eq 'Mounted') { 'Mounted' } elseif ($result.State -eq 'Error') { 'Error' } elseif ($result.State -eq 'AuthRequired') { 'AuthRequired' } else { [string]$result.State }
-                        Stage = if ($result.State -eq 'Mounted') { 'Filesystem verified' } elseif ($result.State -eq 'AuthRequired') { 'Sign-in required' } else { 'Mount attempt finished' }
-                        Error = if ($result.Error) { [string]$result.Error } else { $null }
-                        DriveLetter = if ($result.DriveLetter) { [string]$result.DriveLetter } else { '' }
+                        State = if ($resultState -eq 'Mounted') { 'Mounted' } elseif ($resultState -eq 'Error') { 'Error' } elseif ($resultState -eq 'AuthRequired') { 'AuthRequired' } else { $resultState }
+                        Stage = if ($resultState -eq 'Mounted') { 'Filesystem verified' } elseif ($resultState -eq 'AuthRequired') { 'Sign-in required' } else { 'Mount attempt finished' }
+                        Error = if ($resultError) { [string]$resultError } else { $null }
+                        DriveLetter = $resultDriveLetter
                         StartedAt = $null
                         UpdatedAt = [DateTime]::UtcNow
                     }
@@ -2826,22 +3086,27 @@ function Complete-AvailableStartupWorkers {
                 # recovery attempt), including legacy keys.
                 try {
                     $reconSeverity = 'Info'
-                    if ($result.State -eq 'Error') { $reconSeverity = 'Error' }
-                    elseif ($result.State -eq 'AuthRequired') { $reconSeverity = 'Warning' }
-                    $reconRecovered = if ($result.State -in @('Mounted', 'Connected')) { $true } elseif ($result.State -eq 'Error') { $false } else { $null }
+                    if ($resultState -eq 'Error') { $reconSeverity = 'Error' }
+                    elseif ($resultState -eq 'AuthRequired') { $reconSeverity = 'Warning' }
+                    $reconRecovered = if ($resultState -in @('Mounted', 'Connected')) { $true } elseif ($resultState -eq 'Error') { $false } else { $null }
                     Write-NSCloudLog -Severity $reconSeverity -AccountId $key -Operation 'reconnect' `
-                        -Message ("Reconnect attempt finished: $(if ($result.State) { [string]$result.State } else { 'unknown' })$(if ($result.DriveLetter) { " on $($result.DriveLetter):" })$(if ($result.Error) { " - $($result.Error)" })") `
+                        -Message ("Reconnect attempt finished: $resultState$(if ($resultDriveLetter) { " on ${resultDriveLetter}:" })$(if ($resultError) { " - $resultError" })") `
                         -Recovered $reconRecovered
                 } catch { }
-                if ($result.State -eq 'Mounted') {
-                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter ([string]$result.DriveLetter)
+                if ($resultState -eq 'Mounted') {
+                    Register-ProviderExplorerIconViaAccount -AccountId $key -DriveLetter $resultDriveLetter
+                    $restoredAccount = Get-CloudAccount -AccountId $key
+                    if ($restoredAccount -and $restoredAccount.OpenExplorerOnMount -and $resultDriveLetter) {
+                        Start-ExplorerWindow ($resultDriveLetter + ':\')
+                    }
                 }
-                if ($result.State -eq 'Mounted' -or $result.State -eq 'Connected') {
+                if ($resultState -eq 'Mounted' -or $resultState -eq 'Connected') {
                     $script:ReconnectFailCount[$key] = 0
                     $script:ReconnectNextAllowed.Remove($key)
-                } elseif ($result.State -eq 'Error') {
-                    $script:ReconnectFailCount[$key] = [int]$result.FailureCount
-                    $script:ReconnectNextAllowed[$key] = [DateTime]$result.NextAllowed
+                } elseif ($resultState -eq 'Error') {
+                    $script:ReconnectFailCount[$key] = [int](Get-SafeProperty $result 'FailureCount' 0)
+                    $nextAllowed = Get-SafeProperty $result 'NextAllowed' ([DateTime]::UtcNow.AddMinutes(5))
+                    $script:ReconnectNextAllowed[$key] = [DateTime]$nextAllowed
                 }
             }
             if ($completed.HadErrors -and -not [string]::IsNullOrWhiteSpace($script:ReconnectWorkerAccountId)) {
@@ -2929,9 +3194,7 @@ function Get-StartupRestoreDisplay([string]$ProviderId, [string]$DriveLetter, [s
     } else {
         $isCurrentStage = $true
     }
-    $elapsedFrom = if ($isCurrentStage -and $progress.StageStartedAt) {
-        [DateTime]$progress.StageStartedAt
-    } elseif ($progress.StartedAt) {
+    $elapsedFrom = if ($progress.StartedAt) {
         [DateTime]$progress.StartedAt
     } elseif ($script:StartupAutoMountWorker) {
         [DateTime]$script:StartupAutoMountWorker.StartedAt
@@ -3009,15 +3272,17 @@ function Update-AllUIState {
     }
 
     # 1. Google Drive State
-    $gdCheck = if ($statusSnapshot) { $statusSnapshot.GoogleCheck } else { $gdCheckingResult }
+    $gdCheck = Get-SafeProperty $statusSnapshot 'GoogleCheck' $gdCheckingResult
     $gdStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
     if ($gdCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $gdCheck 'IsValid' $false)) {
         $gdCheck = $gdCheckingResult
     }
+    $gdCheckIsValid = [bool](Get-SafeProperty $gdCheck 'IsValid' $false)
+    $gdUserInfo = Get-SafeProperty $gdCheck 'UserInfo' $null
 
-    if ($gdCheck.IsValid) {
-        $dispName = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'DisplayName' $null } else { $null }
-        $emailAddr = if ($gdCheck.UserInfo) { Get-SafeProperty $gdCheck.UserInfo 'EmailAddress' '' } else { '' }
+    if ($gdCheckIsValid) {
+        $dispName = if ($gdUserInfo) { Get-SafeProperty $gdUserInfo 'DisplayName' $null } else { $null }
+        $emailAddr = if ($gdUserInfo) { Get-SafeProperty $gdUserInfo 'EmailAddress' '' } else { '' }
         $userDisplay = if ($dispName) { $dispName } else { $emailAddr }
         $googleIdentityVerified = [bool](Get-SafeProperty $gdCheck 'IdentityVerified' $false)
         if ($hasSavedGoogleAccounts -and -not $googleIdentityVerified) {
@@ -3050,8 +3315,8 @@ function Update-AllUIState {
         }
         $gdErrorText.Visibility = 'Collapsed'
 
-        $gdTotal = if ($gdCheck.UserInfo) { [int64](Get-SafeProperty $gdCheck.UserInfo 'QuotaTotal' (Get-SafeProperty $gdCheck.UserInfo 'QuotaTotalBytes' 0)) } else { 0L }
-        $gdUsed = if ($gdCheck.UserInfo) { [int64](Get-SafeProperty $gdCheck.UserInfo 'QuotaUsed' (Get-SafeProperty $gdCheck.UserInfo 'QuotaUsedBytes' 0)) } else { 0L }
+        $gdTotal = if ($gdUserInfo) { [int64](Get-SafeProperty $gdUserInfo 'QuotaTotal' (Get-SafeProperty $gdUserInfo 'QuotaTotalBytes' 0)) } else { 0L }
+        $gdUsed = if ($gdUserInfo) { [int64](Get-SafeProperty $gdUserInfo 'QuotaUsed' (Get-SafeProperty $gdUserInfo 'QuotaUsedBytes' 0)) } else { 0L }
 
         if ($gdTotal -gt 0) {
             $freeBytes = [Math]::Max(0L, ($gdTotal - $gdUsed))
@@ -3072,7 +3337,16 @@ function Update-AllUIState {
             $gdQuotaText.Visibility = 'Collapsed'
         }
 
-        if ($gdStatus.IsMounted) {
+        if ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Disconnecting') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Disconnecting (' + [string]$gdStatus.DriveLetter + ':)...')
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.Content = 'Disconnecting...'
+            $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdActionBtn.IsEnabled = $false
+            $gdLetterCombo.IsEnabled = $false
+            $gdExplorerBtn.IsEnabled = $false
+            $gdUploadBtn.IsEnabled = $false
+        } elseif ($gdStatus.IsMounted) {
             $gdStatusText.Text = ([string][char]0x25CF + ' Mounted (' + $gdStatus.DriveLetter + ':)')
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillMounted)
 
@@ -3161,7 +3435,11 @@ function Update-AllUIState {
         $gdUploadBtn.IsEnabled = $false
     }
 
-    if ($gdStatus.IsMounted) {
+    if ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Disconnecting') {
+        $gdActionBtn.Content = 'Disconnecting...'
+        $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        $gdActionBtn.IsEnabled = $false
+    } elseif ($gdStatus.IsMounted) {
         $gdStatusText.Text = ([string][char]0x25CF + ' Mounted (' + $gdStatus.DriveLetter + ':)')
         $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillMounted)
         $gdActionBtn.Content = 'Disconnect'
@@ -3173,14 +3451,16 @@ function Update-AllUIState {
     }
 
     # 2. TeraBox State
-    $tbCheck = if ($statusSnapshot) { $statusSnapshot.TeraBoxCheck } else { $tbCheckingResult }
+    $tbCheck = Get-SafeProperty $statusSnapshot 'TeraBoxCheck' $tbCheckingResult
     $tbStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
     if ($tbCheckingState -eq 'Mounting' -and -not (Get-SafeProperty $tbCheck 'IsValid' $false)) {
         $tbCheck = $tbCheckingResult
     }
+    $tbCheckIsValid = [bool](Get-SafeProperty $tbCheck 'IsValid' $false)
+    $tbUserInfo = Get-SafeProperty $tbCheck 'UserInfo' $null
 
-    if ($tbCheck.IsValid) {
-        $tbUName = if ($tbCheck.UserInfo) { Get-SafeProperty $tbCheck.UserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
+    if ($tbCheckIsValid) {
+        $tbUName = if ($tbUserInfo) { Get-SafeProperty $tbUserInfo 'UserName' 'TeraBox User' } else { 'TeraBox User' }
         $tbDisplayName = 'TeraBox'
         if ($tbUName -eq 'TeraBox User') {
             if (-not $hasSavedTeraBoxAccounts) {
@@ -3202,8 +3482,8 @@ function Update-AllUIState {
         $tbAccountText.Text = $tbUName
         $tbErrorText.Visibility = 'Collapsed'
 
-        $tbTotal = if ($tbCheck.UserInfo) { [int64](Get-SafeProperty $tbCheck.UserInfo 'QuotaTotal' (Get-SafeProperty $tbCheck.UserInfo 'QuotaTotalBytes' 0)) } else { 0L }
-        $tbUsed = if ($tbCheck.UserInfo) { [int64](Get-SafeProperty $tbCheck.UserInfo 'QuotaUsed' (Get-SafeProperty $tbCheck.UserInfo 'QuotaUsedBytes' 0)) } else { 0L }
+        $tbTotal = if ($tbUserInfo) { [int64](Get-SafeProperty $tbUserInfo 'QuotaTotal' (Get-SafeProperty $tbUserInfo 'QuotaTotalBytes' 0)) } else { 0L }
+        $tbUsed = if ($tbUserInfo) { [int64](Get-SafeProperty $tbUserInfo 'QuotaUsed' (Get-SafeProperty $tbUserInfo 'QuotaUsedBytes' 0)) } else { 0L }
 
         if ($tbTotal -gt 0) {
             $freeBytes = [Math]::Max(0L, ($tbTotal - $tbUsed))
@@ -3221,7 +3501,16 @@ function Update-AllUIState {
             $tbQuotaText.Visibility = 'Visible'
         }
 
-        if ($tbStatus.IsMounted) {
+        if ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Disconnecting') {
+            $tbStatusText.Text = ([string][char]0x25CF + ' Disconnecting (' + [string]$tbStatus.DriveLetter + ':)...')
+            $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.Content = 'Disconnecting...'
+            $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $tbActionBtn.IsEnabled = $false
+            $tbLetterCombo.IsEnabled = $false
+            $tbExplorerBtn.IsEnabled = $false
+            $tbUploadBtn.IsEnabled = $false
+        } elseif ($tbStatus.IsMounted) {
             $tbStatusText.Text = ([string][char]0x25CF + ' Mounted (' + $tbStatus.DriveLetter + ':)')
             $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillMounted)
 
@@ -3310,7 +3599,11 @@ function Update-AllUIState {
         $tbUploadBtn.IsEnabled = $false
     }
 
-    if ($tbStatus.IsMounted) {
+    if ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Disconnecting') {
+        $tbActionBtn.Content = 'Disconnecting...'
+        $tbActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+        $tbActionBtn.IsEnabled = $false
+    } elseif ($tbStatus.IsMounted) {
         $tbStatusText.Text = ([string][char]0x25CF + ' Mounted (' + $tbStatus.DriveLetter + ':)')
         $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillMounted)
         $tbActionBtn.Content = 'Disconnect'
@@ -3323,8 +3616,8 @@ function Update-AllUIState {
 
     $gdCheckState = [string](Get-SafeProperty $gdCheck 'State' 'Error')
     $tbCheckState = [string](Get-SafeProperty $tbCheck 'State' 'Error')
-    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and ($gdCheckState -ne 'Checking' -or $gdStatus.IsMounted) -and -not (Test-LegacyMountBusy 'gdrive'))
-    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and ($tbCheckState -ne 'Checking' -or $tbStatus.IsMounted) -and -not (Test-LegacyMountBusy 'terabox'))
+    $gdActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and -not ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Disconnecting') -and ($gdCheckState -ne 'Checking' -or $gdStatus.IsMounted) -and -not (Test-LegacyMountBusy 'gdrive'))
+    $tbActionBtn.IsEnabled = (-not $script:StartupAutoMountPending -and -not $script:StartupAutoMountWorker -and -not $script:ReconnectWorker -and -not ($tbStatus.MountState -and $tbStatus.MountState.State -eq 'Disconnecting') -and ($tbCheckState -ne 'Checking' -or $tbStatus.IsMounted) -and -not (Test-LegacyMountBusy 'terabox'))
 
     # 3. Dynamic Multi-Account Cards
     $gdDriveLetter = ([string]$gdStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
@@ -3349,7 +3642,7 @@ function Update-AllUIState {
             $mountState = [ordered]@{
                 State = 'Mounting'
                 Stage = [string]$progress.Stage
-                StartedAt = if ($progress.StageStartedAt) { [DateTime]$progress.StageStartedAt } else { [DateTime]::UtcNow }
+                StartedAt = if ($progress.StartedAt) { [DateTime]$progress.StartedAt } else { [DateTime]::UtcNow }
                 Error = $null
             }
         }
@@ -3440,7 +3733,7 @@ function Update-AllUIState {
                 $aMountState = [ordered]@{
                     State = 'Mounting'
                     Stage = [string]$script:StartupAutoMountProgress.Stage
-                    StartedAt = if ($script:StartupAutoMountProgress.StageStartedAt) { [DateTime]$script:StartupAutoMountProgress.StageStartedAt } else { [DateTime]::UtcNow }
+                    StartedAt = if ($script:StartupAutoMountProgress.StartedAt) { [DateTime]$script:StartupAutoMountProgress.StartedAt } else { [DateTime]::UtcNow }
                     Error = $null
                 }
             }
@@ -3454,28 +3747,36 @@ function Update-AllUIState {
             $aBtn.BorderThickness = [System.Windows.Thickness]::new(0)
             $aBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 
-            $currAcc = $acc
-            if ($aStatus.IsMounted) {
+            $aBtn.Tag = [string]$acc.Id
+            if ($aMountState -and $aMountState.State -eq 'Disconnecting') {
+                $aBtn.Content = 'Disconnecting...'
+                $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Danger)
+                $aBtn.Foreground = [System.Windows.Media.Brushes]::White
+            } elseif ($aStatus.IsMounted) {
                 $aBtn.Content = 'Disconnect'
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Danger)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
-                $aBtn.Add_Click({
-                    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
-                    Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
-                    Update-AllUIState
-                })
             } else {
                 $aBtn.Content = if ($aMountState -and $aMountState.State -eq 'Mounting') { 'Mounting...' } elseif ($aMountState -and $aMountState.State -in @('Error', 'AuthRequired')) { 'Retry' } else { 'Connect' }
                 $aBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
                 $aBtn.Foreground = [System.Windows.Media.Brushes]::White
-                $aBtn.Add_Click({
-                    if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id) -and $script:AccountMountStates[[string]$currAcc.Id].State -eq 'Mounting') { return }
-                    Invoke-AutoReconnectWatchdog -AccountId ([string]$currAcc.Id)
-                    Update-AllUIState
-                })
             }
+            $aBtn.Add_Click({
+                param($sender, $eventArgs)
+                $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                if (-not $selectedAccount) { return }
+                $state = if ($script:AccountMountStates.ContainsKey([string]$selectedAccount.Id)) { $script:AccountMountStates[[string]$selectedAccount.Id] } else { $null }
+                if ($state -and $state.State -in @('Mounting', 'Disconnecting')) { return }
+                $selectedStatus = Get-CachedUiDriveStatus -ProviderId ([string]$selectedAccount.ProviderId) -AccountId ([string]$selectedAccount.Id) -DriveLetter ([string]$selectedAccount.DriveLetter)
+                if ($selectedStatus.IsMounted) {
+                    [void](Start-ScopedDriveDisconnect -ProviderId ([string]$selectedAccount.ProviderId) -AccountId ([string]$selectedAccount.Id) -DriveLetter ([string]$selectedAccount.DriveLetter))
+                } else {
+                    Invoke-AutoReconnectWatchdog -AccountId ([string]$selectedAccount.Id)
+                }
+                Update-AllUIState
+            })
             $aActionRow.Children.Add($aBtn) | Out-Null
-            $aBtn.IsEnabled = -not ($aMountState -and $aMountState.State -eq 'Mounting')
+            $aBtn.IsEnabled = -not ($aMountState -and $aMountState.State -in @('Mounting', 'Disconnecting'))
 
             $aInLabel = New-Label 'in' 12 $p.TextSecondary
             $aInLabel.VerticalAlignment = 'Center'
@@ -3483,34 +3784,37 @@ function Update-AllUIState {
             $aActionRow.Children.Add($aInLabel) | Out-Null
 
             $aCombo = [System.Windows.Controls.ComboBox]::new()
+            $aCombo.Tag = [string]$acc.Id
             $aCombo.Width = 56
             $aCombo.Height = 28
             $aCombo.VerticalContentAlignment = 'Center'
             $aCombo.IsEnabled = (-not $aStatus.IsMounted)
             foreach ($l in $driveLetters) { [void]$aCombo.Items.Add("$($l):") }
-            $aCombo.SelectedItem = "$($currAcc.DriveLetter):"
+            $aCombo.SelectedItem = "$($acc.DriveLetter):"
             $aCombo.Add_SelectionChanged({
-                if ($aCombo.SelectedItem) {
-                    $mountState = if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id)) { $script:AccountMountStates[[string]$currAcc.Id] } else { $null }
-                    if ($mountState -and $mountState.State -eq 'Mounting') {
-                        $aCombo.SelectedItem = "$([string]$currAcc.DriveLetter):"
+                param($sender, $eventArgs)
+                if ($sender.SelectedItem) {
+                    $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                    if (-not $selectedAccount) { return }
+                    $mountState = if ($script:AccountMountStates.ContainsKey([string]$selectedAccount.Id)) { $script:AccountMountStates[[string]$selectedAccount.Id] } else { $null }
+                    if ($mountState -and $mountState.State -in @('Mounting', 'Disconnecting')) {
+                        $sender.SelectedItem = "$([string]$selectedAccount.DriveLetter):"
                         return
                     }
-                    $sel = $aCombo.SelectedItem.ToString().TrimEnd(':')
-                    $previousLetter = [string]$currAcc.DriveLetter
+                    $sel = $sender.SelectedItem.ToString().TrimEnd(':')
+                    $previousLetter = [string]$selectedAccount.DriveLetter
                     if ($sel -eq $previousLetter) { return }
-                    $updatedAccount = @{} + $currAcc
+                    $updatedAccount = @{} + $selectedAccount
                     $updatedAccount.DriveLetter = $sel
                     try {
                         # Persist first: if another account owns that letter the
                         # save is rejected, the combo reverts, and the card keeps
                         # its previous letter everywhere.
                         Update-CloudAccount -Account $updatedAccount | Out-Null
-                        $currAcc.DriveLetter = $sel
-                        Remove-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter $previousLetter
-                        Register-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter $sel
+                        Remove-ProviderExplorerIcon -ProviderId ([string]$selectedAccount.ProviderId) -DriveLetter $previousLetter
+                        Register-ProviderExplorerIcon -ProviderId ([string]$selectedAccount.ProviderId) -DriveLetter $sel
                     } catch {
-                        $aCombo.SelectedItem = "${previousLetter}:"
+                        $sender.SelectedItem = "${previousLetter}:"
                         [System.Windows.MessageBox]::Show((Format-SanitizedDiagnosticMessage $_.Exception.Message), 'Drive letter unavailable', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
                     }
                 }
@@ -3518,75 +3822,62 @@ function Update-AllUIState {
             $aActionRow.Children.Add($aCombo) | Out-Null
 
             $aExpBtn = New-QuickIconButton ([char]::ConvertFromUtf32(0x1F4C1)) 'Open in Windows File Explorer'
+            $aExpBtn.Tag = [string]$acc.Id
             $aExpBtn.IsEnabled = $aStatus.IsMounted
             $aExpBtn.Add_Click({
-                Start-ExplorerWindow ($currAcc.DriveLetter + ':\')
+                param($sender, $eventArgs)
+                $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                if ($selectedAccount) { Start-ExplorerWindow ($selectedAccount.DriveLetter + ':\') }
             })
             $aActionRow.Children.Add($aExpBtn) | Out-Null
 
             $aSetBtn = New-QuickIconButton ([string][char]0x2699) 'Account Options'
+            $aSetBtn.Tag = [string]$acc.Id
             $aSetBtn.Add_Click({
-                $savedAcc = Show-CloudAccountSetupModal -Owner $window -ProviderId $currAcc.ProviderId -InitialAccount $currAcc -Theme $script:Settings.Theme
+                param($sender, $eventArgs)
+                $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                if (-not $selectedAccount) { return }
+                $previous = @{} + $selectedAccount
+                $wasMounted = (Get-CachedUiDriveStatus -AccountId $previous.Id -ProviderId $previous.ProviderId -DriveLetter $previous.DriveLetter).IsMounted
+                $savedAcc = Show-CloudAccountSetupModal -Owner $window -ProviderId $selectedAccount.ProviderId -InitialAccount $selectedAccount -Theme $script:Settings.Theme
                 if ($savedAcc) {
-                    Update-CloudAccount -Account $savedAcc | Out-Null
+                    $mountOptionsChanged = ($previous.DisplayName -ne $savedAcc.DisplayName) -or
+                        ($previous.DriveLetter -ne $savedAcc.DriveLetter) -or
+                        ([bool]$previous.ReadOnly -ne [bool]$savedAcc.ReadOnly) -or
+                        ($previous.CacheDirectory -ne $savedAcc.CacheDirectory) -or
+                        ([int]$previous.CacheMaxGigabytes -ne [int]$savedAcc.CacheMaxGigabytes)
+                    if ($wasMounted -and $mountOptionsChanged) {
+                        [void](Start-ScopedDriveDisconnect -ProviderId ([string]$previous.ProviderId) -AccountId ([string]$previous.Id) -DriveLetter ([string]$previous.DriveLetter) -ReconnectAfterSuccess)
+                    }
                     Update-AllUIState
                 }
             })
             $aActionRow.Children.Add($aSetBtn) | Out-Null
 
             $aUpBtn = New-QuickIconButton ([string][char]0x2191) 'Upload Files'
+            $aUpBtn.Tag = [string]$acc.Id
             $aUpBtn.IsEnabled = $aStatus.IsMounted
             $aUpBtn.Add_Click({
-                Show-UploadDialog -DriveLetter $currAcc.DriveLetter -ParentWindow $window
+                param($sender, $eventArgs)
+                $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                if ($selectedAccount) { Show-UploadDialog -DriveLetter $selectedAccount.DriveLetter -ParentWindow $window }
             })
             $aActionRow.Children.Add($aUpBtn) | Out-Null
 
             $aRemBtn = New-QuickIconButton ([string][char]0x2715) 'Disconnect and Remove'
+            $aRemBtn.Tag = [string]$acc.Id
             $aRemBtn.Add_Click({
+                param($sender, $eventArgs)
                 # Never tear an account down while a startup restore or reconnect
                 # worker may be saving/mounting it concurrently; the worker would
                 # resurrect a phantom mount for a deleted account.
                 if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
-                Stop-VirtualDriveMount -AccountId $currAcc.Id -ProviderId $currAcc.ProviderId | Out-Null
-                Remove-ProviderExplorerIcon -ProviderId ([string]$currAcc.ProviderId) -DriveLetter ([string]$currAcc.DriveLetter)
-                try {
-                    if (([string]$currAcc.ProviderId) -eq 'gdrive') {
-                        Remove-GoogleDriveSession -AccountId ([string]$currAcc.Id)
-                    } elseif (([string]$currAcc.ProviderId) -eq 'terabox') {
-                        Remove-TeraBoxSession -AccountId ([string]$currAcc.Id)
-                    }
-                } catch { }
-                try {
-                    Remove-CloudAccount -AccountId $currAcc.Id | Out-Null
-                } catch {
-                    [System.Windows.MessageBox]::Show((Format-SanitizedDiagnosticMessage $_.Exception.Message), 'Account removal failed', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-                    return
-                }
-                # Deleting the settings record is not enough: every resource
-                # created per account id must be removed with it, or stale
-                # credentials, caches, bridge homes, and browser profiles stay
-                # attributed to a dead account forever. Each step is best
-                # effort - a leftover directory never blocks a removal.
-                try {
-                    Remove-Item -LiteralPath (Join-Path $script:CacheDirectory ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
-                } catch { }
-                if (([string]$currAcc.ProviderId) -eq 'terabox') {
-                    try {
-                        Remove-Item -LiteralPath (Get-TeraBoxBridgeHomeDirectory -AccountId ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
-                    } catch { }
-                }
-                try {
-                    Remove-Item -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\webview2-profile') ([string]$currAcc.Id)) -Recurse -Force -ErrorAction SilentlyContinue
-                } catch { }
-                try {
-                    $accountLogDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
-                    foreach ($logName in @("rclone-$($currAcc.Id).log", "rclone-$($currAcc.Id).1.log")) {
-                        Remove-Item -LiteralPath (Join-Path $accountLogDir $logName) -Force -ErrorAction SilentlyContinue
-                    }
-                } catch { }
-                if ($script:AccountMountStates.ContainsKey([string]$currAcc.Id)) { $script:AccountMountStates.Remove([string]$currAcc.Id) }
+                $selectedAccount = Get-CloudAccount -AccountId ([string]$sender.Tag)
+                if (-not $selectedAccount) { return }
+                [void](Start-ScopedDriveDisconnect -ProviderId ([string]$selectedAccount.ProviderId) -AccountId ([string]$selectedAccount.Id) -DriveLetter ([string]$selectedAccount.DriveLetter) -RemoveAccount)
                 Update-AllUIState
             })
+            $aRemBtn.IsEnabled = -not ($aMountState -and $aMountState.State -in @('Mounting', 'Disconnecting'))
             $aActionRow.Children.Add($aRemBtn) | Out-Null
 
             # Col 2: Status
@@ -3603,8 +3894,8 @@ function Update-AllUIState {
             # running rclone process's command line, so '(read-only)' reflects
             # what actually applies to this drive, not just the saved setting.
             $roSuffix = if ($aStatus.IsReadOnly) { ' (read-only)' } else { '' }
-            $pillText = if ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':' + $roSuffix + ')' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
-            $pillColor = if ($aStatus.IsMounted) { $p.PillMounted } elseif ($aMountState -and $aMountState.State -eq 'Error') { $p.Danger } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { $p.PillWarning } else { $p.PillConnected }
+            $pillText = if ($aMountState -and $aMountState.State -eq 'Disconnecting') { [string][char]0x25CF + ' Disconnecting (' + $mountElapsed + 's)' } elseif ($aStatus.IsMounted) { [string][char]0x25CF + ' Mounted (' + $aStatus.DriveLetter + ':' + $roSuffix + ')' } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)' } elseif ($aMountState -and $aMountState.State -eq 'Error') { [string][char]0x25CF + ' ' + [string]$aMountState.Error } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') { [string][char]0x25CF + ' Sign-in required' } else { [string][char]0x25CF + ' Ready to connect' }
+            $pillColor = if ($aMountState -and $aMountState.State -eq 'Disconnecting') { $p.PillWarning } elseif ($aStatus.IsMounted) { $p.PillMounted } elseif ($aMountState -and $aMountState.State -eq 'Error') { $p.Danger } elseif ($aMountState -and $aMountState.State -eq 'Mounting') { $p.PillWarning } else { $p.PillConnected }
             $aStatusLbl = New-Label $pillText 11 $pillColor $true
             $aStatusLbl.HorizontalAlignment = 'Right'
             $aRightStack.Children.Add($aStatusLbl) | Out-Null
@@ -3665,18 +3956,13 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
 # ------------------------------------------------------------------------------
 $gdActionBtn.Add_Click({
     if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
-    $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
+    $gdStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
     if ($gdStatus.IsMounted) {
         $gdStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
         $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         $gdActionBtn.IsEnabled = $false
-        try {
-            Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
-            Remove-ProviderExplorerIcon -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter
-        } finally {
-            $gdActionBtn.IsEnabled = $true
-            Update-AllUIState
-        }
+        [void](Start-ScopedDriveDisconnect -ProviderId 'gdrive' -DriveLetter ([string]$gdStatus.DriveLetter))
+        Update-AllUIState
         return
     }
 
@@ -3749,24 +4035,19 @@ $gdExplorerBtn.Add_Click({
 })
 
 $gdSettingsBtn.Add_Click({
-    $existing = (Get-CloudAccounts) | Where-Object { $_.ProviderId -eq 'gdrive' -and $_.Id -notlike 'test_*' } | Select-Object -First 1
+    $selectedStatus = Get-CachedUiDriveStatus -ProviderId 'gdrive'
+    $selectedLetter = ([string]$selectedStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+    $existing = Get-CloudAccounts | Where-Object {
+        $_.ProviderId -eq 'gdrive' -and
+        $_.Id -notlike 'test_*' -and
+        ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $selectedLetter
+    } | Select-Object -First 1
     if (-not $existing) {
-        $existing = @{
-            Id = 'gdrive_primary'
-            ProviderId = 'gdrive'
-            DisplayName = 'Google Drive'
-            AccountEmail = ''
-            DriveLetter = $script:GDriveLetter
-            AutoMount = $script:Settings.AutoMountDrives
-            OpenExplorerOnMount = $script:Settings.OpenExplorerOnMount
-            ReadOnly = $false
-        }
+        [System.Windows.MessageBox]::Show('This legacy Google Drive connection has no verified saved-account settings. Add or reconnect a Google account to edit account-specific options.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return
     }
     $res = Show-CloudAccountSetupModal -Owner $window -ProviderId 'gdrive' -InitialAccount $existing -Theme $script:Settings.Theme
     if ($res) {
-        $script:GDriveLetter = $res.DriveLetter
-        Set-PreferredDriveLetter -ProviderId 'gdrive' -DriveLetter $res.DriveLetter
-        Update-CloudAccount -Account $res | Out-Null
         Update-AllUIState
     }
 })
@@ -3778,10 +4059,7 @@ $gdUploadBtn.Add_Click({
 $gdRemoveBtn.Add_Click({
     $conf = [System.Windows.MessageBox]::Show('Are you sure you want to disconnect and remove Google Drive?', 'Remove Cloud Drive', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
     if ($conf -eq [System.Windows.MessageBoxResult]::Yes) {
-        Stop-VirtualDriveMount -ProviderId 'gdrive' | Out-Null
-        Remove-GoogleDriveSession
-        Remove-NSCloudDriveOwnedExplorerIcons
-        $gdErrorText.Visibility = 'Collapsed'
+        [void](Start-ScopedDriveDisconnect -ProviderId 'gdrive' -DriveLetter $script:GDriveLetter -RemoveLegacySession)
         Update-AllUIState
     }
 })
@@ -3791,18 +4069,13 @@ $gdRemoveBtn.Add_Click({
 # ------------------------------------------------------------------------------
 $tbActionBtn.Add_Click({
     if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return }
-    $tbStatus = Get-VirtualDriveStatus -ProviderId 'terabox'
+    $tbStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
     if ($tbStatus.IsMounted) {
         $tbStatusText.Text = [string][char]0x25CF + ' Disconnecting...'
         $tbStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
         $tbActionBtn.IsEnabled = $false
-        try {
-            Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
-            Remove-ProviderExplorerIcon -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter
-        } finally {
-            $tbActionBtn.IsEnabled = $true
-            Update-AllUIState
-        }
+        [void](Start-ScopedDriveDisconnect -ProviderId 'terabox' -DriveLetter ([string]$tbStatus.DriveLetter))
+        Update-AllUIState
         return
     }
 
@@ -3866,24 +4139,19 @@ $tbExplorerBtn.Add_Click({
 })
 
 $tbSettingsBtn.Add_Click({
-    $existing = (Get-CloudAccounts) | Where-Object { $_.ProviderId -eq 'terabox' -and $_.Id -notlike 'test_*' } | Select-Object -First 1
+    $selectedStatus = Get-CachedUiDriveStatus -ProviderId 'terabox'
+    $selectedLetter = ([string]$selectedStatus.DriveLetter).TrimEnd(':').TrimEnd('\')
+    $existing = Get-CloudAccounts | Where-Object {
+        $_.ProviderId -eq 'terabox' -and
+        $_.Id -notlike 'test_*' -and
+        ([string]$_.DriveLetter).TrimEnd(':').TrimEnd('\') -eq $selectedLetter
+    } | Select-Object -First 1
     if (-not $existing) {
-        $existing = @{
-            Id = 'terabox_primary'
-            ProviderId = 'terabox'
-            DisplayName = 'TeraBox'
-            AccountEmail = ''
-            DriveLetter = $script:TeraBoxLetter
-            AutoMount = $script:Settings.AutoMountDrives
-            OpenExplorerOnMount = $script:Settings.OpenExplorerOnMount
-            ReadOnly = $false
-        }
+        [System.Windows.MessageBox]::Show('This legacy TeraBox connection has no verified saved-account settings. Add or reconnect a TeraBox account to edit account-specific options.', 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return
     }
     $res = Show-CloudAccountSetupModal -Owner $window -ProviderId 'terabox' -InitialAccount $existing -Theme $script:Settings.Theme
     if ($res) {
-        $script:TeraBoxLetter = $res.DriveLetter
-        Set-PreferredDriveLetter -ProviderId 'terabox' -DriveLetter $res.DriveLetter
-        Update-CloudAccount -Account $res | Out-Null
         Update-AllUIState
     }
 })
@@ -3895,10 +4163,7 @@ $tbUploadBtn.Add_Click({
 $tbRemoveBtn.Add_Click({
     $conf = [System.Windows.MessageBox]::Show('Are you sure you want to disconnect and remove TeraBox?', 'Remove Cloud Drive', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
     if ($conf -eq [System.Windows.MessageBoxResult]::Yes) {
-        Stop-VirtualDriveMount -ProviderId 'terabox' | Out-Null
-        Remove-TeraBoxSession
-        Remove-NSCloudDriveOwnedExplorerIcons
-        $tbErrorText.Visibility = 'Collapsed'
+        [void](Start-ScopedDriveDisconnect -ProviderId 'terabox' -DriveLetter $script:TeraBoxLetter -RemoveLegacySession)
         Update-AllUIState
     }
 })
@@ -4105,9 +4370,9 @@ function Start-LegacyMountWorker {
     }
     try {
         $script:LegacyMountWorkers[$providerKey] = Start-NSBackgroundOperation -ArgumentList @(
-            $PSScriptRoot, $script:CacheDirectory, $providerKey, $cleanLetter, $DisplayName, $progress
+            $PSScriptRoot, $script:CacheDirectory, [int]$script:Settings.CacheMaxGigabytes, $providerKey, $cleanLetter, $DisplayName, $progress
         ) -ScriptBlock {
-            param([string]$sourceRoot, [string]$cacheDirectory, [string]$providerKey, [string]$driveLetter, [string]$displayName, [hashtable]$progress)
+            param([string]$sourceRoot, [string]$cacheDirectory, [int]$cacheMaxGigabytes, [string]$providerKey, [string]$driveLetter, [string]$displayName, [hashtable]$progress)
             $ErrorActionPreference = 'Stop'
             . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
             . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
@@ -4118,24 +4383,26 @@ function Start-LegacyMountWorker {
                 $progress.Stage = 'Validating Google Drive credentials'
                 $check = Test-GoogleDriveBackendSession
                 if (-not $check.IsValid) {
-                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($check.State -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = $check.Error; DriveLetter = $driveLetter }
+                    $checkState = [string](Get-SafeProperty $check 'State' 'Error')
+                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($checkState -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = (Get-SafeProperty $check 'Error' 'Provider returned an incomplete status response.'); DriveLetter = $driveLetter }
                 }
                 $progress.Stage = "Starting and verifying ${driveLetter}: mount"
                 $environment = Get-GoogleDriveRcloneEnvironment
                 Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $driveLetter `
                     -VolumeLabel $(if ($displayName) { $displayName } else { 'Google Drive' }) `
-                    -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                    -CacheDirectory $cacheDirectory -CacheMaxGigabytes $cacheMaxGigabytes -EnvironmentVariables $environment | Out-Null
             } elseif ($providerKey -eq 'terabox') {
                 $progress.Stage = 'Validating TeraBox session'
                 $check = Test-TeraBoxBackendSession
                 if (-not $check.IsValid) {
-                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($check.State -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = $check.Error; DriveLetter = $driveLetter }
+                    $checkState = [string](Get-SafeProperty $check 'State' 'Error')
+                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($checkState -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = (Get-SafeProperty $check 'Error' 'Provider returned an incomplete status response.'); DriveLetter = $driveLetter }
                 }
                 $progress.Stage = "Starting and verifying ${driveLetter}: mount"
                 $environment = Get-TeraBoxRcloneEnvironment
                 Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -DriveLetter $driveLetter `
                     -VolumeLabel $(if ($displayName) { $displayName } else { 'TeraBox' }) `
-                    -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                    -CacheDirectory $cacheDirectory -CacheMaxGigabytes $cacheMaxGigabytes -EnvironmentVariables $environment | Out-Null
             } else {
                 return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = 'Error'; Error = "Unknown provider '$providerKey'."; DriveLetter = $driveLetter }
             }
@@ -4237,11 +4504,11 @@ function Invoke-AutoReconnectWatchdog {
         $workerAccounts = if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
             $account = Get-CloudAccount -AccountId $AccountId
             if (-not $account) { throw 'The saved account could not be found.' }
-            @([pscustomobject]@{ WorkerKey = [string]$account.Id; Id = [string]$account.Id; ProviderId = [string]$account.ProviderId; DriveLetter = [string]$account.DriveLetter; DisplayName = [string]$account.DisplayName; AutoMount = $true; ReadOnly = [bool]$account.ReadOnly })
+            @([pscustomobject]@{ WorkerKey = [string]$account.Id; Id = [string]$account.Id; ProviderId = [string]$account.ProviderId; DriveLetter = [string]$account.DriveLetter; DisplayName = [string]$account.DisplayName; AutoMount = $true; ReadOnly = [bool]$account.ReadOnly; CacheDirectory = [string]$account.CacheDirectory; CacheMaxGigabytes = [int]$account.CacheMaxGigabytes })
         } elseif ($legacyMode) {
             @(
-                [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true; ReadOnly = $false },
-                [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true; ReadOnly = $false }
+                [pscustomobject]@{ WorkerKey = '__gdrive_primary__'; Id = ''; ProviderId = 'gdrive'; DriveLetter = $script:GDriveLetter; DisplayName = 'Google Drive'; AutoMount = $true; ReadOnly = $false; CacheDirectory = ''; CacheMaxGigabytes = 0 },
+                [pscustomobject]@{ WorkerKey = '__terabox_primary__'; Id = ''; ProviderId = 'terabox'; DriveLetter = $script:TeraBoxLetter; DisplayName = 'TeraBox'; AutoMount = $true; ReadOnly = $false; CacheDirectory = ''; CacheMaxGigabytes = 0 }
             )
         } else {
             @($accounts | Where-Object { $_.AutoMount } | ForEach-Object {
@@ -4253,6 +4520,8 @@ function Invoke-AutoReconnectWatchdog {
                     DisplayName = [string]$_.DisplayName
                     AutoMount = [bool]$_.AutoMount
                     ReadOnly = [bool]$_.ReadOnly
+                    CacheDirectory = [string]$_.CacheDirectory
+                    CacheMaxGigabytes = [int]$_.CacheMaxGigabytes
                 }
             })
         }
@@ -4262,6 +4531,7 @@ function Invoke-AutoReconnectWatchdog {
         $failureCounts = @{}
         foreach ($key in $script:ReconnectFailCount.Keys) { $failureCounts[$key] = [int]$script:ReconnectFailCount[$key] }
         $cacheDirectory = $script:CacheDirectory
+        $cacheMaxGigabytes = [int]$script:Settings.CacheMaxGigabytes
         $mountProgress = [hashtable]::Synchronized(@{ AccountId = $AccountId; Stage = 'Starting mount worker'; DriveLetter = ''; StartedAt = [DateTime]::UtcNow; Error = $null })
         if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
             $mountProgress.DriveLetter = [string]$workerAccounts[0].DriveLetter
@@ -4271,9 +4541,9 @@ function Invoke-AutoReconnectWatchdog {
         $script:ReconnectWorkerAccountId = $AccountId
         $script:ReconnectWorkerProgress = $mountProgress
         $script:ReconnectWorker = Start-NSBackgroundOperation -ArgumentList @(
-            $PSScriptRoot, $cacheDirectory, $workerAccounts, $nextAllowed, $failureCounts, $mountProgress
+            $PSScriptRoot, $cacheDirectory, $cacheMaxGigabytes, $workerAccounts, $nextAllowed, $failureCounts, $mountProgress
         ) -ScriptBlock {
-            param([string]$sourceRoot, [string]$cacheDirectory, [object[]]$accounts, [hashtable]$nextAllowed, [hashtable]$failureCounts, [hashtable]$mountProgress)
+            param([string]$sourceRoot, [string]$cacheDirectory, [int]$cacheMaxGigabytes, [object[]]$accounts, [hashtable]$nextAllowed, [hashtable]$failureCounts, [hashtable]$mountProgress)
             $ErrorActionPreference = 'Stop'
             . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
             . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
@@ -4283,6 +4553,8 @@ function Invoke-AutoReconnectWatchdog {
             $now = [DateTime]::UtcNow
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
+                $accountCacheDirectory = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { $cacheDirectory }
+                $accountCacheMaxGigabytes = if ([int]$account.CacheMaxGigabytes -gt 0) { [int]$account.CacheMaxGigabytes } else { $cacheMaxGigabytes }
                 $key = [string]$account.WorkerKey
                 if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Checking existing mount'; $mountProgress.DriveLetter = [string]$account.DriveLetter }
                 try {
@@ -4336,7 +4608,7 @@ function Invoke-AutoReconnectWatchdog {
                         if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     } else {
                         continue
@@ -4346,7 +4618,7 @@ function Invoke-AutoReconnectWatchdog {
                     if ($account.ProviderId -eq 'gdrive') {
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     }
 
@@ -4385,7 +4657,7 @@ function Start-StartupAutoMountTimer {
     $script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow
     $script:StartupAutoMountProgress.StageStartedAt = $script:StartupAutoMountProgress.StartedAt
     $script:StartupAutoMountPending = $true
-    $script:StartupAutoMountTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $script:StartupAutoMountTimer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Normal)
     $script:StartupAutoMountTimer.Interval = [TimeSpan]::FromMilliseconds(500)
     $script:StartupAutoMountTimer.Add_Tick({
         $timer = $script:StartupAutoMountTimer
@@ -4414,7 +4686,6 @@ function Invoke-StartupAutoMount {
     $script:StartupAutoMountProgress.ProviderId = ''
     $script:StartupAutoMountProgress.DriveLetter = ''
     $script:StartupAutoMountProgress.AccountId = ''
-    $script:StartupAutoMountProgress.StartedAt = [DateTime]::UtcNow
     $script:StartupAutoMountProgress.StageStartedAt = [DateTime]::UtcNow
     $script:StartupAutoMountWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $cacheDirectory, $script:StartupAutoMountProgress) -ScriptBlock {
         param([string]$sourceRoot, [string]$cacheDirectory, [hashtable]$progress)
@@ -4456,6 +4727,8 @@ function Invoke-StartupAutoMount {
             foreach ($account in $accounts) {
                 if (-not $account.AutoMount) { continue }
                 try {
+                    $accountCacheDirectory = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { $cacheDirectory }
+                    $accountCacheMaxGigabytes = if ([int]$account.CacheMaxGigabytes -gt 0) { [int]$account.CacheMaxGigabytes } else { [int]$settings.CacheMaxGigabytes }
                     Set-StartupRestoreProgress -Progress $progress -Stage "Checking existing $($account.DriveLetter): mount" -ProviderId ([string]$account.ProviderId) -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                     $status = Get-VirtualDriveStatus -AccountId $account.Id -ProviderId $account.ProviderId
                     if ($status.ProcessRunning) {
@@ -4472,7 +4745,7 @@ function Invoke-StartupAutoMount {
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
@@ -4481,7 +4754,7 @@ function Invoke-StartupAutoMount {
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): TeraBox mount (up to 90s)" -ProviderId 'terabox' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
                     }
@@ -4527,11 +4800,11 @@ function Invoke-StartupAutoMount {
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $googleDriveLetter`: Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter $googleDriveLetter
                         Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
                             -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -CacheMaxGigabytes ([int]$settings.CacheMaxGigabytes) -EnvironmentVariables $environment | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
                     }
                 } else {
-                    $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = [string]$googleCheck.State; Error = $googleCheck.Error; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
+                    $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = [string](Get-SafeProperty $googleCheck 'State' 'Error'); Error = (Get-SafeProperty $googleCheck 'Error' 'Provider returned an incomplete status response.'); DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
                 }
             } catch {
                 $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Error'; Error = (Format-SanitizedDiagnosticMessage $_.Exception.Message); DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
@@ -4552,13 +4825,13 @@ function Invoke-StartupAutoMount {
                 } elseif ((Get-VerifiedRclonePath)) {
                     $teraBoxCheck = Test-TeraBoxBackendSession
                     if (-not $teraBoxCheck.IsValid) {
-                        $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = [string]$teraBoxCheck.State; Error = $teraBoxCheck.Error; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
+                        $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = [string](Get-SafeProperty $teraBoxCheck 'State' 'Error'); Error = (Get-SafeProperty $teraBoxCheck 'Error' 'Provider returned an incomplete status response.'); DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
                     } else {
                         $environment = Get-TeraBoxRcloneEnvironment
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $teraBoxDriveLetter`: TeraBox mount (up to 90s)" -ProviderId 'terabox' -DriveLetter $teraBoxDriveLetter
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' `
                             -DriveLetter (Get-PreferredDriveLetter 'terabox') -VolumeLabel 'TeraBox' `
-                            -CacheDirectory $cacheDirectory -EnvironmentVariables $environment | Out-Null
+                            -CacheDirectory $cacheDirectory -CacheMaxGigabytes ([int]$settings.CacheMaxGigabytes) -EnvironmentVariables $environment | Out-Null
                         $results.Add([pscustomobject]@{ AccountId = 'terabox'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'terabox') })
                     }
                 } else {
@@ -4605,6 +4878,19 @@ $window.Add_Loaded({
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
+    if ($script:StartupAutoMountPending -and
+        -not $script:StartupAutoMountWorker -and
+        $script:StartupAutoMountTimer -and
+        $script:StartupAutoMountProgress.Stage -eq 'Waiting for startup dispatcher' -and
+        $script:StartupAutoMountProgress.StartedAt -and
+        ([DateTime]::UtcNow - [DateTime]$script:StartupAutoMountProgress.StartedAt).TotalSeconds -ge 15) {
+        $script:StartupAutoMountTimer.Stop()
+        $script:StartupAutoMountTimer = $null
+        $script:StartupAutoMountPending = $false
+        $script:StartupAutoMountError = 'Startup restoration could not be scheduled by the UI dispatcher within 15 seconds. Use Refresh to retry.'
+        $script:LastProviderStatusCheck = [DateTime]::MinValue
+    }
+
     if ($script:RestoreEvent) {
         try {
             if ($script:RestoreEvent.WaitOne(0)) {
