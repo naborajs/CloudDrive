@@ -151,7 +151,27 @@ try {
     if (-not (Test-Path $fUserTemporary)) {
         throw 'Startup recovery must not remove temporary-looking files outside managed account cache directories'
     }
-    Write-Output '  [PASS] Startup recovery is limited to managed account cache directories'
+
+    $customCacheBase = Join-Path $recDir 'custom-cache-base'
+    $customMountCacheDir = Join-Path $customCacheBase 'terabox_testaccount'
+    [System.IO.Directory]::CreateDirectory($customMountCacheDir) | Out-Null
+    $customPartial = Join-Path $customMountCacheDir 'custom.partial'
+    [System.IO.File]::WriteAllText($customPartial, 'custom_cache')
+    $customRes = Invoke-StartupCacheRecovery -CacheDirectory $recDir -MountCacheDirectories @($customMountCacheDir)
+    if ($customRes.RecoveredFiles -ne 1 -or (Test-Path -LiteralPath $customPartial)) {
+        throw 'Explicit per-account cache paths should recover temporary files in a custom cache base'
+    }
+
+    $invalidNamespaceRejected = $false
+    try {
+        Invoke-StartupCacheRecovery -CacheDirectory $recDir -MountCacheDirectories @($unmanagedDir) | Out-Null
+    } catch {
+        $invalidNamespaceRejected = $true
+    }
+    if (-not $invalidNamespaceRejected -or -not (Test-Path -LiteralPath $fUserTemporary)) {
+        throw 'Recovery must reject directories outside the known provider/account cache namespace'
+    }
+    Write-Output '  [PASS] Startup recovery is isolated to valid provider/account cache directories'
 } finally {
     Remove-Item -Recurse -Force $recDir -ErrorAction SilentlyContinue
 }
