@@ -111,7 +111,7 @@ function Get-NSCloudDriveSettings {
         }
         return $settings
     } catch {
-        return (Get-DefaultSettings)
+        throw "Unable to load saved settings from '$settingsPath'. The original file was preserved: $($_.Exception.Message)"
     }
 }
 
@@ -125,7 +125,24 @@ function Set-NSCloudDriveSettings([hashtable]$Settings) {
 
     $settingsPath = Get-NSCloudDriveSettingsPath
     $json = $Settings | ConvertTo-Json -Depth 4
-    Set-Content -LiteralPath $settingsPath -Value $json -Encoding UTF8 -Force
+    $tempSuffix = [Guid]::NewGuid().ToString('N')
+    $tempPath = "$settingsPath.$tempSuffix.tmp"
+    $backupPath = "$settingsPath.$tempSuffix.bak"
+    try {
+        [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.UTF8Encoding]::new($false))
+        if ([System.IO.File]::Exists($settingsPath)) {
+            [System.IO.File]::Replace($tempPath, $settingsPath, $backupPath)
+        } else {
+            [System.IO.File]::Move($tempPath, $settingsPath)
+        }
+    } finally {
+        if ([System.IO.File]::Exists($tempPath)) {
+            [System.IO.File]::Delete($tempPath)
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            [System.IO.File]::Delete($backupPath)
+        }
+    }
 }
 
 function Get-PreferredDriveLetter([string]$ProviderId) {
