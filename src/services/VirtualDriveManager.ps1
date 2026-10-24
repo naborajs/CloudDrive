@@ -463,9 +463,27 @@ function Start-VirtualDriveMount(
         } catch { }
     }
 
-    # Isolated cache directory per mountKey
+    # Isolated cache and config namespace per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath '' -LogFile $logPath -ReadOnly:$ReadOnly -FixedDisk
+    $mountConfigPath = ''
+    if (-not [string]::IsNullOrEmpty($AccountId)) {
+        # Account mounts must not inherit settings from the user's global
+        # rclone.conf: rclone can merge same-named remotes from that file
+        # with the environment variables this application sets, so a global
+        # "gdrive:" or "terabox:" remote could bleed unrelated keys (shared
+        # drive flags, export formats, root folders) into a per-account
+        # remote. An empty, app-owned config file guarantees each account's
+        # remote is defined only by its own environment variables.
+        $mountConfigPath = Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config') 'account-mount-isolated.conf'
+        if (-not (Test-Path -LiteralPath $mountConfigPath)) {
+            try {
+                $cfgDir = Split-Path -Parent $mountConfigPath
+                if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
+                [System.IO.File]::WriteAllText($mountConfigPath, '', [System.Text.Encoding]::ASCII)
+            } catch { $mountConfigPath = '' }
+        }
+    }
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -ReadOnly:$ReadOnly -FixedDisk
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
