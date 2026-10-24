@@ -122,6 +122,11 @@ try {
             Id = 'life_gd_y'; ProviderId = 'gdrive'; DisplayName = 'Beta Personal Drive'
             AccountEmail = 'cross@demo.com'; DriveLetter = 'Y'
         }) | Out-Null
+        $legacySettingsAccount = Get-CloudAccount -AccountId 'life_gd_x'
+        if (-not $legacySettingsAccount.Contains('ReadOnly') -or [bool]$legacySettingsAccount.ReadOnly) {
+            throw 'A saved account created without the optional ReadOnly property was not normalized to read-write.'
+        }
+        Write-Output '  [PASS] Legacy saved accounts without ReadOnly receive the safe read-write default'
 
         $stubTokens = [ordered]@{
             access_token = 'ya29.life_cross_token'
