@@ -128,9 +128,13 @@ try {
 
     # ---- Scenario 5 (structural): UI retry/guard/not-fabricated additions exist ----
     $uiSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\ui\ProviderConnectionWindow.ps1') -Raw
+    $mainSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\NSCloudDrive.ps1') -Raw
     $provSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\providers\GoogleDriveProvider.ps1') -Raw
     Assert-True ($uiSource -notmatch '\$(?:verify|res)\.State') 'Scenario 5: incomplete provider results cannot throw on direct State property access'
     Assert-True ($uiSource -match 'UpdateStateFromProviderResult' -and $uiSource -match 'Get-SafeProperty \$Result ''State'' ''Error''') 'Scenario 5: missing provider state is surfaced as an explicit Error'
+    Assert-True ($mainSource -match 'Get-SafeProperty \$gdCheck ''State'' ''Error''' -and $mainSource -match 'Get-SafeProperty \$tbCheck ''State'' ''Error''' -and $mainSource -notmatch '\$(?:gdCheck|tbCheck)\.State') 'Scenario 5: incomplete dashboard status cannot throw while reading provider State'
+    Assert-True ($mainSource -match '\$hasActiveLegacyGoogle = \[bool\]\$gdStatus\.IsMounted -or \[bool\]\(Get-SafeProperty \$gdCheck ''IsValid'' \$false\)' -and $mainSource -match '\$hasSavedGoogleAccounts -and -not \$hasActiveLegacyGoogle') 'Scenario 5: adding a saved Google account does not hide an active legacy Google drive'
+    Assert-True ($mainSource -match 'The account was saved, but its mount or dashboard refresh did not complete' -and $mainSource -match "Operation 'account-post-save'") 'Scenario 5: a post-save mount/UI error cannot be reported as account creation failure'
     Assert-True ($uiSource -match '\$verify\.IsValid -and \$userEmail -match') 'Scenario 5: a new Google account requires a valid provider-returned email'
     Assert-True ($uiSource -match 'IdentityVerified') 'Scenario 5: a new Google account requires provider-verified identity'
     Assert-True ($uiSource -match 'already saved as' -and $uiSource -match 'OrdinalIgnoreCase') 'Scenario 5: the same verified Google identity cannot be saved twice'
