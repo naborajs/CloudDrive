@@ -192,14 +192,14 @@ function Get-CloudAccounts {
         }
     }
     if ($list.Count -eq 0) {
-        return @()
+        return
     }
-    return ,$list
+    return $list
 }
 
 function Get-CloudAccount([string]$AccountId) {
     if (-not $AccountId) { return $null }
-    $accounts = Get-CloudAccounts
+    $accounts = @(Get-CloudAccounts)
     foreach ($a in $accounts) {
         if ($a.Id -eq $AccountId) {
             return $a
@@ -216,7 +216,7 @@ function Test-CloudAccountPersisted([string]$AccountId) {
 function Test-CloudAccountDriveLetterAvailable([string]$DriveLetter, [string]$ExcludeAccountId = '') {
     $letter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($letter -notmatch '^[A-Z]$') { throw 'Choose a single valid drive letter before saving this account.' }
-    foreach ($savedAccount in (Get-CloudAccounts)) {
+    foreach ($savedAccount in @(Get-CloudAccounts)) {
         if (-not [string]::IsNullOrWhiteSpace($ExcludeAccountId) -and [string]$savedAccount.Id -eq $ExcludeAccountId) { continue }
         $savedLetter = ([string]$savedAccount.DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
         if ($savedLetter -eq $letter) {
@@ -339,7 +339,7 @@ function Remove-SeededPlaceholderAccounts {
     $changed = $false
     if ($settings.Accounts) {
         foreach ($a in $settings.Accounts) {
-            $isPlaceholder = ($a.Id -like 'test_*' -or $a.AccountEmail -in @('personal@gmail.com', 'work@company.com', 'terabox_user'))
+            $isPlaceholder = ($a.Id -like 'test_*')
             if ($isPlaceholder) {
                 $changed = $true
             } else {
@@ -355,7 +355,7 @@ function Remove-SeededPlaceholderAccounts {
 }
 
 function Get-AllocatedDriveLetters {
-    $accounts = Get-CloudAccounts
+    $accounts = @(Get-CloudAccounts)
     $letters = @()
     foreach ($acc in $accounts) {
         if ($acc.DriveLetter) {
