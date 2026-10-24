@@ -39,6 +39,9 @@ Assert-True ($mainSource -match '\$script:BitmapImageCache\.ContainsKey') 'Provi
 Assert-True ($mainSource -match '\$refreshAccountCards = \$accountCardsSignature -ne \$script:AccountCardsSignature') 'Unchanged account cards are not rebuilt on every UI refresh'
 Assert-True ($mainSource -match 'SAVED CLOUD ACCOUNTS') 'Saved accounts are presented as distinct account cards'
 Assert-True ($mainSource -match "New-NavButton \(\[string\]\[char\]0x2197\) 'Analytics'") 'Analytics uses a compact trend glyph instead of oversized block bars'
+Assert-True ($mainSource -match 'New-AnalyticsCard ''Cloud accounts and mounts'' ''#3B82F6''' -and $mainSource -match 'New-AnalyticsCard ''Cloud storage'' ''#F59E0B''' -and $mainSource -match 'New-AnalyticsCard ''App resources \(live\)'' ''#14B8A6''') 'Analytics sections use lightweight color accents'
+Assert-True ($mainSource.Contains('$analyticsDarkPalette = $p.Name -in @(''PureBlack'', ''Translucent'')') -and $mainSource.Contains('$analyticsAmber = if ($analyticsDarkPalette) { ''#FCD34D'' } else { ''#B45309'' }')) 'Analytics metric colors retain readable contrast in dark and light themes'
+Assert-True ($mainSource.Contains('[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)') -and $mainSource.Contains('Active mounted drives: $($mountedDriveLetters.Count).')) 'Mounted-drive analytics counts unique drive letters across saved and legacy mounts'
 Assert-True ($mainSource -notmatch 'Get-Random') 'No synthetic resource or storage values are generated'
 
 Write-Output '  [PASS] Analytics dashboard contract verified (mocked/structural; no real provider quota call performed).'
