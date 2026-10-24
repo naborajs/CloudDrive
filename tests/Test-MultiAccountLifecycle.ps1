@@ -239,6 +239,10 @@ try {
     if (@($nsReadOnlySites).Count -ne 4) {
         throw ("Expected the per-account ReadOnly flag at exactly 4 mount call sites, found $($nsReadOnlySites.Count).")
     }
+    $workerSetup = [regex]::Match((Get-Content -LiteralPath $nsSourcePath -Raw), '(?ms)\$workerAccounts = if .*?^\s*\$nextAllowed =').Value
+    if (-not $workerSetup -or ([regex]::Matches($workerSetup, 'ReadOnly\s*=')).Count -ne 4) {
+        throw 'Every saved, legacy Google, and legacy TeraBox reconnect worker record must define its ReadOnly mode.'
+    }
 
     $nsMapping = Select-String -Path $nsSourcePath -SimpleMatch -Pattern 'No Google Drive tokens|No valid TeraBox session'
     if (-not $nsMapping) {
