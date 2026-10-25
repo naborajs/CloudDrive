@@ -47,6 +47,12 @@ function Get-DefaultSettings {
             gdrive = 'G'
             terabox = 'T'
         }
+        EnableNotifications = $true
+        NotifyOnUploadStart = $true
+        NotifyOnUploadComplete = $true
+        GroupFolderUploads = $true
+        MinNotificationFileSizeBytes = 5242880 # 5 MB default threshold
+        NotificationSnoozeUntilUtc = ''
         Accounts = @()
     }
 }
@@ -107,6 +113,12 @@ function Get-NSCloudDriveSettings {
                 gdrive = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['gdrive']) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
                 terabox = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['terabox']) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
             }
+            EnableNotifications = if ($json.PSObject.Properties['EnableNotifications'] -and $null -ne $json.EnableNotifications) { [bool]$json.EnableNotifications } else { $defaults.EnableNotifications }
+            NotifyOnUploadStart = if ($json.PSObject.Properties['NotifyOnUploadStart'] -and $null -ne $json.NotifyOnUploadStart) { [bool]$json.NotifyOnUploadStart } else { $defaults.NotifyOnUploadStart }
+            NotifyOnUploadComplete = if ($json.PSObject.Properties['NotifyOnUploadComplete'] -and $null -ne $json.NotifyOnUploadComplete) { [bool]$json.NotifyOnUploadComplete } else { $defaults.NotifyOnUploadComplete }
+            GroupFolderUploads = if ($json.PSObject.Properties['GroupFolderUploads'] -and $null -ne $json.GroupFolderUploads) { [bool]$json.GroupFolderUploads } else { $defaults.GroupFolderUploads }
+            MinNotificationFileSizeBytes = if ($json.PSObject.Properties['MinNotificationFileSizeBytes'] -and $null -ne $json.MinNotificationFileSizeBytes) { [int64]$json.MinNotificationFileSizeBytes } else { $defaults.MinNotificationFileSizeBytes }
+            NotificationSnoozeUntilUtc = if ($json.PSObject.Properties['NotificationSnoozeUntilUtc'] -and -not [string]::IsNullOrEmpty($json.NotificationSnoozeUntilUtc)) { [string]$json.NotificationSnoozeUntilUtc } else { $defaults.NotificationSnoozeUntilUtc }
             Accounts = $accountsList
         }
         return $settings
@@ -501,4 +513,30 @@ function Set-WindowsStartupEnabled([bool]$Enable, [string]$ScriptPath = '', [str
     } else {
         Remove-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive' -ErrorAction SilentlyContinue
     }
+}
+
+
+function Test-NotificationsSnoozed([hashtable]$Settings = $null) {
+    if (-not $Settings) { $Settings = Get-NSCloudDriveSettings }
+    if (-not $Settings -or -not $Settings.EnableNotifications) { return $true }
+    if ($Settings.NotificationSnoozeUntilUtc) {
+        $parsed = [DateTime]::MinValue
+        if ([DateTime]::TryParse($Settings.NotificationSnoozeUntilUtc, [ref]$parsed)) {
+            if ([DateTime]::UtcNow -lt $parsed.ToUniversalTime()) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Set-NotificationSnooze([int]$Minutes, [hashtable]$Settings = $null) {
+    if (-not $Settings) { $Settings = Get-NSCloudDriveSettings }
+    if ($Minutes -le 0) {
+        $Settings.NotificationSnoozeUntilUtc = ''
+    } else {
+        $Settings.NotificationSnoozeUntilUtc = [DateTime]::UtcNow.AddMinutes($Minutes).ToString('o')
+    }
+    Set-NSCloudDriveSettings $Settings
+    return $Settings
 }
