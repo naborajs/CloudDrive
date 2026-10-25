@@ -41,67 +41,14 @@ $assemblyCs = Join-Path $launcherDir 'AssemblyInfo.cs'
 Write-Host "=== NS Cloud Drive Executable Builder ===" -ForegroundColor Cyan
 Write-Host "Target output: $outputExe"
 
-# 1. Ensure high-resolution .ico exists
+# 1. Ensure high-resolution compliant .ico exists
 if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     if (Test-Path -LiteralPath $pngLogo -PathType Leaf) {
         Write-Host "Generating multi-resolution icon from $pngLogo..." -ForegroundColor Yellow
-        Add-Type -AssemblyName System.Drawing
-        $sizes = @(16, 32, 48, 64, 128, 256)
-        $srcBmp = [System.Drawing.Bitmap]::FromFile($pngLogo)
-
-        $pngByteArrays = @()
-        foreach ($s in $sizes) {
-            $resized = [System.Drawing.Bitmap]::new($s, $s, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-            $g = [System.Drawing.Graphics]::FromImage($resized)
-            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
-            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-            $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-            $g.DrawImage($srcBmp, 0, 0, $s, $s)
-            $g.Dispose()
-
-            $ms = [System.IO.MemoryStream]::new()
-            $resized.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-            $pngByteArrays += ,$ms.ToArray()
-            $ms.Dispose()
-            $resized.Dispose()
+        $genScript = Join-Path $PSScriptRoot 'Generate-Icon.py'
+        if (Test-Path -LiteralPath $genScript) {
+            python $genScript
         }
-        $srcBmp.Dispose()
-
-        $fs = [System.IO.File]::Create($iconPath)
-        $bw = [System.IO.BinaryWriter]::new($fs)
-        try {
-            $bw.Write([uint16]0)
-            $bw.Write([uint16]1)
-            $bw.Write([uint16]$sizes.Count)
-            $offset = 6 + (16 * $sizes.Count)
-
-            for ($i = 0; $i -lt $sizes.Count; $i++) {
-                $s = $sizes[$i]
-                $w = if ($s -ge 256) { [byte]0 } else { [byte]$s }
-                $h = if ($s -ge 256) { [byte]0 } else { [byte]$s }
-                $bytes = $pngByteArrays[$i]
-
-                $bw.Write($w)
-                $bw.Write($h)
-                $bw.Write([byte]0)
-                $bw.Write([byte]0)
-                $bw.Write([uint16]1)
-                $bw.Write([uint16]32)
-                $bw.Write([uint32]$bytes.Length)
-                $bw.Write([uint32]$offset)
-
-                $offset += $bytes.Length
-            }
-
-            for ($i = 0; $i -lt $sizes.Count; $i++) {
-                $bw.Write($pngByteArrays[$i])
-            }
-        } finally {
-            $bw.Dispose()
-            $fs.Dispose()
-        }
-        Write-Host "Icon created successfully: $iconPath" -ForegroundColor Green
     } else {
         Write-Warning "Source logo not found. Icon will be skipped."
         $iconPath = $null
@@ -258,6 +205,13 @@ if ($UpdateStartupRegistry) {
         Write-Warning "Could not update startup registry: $($_.Exception.Message)"
     }
 }
+
+# 8. Flush Windows Shell Icon Cache
+try {
+    Add-Type -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);' -Name 'ShellNotify' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
+    [NSCloudDrive.ShellNotify]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) # SHCNE_ASSOCCHANGED
+    Write-Host "Windows Shell icon cache refreshed." -ForegroundColor Green
+} catch { }
 
 Write-Host "Done! NSCloudDrive.exe is ready for use." -ForegroundColor Cyan
 return $true
