@@ -387,11 +387,12 @@ function Build-RcloneMountArguments(
         '--cache-dir', $safeCache,
         '--vfs-cache-mode', 'full',
         '--vfs-cache-max-size', "${CacheMaxGigabytes}G",
-        '--vfs-cache-max-age', '24h',
-        '--vfs-cache-poll-interval', '1m',
+        '--vfs-cache-max-age', '72h',
+        '--vfs-cache-poll-interval', '15s',
         '--vfs-write-back', '5s',
-        '--dir-cache-time', '15m',
-        '--attr-timeout', '5s',
+        '--vfs-fast-fingerprint',
+        '--dir-cache-time', '72h',
+        '--attr-timeout', '30s',
         '--links',
         '--ask-password=false',
         '--log-level', 'ERROR'
@@ -581,6 +582,31 @@ function Start-VirtualDriveMount(
                 }
                 throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
             }
+
+            # Asynchronously pre-warm the root directory cache so initial Explorer navigation does not freeze on remote HTTP calls
+            if ($rcPort -gt 0) {
+                try {
+                    [System.Threading.ThreadPool]::QueueUserWorkItem({
+                        param($port)
+                        try {
+                            [System.Threading.Thread]::Sleep(300)
+                            $body = '{"dir":""}'
+                            [System.Net.HttpWebRequest]$req = [System.Net.WebRequest]::Create("http://127.0.0.1:$port/vfs/refresh")
+                            $req.Method = 'POST'
+                            $req.ContentType = 'application/json'
+                            $req.Timeout = 8000
+                            $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+                            $req.ContentLength = $bytes.Length
+                            $stream = $req.GetRequestStream()
+                            $stream.Write($bytes, 0, $bytes.Length)
+                            $stream.Close()
+                            $resp = $req.GetResponse()
+                            $resp.Close()
+                        } catch { }
+                    }, $rcPort) | Out-Null
+                } catch { }
+            }
+
             return [ordered]@{
                 Success = $true
                 ProviderId = $resolvedProvider
@@ -1103,4 +1129,62 @@ function Get-VirtualDriveActiveErrors {
     }
 
     return @($errors)
+}
+
+function Invoke-VirtualDriveCacheRefresh(
+    [int]$RcPort,
+    [string]$Dir = '',
+    [switch]$Recursive = $false
+) {
+    if ($RcPort -le 0) { return $false }
+    try {
+        $body = @{}
+        if (-not [string]::IsNullOrEmpty($Dir)) {
+            $body['dir'] = $Dir
+        }
+        if ($Recursive) {
+            $body['recursive'] = $true
+        }
+        $jsonBody = $body | ConvertTo-Json -Compress
+        $req = [System.Net.WebRequest]::Create("http://127.0.0.1:$RcPort/vfs/refresh")
+        $req.Method = 'POST'
+        $req.ContentType = 'application/json'
+        $req.Timeout = 6000
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
+        $req.ContentLength = $bytes.Length
+        $stream = $req.GetRequestStream()
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Close()
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-VirtualDrivePendingUploads(
+    [string]$CacheDirectory = $script:DefaultCacheDirectory
+) {
+    $pending = [System.Collections.Generic.List[PSObject]]::new()
+    if (-not (Test-Path -LiteralPath $CacheDirectory)) {
+        return ,@()
+    }
+    $vfsDir = Join-Path $CacheDirectory 'vfs'
+    if (Test-Path -LiteralPath $vfsDir) {
+        try {
+            $files = Get-ChildItem -LiteralPath $vfsDir -Recurse -File -ErrorAction SilentlyContinue
+            if ($files) {
+                foreach ($f in $files) {
+                    $pending.Add([pscustomobject]@{
+                        Path = $f.FullName
+                        Name = $f.Name
+                        Length = $f.Length
+                        LastWriteTimeUtc = $f.LastWriteTimeUtc
+                    })
+                }
+            }
+        } catch { }
+    }
+    return ,@($pending)
 }
