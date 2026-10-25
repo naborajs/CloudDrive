@@ -31,6 +31,15 @@ Assert-True ($mainContent -match '\$optExplorerChk\s*=\s*\[System\.Windows\.Cont
 Assert-True ($mainContent -match '\$optAutoMountChk\s*=\s*\[System\.Windows\.Controls\.CheckBox\]::new\(\)') 'Auto mount checkbox ($optAutoMountChk) is instantiated'
 Assert-True ($mainContent -match '\$optStatusLabel\s*=') 'Feedback status label ($optStatusLabel) is present for user feedback'
 
+# 2.1 Notification Preferences Controls Verification
+Assert-True ($mainContent -match '\$optNotifyMasterChk\s*=\s*\[System\.Windows\.Controls\.CheckBox\]::new\(\)') 'Notification master checkbox ($optNotifyMasterChk) is instantiated'
+Assert-True ($mainContent -match '\$optNotifyStartChk\s*=\s*\[System\.Windows\.Controls\.CheckBox\]::new\(\)') 'Notification upload start checkbox ($optNotifyStartChk) is instantiated'
+Assert-True ($mainContent -match '\$optNotifyCompleteChk\s*=\s*\[System\.Windows\.Controls\.CheckBox\]::new\(\)') 'Notification upload complete checkbox ($optNotifyCompleteChk) is instantiated'
+Assert-True ($mainContent -match '\$optNotifyGroupFolderChk\s*=\s*\[System\.Windows\.Controls\.CheckBox\]::new\(\)') 'Notification group folder checkbox ($optNotifyGroupFolderChk) is instantiated'
+Assert-True ($mainContent -match '\$optNotifySnoozeStatusText\s*=') 'Notification snooze status text ($optNotifySnoozeStatusText) is instantiated'
+Assert-True ($mainContent -match 'Set-NotificationSnooze') 'Notification snooze quick actions are wired'
+Assert-True ($mainContent -match '\$notifyIcon\.Add_BalloonTipClicked') 'Notification balloon click handler is wired to open Explorer and bring window to front'
+
 # 3. Contextual Info Icons (Tooltips) Verification
 Assert-True ($mainContent -match 'function New-OptionsInfoIcon') 'New-OptionsInfoIcon helper function is defined'
 Assert-True ($mainContent -match '\$script:OptionsInfoIcons') 'OptionsInfoIcons tracking list is maintained for dynamic theme styling'
@@ -80,6 +89,10 @@ try {
     $s.AutoMountDrives = $false
     $s.CacheMaxGigabytes = 200
     $s.Theme = 'PureWhite'
+    $s.EnableNotifications = $false
+    $s.NotifyOnUploadStart = $false
+    $s.NotifyOnUploadComplete = $false
+    $s.GroupFolderUploads = $false
     Set-NSCloudDriveSettings $s
 
     $loaded = Get-NSCloudDriveSettings
@@ -90,6 +103,10 @@ try {
     Assert-True ($loaded.AutoMountDrives -eq $false) 'AutoMountDrives persisted correctly'
     Assert-True ($loaded.CacheMaxGigabytes -eq 200) 'CacheMaxGigabytes 200 GB persisted correctly'
     Assert-True ($loaded.Theme -eq 'PureWhite') 'Theme PureWhite persisted correctly'
+    Assert-True ($loaded.EnableNotifications -eq $false) 'EnableNotifications persisted correctly'
+    Assert-True ($loaded.NotifyOnUploadStart -eq $false) 'NotifyOnUploadStart persisted correctly'
+    Assert-True ($loaded.NotifyOnUploadComplete -eq $false) 'NotifyOnUploadComplete persisted correctly'
+    Assert-True ($loaded.GroupFolderUploads -eq $false) 'GroupFolderUploads persisted correctly'
 } finally {
     Set-SettingsDirectoryOverride $null
     if (Test-Path -LiteralPath $tempSandbox) {
