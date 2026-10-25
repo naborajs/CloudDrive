@@ -192,6 +192,22 @@ if ($CreateStartMenuShortcut) {
     }
 }
 
+# 6b. Register AppUserModelID for Windows Shell Toast Notifications
+try {
+    $aumidKey = 'HKCU:\Software\Classes\AppUserModelId\NSCloud.NSCloudDrive'
+    if (-not (Test-Path -LiteralPath $aumidKey)) {
+        New-Item -Path $aumidKey -Force | Out-Null
+    }
+    Set-ItemProperty -Path $aumidKey -Name 'DisplayName' -Value 'NS Cloud Drive' -Type String -Force
+    if ($iconPath -and (Test-Path -LiteralPath $iconPath)) {
+        Set-ItemProperty -Path $aumidKey -Name 'IconUri' -Value $iconPath -Type String -Force
+    }
+    Set-ItemProperty -Path $aumidKey -Name 'IconBackgroundColor' -Value '0' -Type String -Force
+    Write-Host "AppUserModelID registered for Windows Shell Toast notifications." -ForegroundColor Green
+} catch {
+    Write-Warning "Could not register AppUserModelID: $($_.Exception.Message)"
+}
+
 # 7. Optional: Update Windows Startup Registry
 if ($UpdateStartupRegistry) {
     try {
