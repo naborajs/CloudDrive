@@ -190,4 +190,60 @@ try {
     Remove-Item -Recurse -Force $recDir -ErrorAction SilentlyContinue
 }
 
+# ------------------------------------------------------------------------------
+# Test 7: Detailed Cache File List & Single-File Eviction
+# ------------------------------------------------------------------------------
+Write-Output '  -> Testing detailed cache file list and single-file eviction...'
+$detailDir = Join-Path ([System.IO.Path]::GetTempPath()) ('cache_detail_' + [Guid]::NewGuid().ToString('N').Substring(0, 6))
+try {
+    $gdriveAccDir = Join-Path $detailDir 'gdrive_mockacc'
+    $vfsDir = Join-Path $gdriveAccDir 'vfs\gdrive{mock}\Docs'
+    [System.IO.Directory]::CreateDirectory($vfsDir) | Out-Null
+
+    $fileA = Join-Path $vfsDir 'sample.pdf'
+    $fileB = Join-Path $vfsDir 'locked.dat'
+    [System.IO.File]::WriteAllText($fileA, 'sample pdf content for cache inspection testing')
+    [System.IO.File]::WriteAllText($fileB, 'locked data content')
+
+    # Lock fileB
+    $lockStream = [System.IO.File]::Open($fileB, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $fileList = @(Get-DetailedCacheFileList -CacheDirectory $detailDir)
+        if ($fileList.Count -lt 2) {
+            throw "Expected at least 2 files in detailed cache list, got: $($fileList.Count)"
+        }
+
+        $itemA = $fileList | Where-Object { $_.FileName -eq 'sample.pdf' } | Select-Object -First 1
+        $itemB = $fileList | Where-Object { $_.FileName -eq 'locked.dat' } | Select-Object -First 1
+
+        if (-not $itemA -or $itemA.IsEvictable -ne $true -or $itemA.Status -ne 'Cached (Synced)') {
+            throw "File A (sample.pdf) was not recognized as evictable/synced: $($itemA | Out-String)"
+        }
+        if (-not $itemB -or $itemB.IsEvictable -ne $false -or $itemB.Status -notmatch 'In-Use') {
+            throw "File B (locked.dat) was not recognized as locked/in-use: $($itemB | Out-String)"
+        }
+
+        # Attempt to evict locked file - must fail gracefully
+        $evictLocked = Remove-SingleCacheFile -FilePath $fileB -CacheDirectory $detailDir
+        if ($evictLocked.Success -eq $true) {
+            throw 'Remove-SingleCacheFile should have failed for a locked in-use file'
+        }
+    } finally {
+        $lockStream.Dispose()
+    }
+
+    # Now evict sample.pdf - must succeed
+    $evictRes = Remove-SingleCacheFile -FilePath $fileA -CacheDirectory $detailDir
+    if (-not $evictRes.Success) {
+        throw "Failed to evict sample.pdf: $($evictRes.Error)"
+    }
+    if (Test-Path -LiteralPath $fileA) {
+        throw 'sample.pdf still exists on disk after eviction'
+    }
+
+    Write-Output '  [PASS] Detailed cache file list and single-file eviction verified'
+} finally {
+    Remove-Item -Recurse -Force $detailDir -ErrorAction SilentlyContinue
+}
+
 Write-Output 'All Cache Management tests passed.'
