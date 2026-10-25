@@ -477,30 +477,15 @@ $window.FontFamily = 'Segoe UI'
 # App window icon
 $appLogoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
 $appIcoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.ico'
-if (Test-Path -LiteralPath $appIcoPath -PathType Leaf) {
-    try {
-        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($appIcoPath))
-    } catch {
-        $window.Icon = Get-WpfBitmapImage $appLogoPath
-    }
-} elseif (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
+if (Test-Path -LiteralPath $appLogoPath -PathType Leaf) {
     try {
         $window.Icon = Get-WpfBitmapImage $appLogoPath
+    } catch { }
+} elseif (Test-Path -LiteralPath $appIcoPath -PathType Leaf) {
+    try {
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new((Resolve-Path $appIcoPath).Path))
     } catch { }
 }
-
-$window.Add_SourceInitialized({
-    try {
-        $helper = [System.Windows.Interop.WindowInteropHelper]::new($window)
-        $hwnd = $helper.Handle
-        $ico = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.ico'
-        if (Test-Path -LiteralPath $ico) {
-            $hIcon = [System.Drawing.Icon]::new($ico).Handle
-            [NSCloudDrive.Win32]::SendMessage($hwnd, 0x0080, [IntPtr]0, $hIcon) | Out-Null
-            [NSCloudDrive.Win32]::SendMessage($hwnd, 0x0080, [IntPtr]1, $hIcon) | Out-Null
-        }
-    } catch { }
-})
 
 # Main Layout Grid: Left Sidebar (Column 0), Content Area (Column 1)
 $rootGrid = [System.Windows.Controls.Grid]::new()
