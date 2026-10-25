@@ -15,6 +15,16 @@ Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int Em
 
 try {
     [NSCloudDrive.Win32]::SetCurrentProcessExplicitAppUserModelID('NSCloud.NSCloudDrive')
+    $aumidKey = 'HKCU:\Software\Classes\AppUserModelId\NSCloud.NSCloudDrive'
+    if (-not (Test-Path -LiteralPath $aumidKey)) {
+        New-Item -Path $aumidKey -Force | Out-Null
+    }
+    $icoPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\logos\clouddrive.ico'
+    Set-ItemProperty -Path $aumidKey -Name 'DisplayName' -Value 'NS Cloud Drive' -Type String -Force
+    if (Test-Path -LiteralPath $icoPath) {
+        Set-ItemProperty -Path $aumidKey -Name 'IconUri' -Value $icoPath -Type String -Force
+    }
+    Set-ItemProperty -Path $aumidKey -Name 'IconBackgroundColor' -Value '0' -Type String -Force
 } catch { }
 
 function Invoke-MemoryTrim {
@@ -727,6 +737,52 @@ $content.Children.Add($drivesSummaryBanner) | Out-Null
 # ==============================================================================
 # LIVE BACKGROUND TRANSFER ACTIVITY MONITOR
 # ==============================================================================
+$script:CurrentActiveTransferDrive = ''
+$script:CurrentTransferPaused = $false
+
+function Toggle-ActiveTransferPause {
+    if (-not $script:CurrentActiveTransferDrive) { return }
+    if ($script:CurrentTransferPaused) {
+        Set-VirtualDriveBandwidthLimit -DriveLetter $script:CurrentActiveTransferDrive -Rate 'off' | Out-Null
+        $script:CurrentTransferPaused = $false
+    } else {
+        Set-VirtualDriveBandwidthLimit -DriveLetter $script:CurrentActiveTransferDrive -Rate '1B' | Out-Null
+        $script:CurrentTransferPaused = $true
+    }
+    Update-LiveTransferActivity
+}
+
+function Stop-ActiveTransfer {
+    if (-not $script:CurrentActiveTransferDrive) { return }
+    $drive = $script:CurrentActiveTransferDrive
+    Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate '1B' | Out-Null
+    $script:CurrentTransferPaused = $true
+
+    $msg = "Would you like to cancel the active background upload on drive ${drive}: and reset transfer statistics?"
+    $ans = [System.Windows.MessageBox]::Show($msg, "Cancel Cloud Upload", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+        Reset-VirtualDriveStats -DriveLetter $drive | Out-Null
+        Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate 'off' | Out-Null
+        $script:CurrentTransferPaused = $false
+        $script:LastActiveTransferInfo = $null
+        Update-LiveTransferActivity
+    } else {
+        Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate 'off' | Out-Null
+        $script:CurrentTransferPaused = $false
+    }
+}
+
+function Open-StagingCacheFolder {
+    $dir = if ($script:DefaultCacheDirectory -and (Test-Path -LiteralPath $script:DefaultCacheDirectory)) {
+        $script:DefaultCacheDirectory
+    } else {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    }
+    try {
+        [System.Diagnostics.Process]::Start('explorer.exe', "`"$dir`"") | Out-Null
+    } catch { }
+}
+
 # Displays real-time upload progress, real network speed, and countdown ETAs
 # whenever files are staged and actively uploading across network in the background.
 $liveTransferCard = [System.Windows.Controls.Border]::new()
@@ -780,6 +836,10 @@ $liveTransferEta.VerticalAlignment = 'Center'
 $ltHeaderGrid.Children.Add($liveTransferEta) | Out-Null
 $liveTransferMainStack.Children.Add($ltHeaderGrid) | Out-Null
 
+$liveTransferRoute = New-Label "From: Local SSD Cache (D:\CloudCache) $([char]0x2192) To: Cloud Storage" 11 $script:Palette.TextSecondary $false
+$liveTransferRoute.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
+$liveTransferMainStack.Children.Add($liveTransferRoute) | Out-Null
+
 # Row 2: Smooth Progress Bar
 $liveTransferProgressBar = [System.Windows.Controls.ProgressBar]::new()
 $liveTransferProgressBar.Height = 6
@@ -803,11 +863,53 @@ $liveTransferDetails = New-Label 'Uploading • 0 B of 0 B (0%) • 0 B/s (0.0 M
 [System.Windows.Controls.Grid]::SetColumn($liveTransferDetails, 0)
 $ltFooterGrid.Children.Add($liveTransferDetails) | Out-Null
 
-$liveTransferNote = New-Label 'Local write complete • Streaming to cloud' 11 $script:Palette.TextSecondary $false
+$liveTransferNote = New-Label ("Local write complete " + [char]0x2022 + " Streaming to cloud") 11 $script:Palette.TextSecondary $false
 $liveTransferNote.Opacity = 0.75
 [System.Windows.Controls.Grid]::SetColumn($liveTransferNote, 1)
 $ltFooterGrid.Children.Add($liveTransferNote) | Out-Null
 $liveTransferMainStack.Children.Add($ltFooterGrid) | Out-Null
+
+# Row 4: Controls (Pause/Resume, Cancel, View Staged Cache)
+$ltControlsPanel = [System.Windows.Controls.StackPanel]::new()
+$ltControlsPanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+$ltControlsPanel.Margin = [System.Windows.Thickness]::new(0, 8, 0, 0)
+
+$ltPauseBtn = [System.Windows.Controls.Button]::new()
+$ltPauseBtn.Content = [string][char]0x23F8 + ' Pause'
+$ltPauseBtn.Padding = [System.Windows.Thickness]::new(10, 3, 10, 3)
+$ltPauseBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+$ltPauseBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$ltPauseBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$ltPauseBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$ltPauseBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$ltPauseBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$ltPauseBtn.Add_Click({ Toggle-ActiveTransferPause })
+$ltControlsPanel.Children.Add($ltPauseBtn) | Out-Null
+
+$ltCancelBtn = [System.Windows.Controls.Button]::new()
+$ltCancelBtn.Content = [string][char]0x2715 + ' Cancel'
+$ltCancelBtn.Padding = [System.Windows.Thickness]::new(10, 3, 10, 3)
+$ltCancelBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+$ltCancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$ltCancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$ltCancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$ltCancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$ltCancelBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$ltCancelBtn.Add_Click({ Stop-ActiveTransfer })
+$ltControlsPanel.Children.Add($ltCancelBtn) | Out-Null
+
+$ltOpenCacheBtn = [System.Windows.Controls.Button]::new()
+$ltOpenCacheBtn.Content = 'Open Staging Cache'
+$ltOpenCacheBtn.Padding = [System.Windows.Thickness]::new(10, 3, 10, 3)
+$ltOpenCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$ltOpenCacheBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$ltOpenCacheBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$ltOpenCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$ltOpenCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$ltOpenCacheBtn.Add_Click({ Open-StagingCacheFolder })
+$ltControlsPanel.Children.Add($ltOpenCacheBtn) | Out-Null
+
+$liveTransferMainStack.Children.Add($ltControlsPanel) | Out-Null
 
 $content.Children.Add($liveTransferCard) | Out-Null
 
@@ -1772,6 +1874,100 @@ function New-AnalyticsRow([System.Windows.Controls.StackPanel]$Parent, [string]$
     $Parent.Children.Add($rowLabel) | Out-Null
     return $rowLabel
 }
+
+$analyticsTransferCard = New-AnalyticsCard 'Live transfers and staging queue' '#8B5CF6'
+$analyticsContent.Children.Add($analyticsTransferCard.Card) | Out-Null
+
+$analyticsTransferRoute = New-Label ("Source: Local SSD Cache (D:\CloudCache) " + [char]0x2192 + " Destination: Cloud Storage") 12 $script:Palette.TextPrimary $true
+$analyticsTransferRoute.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+$analyticsTransferCard.Stack.Children.Add($analyticsTransferRoute) | Out-Null
+
+$atHeaderRow = [System.Windows.Controls.DockPanel]::new()
+$atHeaderRow.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+
+$analyticsTransferFileName = New-Label ("Idle " + [char]0x2022 + " No active background transfers") 13 $script:Palette.TextPrimary $true
+[System.Windows.Controls.DockPanel]::SetDock($analyticsTransferFileName, 'Left')
+$atHeaderRow.Children.Add($analyticsTransferFileName) | Out-Null
+
+$analyticsTransferEta = New-Label 'Status: Idle' 12 '#8B5CF6' $true
+[System.Windows.Controls.DockPanel]::SetDock($analyticsTransferEta, 'Right')
+$analyticsTransferEta.HorizontalAlignment = 'Right'
+$atHeaderRow.Children.Add($analyticsTransferEta) | Out-Null
+$analyticsTransferCard.Stack.Children.Add($atHeaderRow) | Out-Null
+
+$analyticsTransferProgressBar = [System.Windows.Controls.ProgressBar]::new()
+$analyticsTransferProgressBar.Height = 8
+$analyticsTransferProgressBar.Margin = [System.Windows.Thickness]::new(0, 6, 0, 8)
+$analyticsTransferProgressBar.Minimum = 0
+$analyticsTransferProgressBar.Maximum = 100
+$analyticsTransferProgressBar.Value = 100
+$analyticsTransferProgressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#8B5CF6')
+$analyticsTransferProgressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsTransferProgressBar.BorderThickness = [System.Windows.Thickness]::new(0)
+$analyticsTransferCard.Stack.Children.Add($analyticsTransferProgressBar) | Out-Null
+
+$analyticsTransferDetails = New-Label ("SSD Cache and Cloud remotes are synchronized " + [char]0x2022 + " Network uplink idle (0 B/s).") 11 $script:Palette.TextSecondary $false
+$analyticsTransferDetails.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+$analyticsTransferCard.Stack.Children.Add($analyticsTransferDetails) | Out-Null
+
+$atControlsRow = [System.Windows.Controls.StackPanel]::new()
+$atControlsRow.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+$atControlsRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+
+$analyticsTransferPauseBtn = [System.Windows.Controls.Button]::new()
+$analyticsTransferPauseBtn.Content = [string][char]0x23F8 + ' Pause Upload'
+$analyticsTransferPauseBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$analyticsTransferPauseBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$analyticsTransferPauseBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$analyticsTransferPauseBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsTransferPauseBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsTransferPauseBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$analyticsTransferPauseBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsTransferPauseBtn.IsEnabled = $false
+$analyticsTransferPauseBtn.Add_Click({ Toggle-ActiveTransferPause })
+$atControlsRow.Children.Add($analyticsTransferPauseBtn) | Out-Null
+
+$analyticsTransferCancelBtn = [System.Windows.Controls.Button]::new()
+$analyticsTransferCancelBtn.Content = [string][char]0x2715 + ' Cancel Transfer'
+$analyticsTransferCancelBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$analyticsTransferCancelBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$analyticsTransferCancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$analyticsTransferCancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsTransferCancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsTransferCancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$analyticsTransferCancelBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsTransferCancelBtn.IsEnabled = $false
+$analyticsTransferCancelBtn.Add_Click({ Stop-ActiveTransfer })
+$atControlsRow.Children.Add($analyticsTransferCancelBtn) | Out-Null
+
+$analyticsTransferOpenCacheBtn = [System.Windows.Controls.Button]::new()
+$analyticsTransferOpenCacheBtn.Content = 'Open Staging Cache in Explorer'
+$analyticsTransferOpenCacheBtn.Padding = [System.Windows.Thickness]::new(12, 5, 12, 5)
+$analyticsTransferOpenCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$analyticsTransferOpenCacheBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsTransferOpenCacheBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsTransferOpenCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$analyticsTransferOpenCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsTransferOpenCacheBtn.Add_Click({ Open-StagingCacheFolder })
+$atControlsRow.Children.Add($analyticsTransferOpenCacheBtn) | Out-Null
+
+$analyticsTransferCard.Stack.Children.Add($atControlsRow) | Out-Null
+
+$analyticsTransferQueueStack = [System.Windows.Controls.StackPanel]::new()
+$analyticsTransferCard.Stack.Children.Add($analyticsTransferQueueStack) | Out-Null
+
+$atNoteBorder = [System.Windows.Controls.Border]::new()
+$atNoteBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$atNoteBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$atNoteBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+$atNoteBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$atNoteBorder.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+$atNoteBorder.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+
+$atNoteText = New-Label "How Staging Works: Large files copied to virtual drives write instantly to your local SSD cache (D:\CloudCache), so Windows Explorer never freezes. Files then stream sequentially to cloud storage in the background at your actual Internet uplink speed." 11 $script:Palette.TextSecondary $false
+$atNoteText.TextWrapping = [System.Windows.TextWrapping]::Wrap
+$atNoteBorder.Child = $atNoteText
+$analyticsTransferCard.Stack.Children.Add($atNoteBorder) | Out-Null
 
 $overviewCard = New-AnalyticsCard 'Cloud accounts and mounts' '#3B82F6'
 $analyticsContent.Children.Add($overviewCard.Card) | Out-Null
@@ -3145,13 +3341,29 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $backFromAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
     $backFromAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backFromAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
-    foreach ($acard in @($overviewCard.Card, $storageCard.Card, $resourceCard.Card)) {
+    foreach ($acard in @($analyticsTransferCard.Card, $overviewCard.Card, $storageCard.Card, $resourceCard.Card)) {
         $acard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
         $acard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
     }
-    foreach ($atitle in @($overviewCard.Title, $storageCard.Title, $resourceCard.Title)) {
+    foreach ($atitle in @($analyticsTransferCard.Title, $overviewCard.Title, $storageCard.Title, $resourceCard.Title)) {
         $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
+    foreach ($abtn in @($analyticsTransferPauseBtn, $analyticsTransferCancelBtn, $analyticsTransferOpenCacheBtn, $ltPauseBtn, $ltCancelBtn, $ltOpenCacheBtn)) {
+        if ($null -ne $abtn) {
+            $abtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $abtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $abtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
+    }
+    if ($null -ne $analyticsTransferRoute) { $analyticsTransferRoute.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary) }
+    if ($null -ne $analyticsTransferFileName) { $analyticsTransferFileName.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary) }
+    if ($null -ne $analyticsTransferDetails) { $analyticsTransferDetails.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
+    if ($null -ne $atNoteBorder) {
+        $atNoteBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        $atNoteBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+        $atNoteText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    }
+    if ($null -ne $liveTransferRoute) { $liveTransferRoute.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
     foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsNetwork, $analyticsAccounts, $analyticsMounts)) {
         $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
@@ -6001,6 +6213,7 @@ function Update-LiveTransferActivity {
     } catch { }
 
     if ($activeTransfer) {
+        $script:CurrentActiveTransferDrive = $activeDrive
         $transferList = @($activeTransfer.Transferring)
         $t = if ($transferList.Count -gt 0) { $transferList[0] } else { $null }
 
@@ -6020,37 +6233,85 @@ function Update-LiveTransferActivity {
         } else {
             0.0
         }
-        $etaSec = if ($t -and $null -ne $t.Eta) { $t.Eta } else { $null }
+        $etaSec = if ($t -and $null -ne $t.Eta) { $t.Eta } elseif ($activeTransfer.OverallEta) { $activeTransfer.OverallEta } else { $null }
 
         $providerName = if ($activeAccount) { [string]$activeAccount.DisplayName } else { "Drive ${activeDrive}:" }
         $speedFormatted = Format-TransferThroughput -BytesPerSec $speed
         $etaFormatted = Format-EtaTimeSpan $etaSec
         $sizeFormatted = if ($fileSize -gt 0) { Format-LocalByteSize $fileSize } else { '' }
         $bytesFormatted = if ($bytesTransferred -gt 0) { Format-LocalByteSize $bytesTransferred } else { '0 B' }
+        $bytesRemaining = [Math]::Max(0L, $fileSize - $bytesTransferred)
+        $remainingFormatted = if ($bytesRemaining -gt 0) { Format-LocalByteSize $bytesRemaining } else { '0 B' }
 
-        $liveTransferFileName.Text = $fileName
-        $liveTransferDriveBadgeText.Text = "${activeDrive}: • $providerName"
-        $liveTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
-        $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
+        $sourceDesc = "Local SSD Cache"
+        if ($t -and $t.SrcFs -and $t.SrcFs -match '(?i)CloudCache[\\/]([^\\/]+)') {
+            $sourceDesc = "Local SSD Cache (D:\CloudCache)"
+        } elseif (Test-Path -LiteralPath 'D:\CloudCache') {
+            $sourceDesc = "Local SSD Cache (D:\CloudCache)"
+        }
+        $destDesc = "$providerName (${activeDrive}:)"
+        $routeText = "From: $sourceDesc $([char]0x2192) To: $destDesc"
 
-        $statusPrefix = if ($activeTransfer.UploadsInProgress -gt 0) {
+        $statusPrefix = if ($script:CurrentTransferPaused) {
+            "Upload Paused"
+        } elseif ($activeTransfer.UploadsInProgress -gt 0) {
             "Uploading to Cloud"
         } else {
-            "Staged on SSD cache • Queued for upload"
+            "Staged on SSD cache " + [char]0x2022 + " Queued for upload"
         }
 
-        $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))%) • $speedFormatted"
-        $liveTransferEta.Text = if ($etaSec -gt 0) { "~$etaFormatted remaining" } elseif ($activeTransfer.UploadsQueued -gt 0) { "Starting upload..." } else { "Streaming..." }
+        # Update Disks dashboard card
+        $liveTransferFileName.Text = $fileName
+        $liveTransferDriveBadgeText.Text = "${activeDrive}: " + [char]0x2022 + " $providerName"
+        $liveTransferRoute.Text = $routeText
+        $liveTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
+        $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
+        $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted"
+        $liveTransferEta.Text = if ($script:CurrentTransferPaused) { "Paused" } elseif ($etaSec -gt 0) { "~$etaFormatted remaining" } elseif ($activeTransfer.UploadsQueued -gt 0) { "Starting upload..." } else { "Streaming..." }
+        $ltPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume" } else { [string][char]0x23F8 + " Pause" }
 
         if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Visible) {
             $liveTransferCard.Visibility = [System.Windows.Visibility]::Visible
         }
 
+        # Update Analytics page monitor
+        if ($null -ne $analyticsTransferCard) {
+            $analyticsTransferRoute.Text = "Source: $sourceDesc " + [char]0x2192 + " Destination: $destDesc"
+            $analyticsTransferFileName.Text = $fileName
+            $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) { "Status: Upload Paused" } elseif ($etaSec -gt 0) { "Live Countdown: ~$etaFormatted remaining" } else { "Live Countdown: Streaming..." }
+            $analyticsTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
+            $analyticsTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
+            $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% complete " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted"
+            $analyticsTransferPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume Upload" } else { [string][char]0x23F8 + " Pause Upload" }
+            $analyticsTransferPauseBtn.IsEnabled = $true
+            $analyticsTransferCancelBtn.IsEnabled = $true
+
+            $analyticsTransferQueueStack.Children.Clear()
+            if ($transferList.Count -gt 1) {
+                $qHeader = New-Label ("Active Transfers in Queue ($($transferList.Count) items):") 11 $script:Palette.TextPrimary $true
+                $qHeader.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
+                $analyticsTransferQueueStack.Children.Add($qHeader) | Out-Null
+                $maxSub = [Math]::Min(6, $transferList.Count - 1)
+                for ($idx = 1; $idx -le $maxSub; $idx++) {
+                    $subT = $transferList[$idx]
+                    $subName = [System.IO.Path]::GetFileName($subT.Name)
+                    $subSize = Format-LocalByteSize ([int64]$subT.Size)
+                    $subPct = [Math]::Round([double]$subT.Percentage, 0)
+                    $subRow = New-Label ("  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " $subPct% transferred") 11 $script:Palette.TextSecondary $false
+                    $subRow.Margin = [System.Windows.Thickness]::new(0, 1, 0, 1)
+                    $analyticsTransferQueueStack.Children.Add($subRow) | Out-Null
+                }
+            }
+        }
+
+        # Balloon tip notification: only notify for files >= 1 MB, no temp or metadata spam, ToolTipIcon::None for clean branding
         if ($fileName -and $fileName -ne $script:LastNotifiedTransferFile) {
             $script:LastNotifiedTransferFile = $fileName
-            try {
-                $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::Info)
-            } catch { }
+            if ($fileSize -ge 1048576 -and $fileName -ne 'Synchronizing staged files...' -and $fileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $fileName.StartsWith('.')) {
+                try {
+                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::None)
+                } catch { }
+            }
         }
 
         $script:LastActiveTransferInfo = [pscustomobject]@{
@@ -6061,22 +6322,36 @@ function Update-LiveTransferActivity {
             CompletedAt = [DateTime]::UtcNow
         }
     } else {
+        if ($null -ne $analyticsTransferCard) {
+            $analyticsTransferRoute.Text = "Source: Local SSD Cache " + [char]0x2192 + " Destination: Cloud Storage"
+            $analyticsTransferFileName.Text = "All files synchronized and confirmed on cloud storage."
+            $analyticsTransferProgressBar.Value = 100.0
+            $analyticsTransferProgressBar.IsIndeterminate = $false
+            $analyticsTransferDetails.Text = "SSD Cache and Cloud remotes are 100% in sync " + [char]0x2022 + " Network idle (0 B/s)."
+            $analyticsTransferEta.Text = "Status: Idle"
+            $analyticsTransferPauseBtn.IsEnabled = $false
+            $analyticsTransferCancelBtn.IsEnabled = $false
+            $analyticsTransferQueueStack.Children.Clear()
+        }
+
         if ($script:LastActiveTransferInfo) {
             $prev = $script:LastActiveTransferInfo
             $script:LastActiveTransferInfo = $null
             $script:LastCompletedTransferTime = [DateTime]::UtcNow
 
             $liveTransferFileName.Text = [string][char]0x2713 + " Completed: $($prev.FileName)"
-            $liveTransferDriveBadgeText.Text = "$($prev.Drive): • $($prev.ProviderName)"
+            $liveTransferDriveBadgeText.Text = "$($prev.Drive): " + [char]0x2022 + " $($prev.ProviderName)"
             $liveTransferProgressBar.Value = 100.0
             $liveTransferProgressBar.IsIndeterminate = $false
             $liveTransferDetails.Text = "Verified & safely stored on $($prev.ProviderName). All bytes confirmed remotely."
             $liveTransferEta.Text = "Finished"
 
-            try {
-                $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
-                $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::Info)
-            } catch { }
+            if ($prev.FileSize -ge 1048576 -and $prev.FileName -ne 'Synchronizing staged files...' -and $prev.FileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $prev.FileName.StartsWith('.')) {
+                try {
+                    $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
+                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
+                } catch { }
+            }
         } elseif ($script:LastCompletedTransferTime -ne [DateTime]::MinValue) {
             if (([DateTime]::UtcNow - $script:LastCompletedTransferTime).TotalSeconds -ge 6.0) {
                 $script:LastCompletedTransferTime = [DateTime]::MinValue
