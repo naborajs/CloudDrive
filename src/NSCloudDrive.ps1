@@ -53,6 +53,8 @@ if (-not $PSBoundParameters.ContainsKey('Minimized')) {
 $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings.CacheDirectory } else { 'D:\CloudCache' }
 $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
+$script:ActiveFolderTransfers = @{}
+$script:LastNotifiedPath = ''
 $script:IsExiting = $false
 $script:AppMutex = $null
 $script:RestoreEvent = $null
@@ -1614,6 +1616,153 @@ $openCacheBtn.Add_Click({
 })
 $cacheActionStack.Children.Add($openCacheBtn) | Out-Null
 
+
+# Card D: Notifications & Alerts
+$notifyCard = [System.Windows.Controls.Border]::new()
+$notifyCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$notifyCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$notifyCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$notifyCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$notifyCard.Padding = [System.Windows.Thickness]::new(18)
+$notifyCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+$optContent.Children.Add($notifyCard) | Out-Null
+
+$notifyStack = [System.Windows.Controls.StackPanel]::new()
+$notifyCard.Child = $notifyStack
+
+$notifyTitle = New-Label 'Notifications & Alerts' 15 $script:Palette.TextPrimary $true
+$notifyStack.Children.Add($notifyTitle) | Out-Null
+
+$notifyDesc = New-Label 'Configure desktop balloon alerts for background file and folder transfers, prevent spam with smart grouping, or temporarily snooze notifications.' 11 $script:Palette.TextSecondary
+$notifyDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+$notifyStack.Children.Add($notifyDesc) | Out-Null
+
+# Master switch
+$optNotifyMasterChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyMasterChk.Content = 'Enable desktop transfer notifications'
+$optNotifyMasterChk.IsChecked = [bool]$script:Settings.EnableNotifications
+$optNotifyMasterChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyMasterChk.Margin = [System.Windows.Thickness]::new(0, 4, 0, 6)
+$optNotifyMasterChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyMasterChk.Add_Checked({
+    $script:Settings.EnableNotifications = $true
+    Set-NSCloudDriveSettings $script:Settings
+    Update-NotificationSettingsUI
+})
+$optNotifyMasterChk.Add_Unchecked({
+    $script:Settings.EnableNotifications = $false
+    Set-NSCloudDriveSettings $script:Settings
+    Update-NotificationSettingsUI
+})
+$notifyStack.Children.Add($optNotifyMasterChk) | Out-Null
+
+# Start notification
+$optNotifyStartChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyStartChk.Content = 'Notify when background upload starts'
+$optNotifyStartChk.IsChecked = [bool]$script:Settings.NotifyOnUploadStart
+$optNotifyStartChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyStartChk.Margin = [System.Windows.Thickness]::new(20, 2, 0, 6)
+$optNotifyStartChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyStartChk.Add_Checked({
+    $script:Settings.NotifyOnUploadStart = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$optNotifyStartChk.Add_Unchecked({
+    $script:Settings.NotifyOnUploadStart = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$notifyStack.Children.Add($optNotifyStartChk) | Out-Null
+
+# Complete notification
+$optNotifyCompleteChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyCompleteChk.Content = 'Notify when upload finishes remotely and is confirmed on cloud'
+$optNotifyCompleteChk.IsChecked = [bool]$script:Settings.NotifyOnUploadComplete
+$optNotifyCompleteChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyCompleteChk.Margin = [System.Windows.Thickness]::new(20, 2, 0, 6)
+$optNotifyCompleteChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyCompleteChk.Add_Checked({
+    $script:Settings.NotifyOnUploadComplete = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$optNotifyCompleteChk.Add_Unchecked({
+    $script:Settings.NotifyOnUploadComplete = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$notifyStack.Children.Add($optNotifyCompleteChk) | Out-Null
+
+# Group folder uploads
+$optNotifyGroupFolderChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyGroupFolderChk.Content = 'Smart folder grouping (summarize full folder instead of file-by-file spam)'
+$optNotifyGroupFolderChk.IsChecked = [bool]$script:Settings.GroupFolderUploads
+$optNotifyGroupFolderChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyGroupFolderChk.Margin = [System.Windows.Thickness]::new(20, 2, 0, 10)
+$optNotifyGroupFolderChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyGroupFolderChk.Add_Checked({
+    $script:Settings.GroupFolderUploads = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$optNotifyGroupFolderChk.Add_Unchecked({
+    $script:Settings.GroupFolderUploads = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$notifyStack.Children.Add($optNotifyGroupFolderChk) | Out-Null
+
+# Snooze Controls Row
+$snoozeHeader = New-Label 'Snooze Notifications:' 12 $script:Palette.TextPrimary $true
+$snoozeHeader.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
+$notifyStack.Children.Add($snoozeHeader) | Out-Null
+
+$snoozeRow = [System.Windows.Controls.StackPanel]::new()
+$snoozeRow.Orientation = 'Horizontal'
+$snoozeRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+$notifyStack.Children.Add($snoozeRow) | Out-Null
+
+function New-SnoozeButton([string]$Label, [int]$Minutes) {
+    $btn = [System.Windows.Controls.Button]::new()
+    $btn.Content = $Label
+    $btn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+    $btn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+    $btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+    $btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+    $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btn.Add_Click({
+        Set-NotificationSnooze -Minutes $Minutes -Settings $script:Settings | Out-Null
+        Set-NSCloudDriveSettings $script:Settings
+        Update-NotificationSettingsUI
+    })
+    return $btn
+}
+
+$snoozeRow.Children.Add((New-SnoozeButton '15 Mins' 15)) | Out-Null
+$snoozeRow.Children.Add((New-SnoozeButton '1 Hour' 60)) | Out-Null
+$snoozeRow.Children.Add((New-SnoozeButton '4 Hours' 240)) | Out-Null
+$snoozeRow.Children.Add((New-SnoozeButton 'Clear Snooze' 0)) | Out-Null
+
+$optNotifySnoozeStatusText = New-Label '' 11 $script:Palette.TextSecondary
+$optNotifySnoozeStatusText.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+$notifyStack.Children.Add($optNotifySnoozeStatusText) | Out-Null
+
+function Update-NotificationSettingsUI {
+    $isSnoozed = Test-NotificationsSnoozed $script:Settings
+    $optNotifyStartChk.IsEnabled = [bool]$script:Settings.EnableNotifications
+    $optNotifyCompleteChk.IsEnabled = [bool]$script:Settings.EnableNotifications
+    $optNotifyGroupFolderChk.IsEnabled = [bool]$script:Settings.EnableNotifications
+    if (-not $script:Settings.EnableNotifications) {
+        $optNotifySnoozeStatusText.Text = 'Desktop notifications are currently disabled.'
+        $optNotifySnoozeStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    } elseif ($isSnoozed) {
+        $untilStr = if ($script:Settings.NotificationSnoozeUntilUtc) {
+            try { ([DateTime]$script:Settings.NotificationSnoozeUntilUtc).ToLocalTime().ToString('HH:mm:ss') } catch { 'active' }
+        } else { 'active' }
+        $optNotifySnoozeStatusText.Text = "Notifications snoozed until $untilStr local time."
+        $optNotifySnoozeStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F59E0B')
+    } else {
+        $optNotifySnoozeStatusText.Text = 'Desktop notifications are active.'
+        $optNotifySnoozeStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#10B981')
+    }
+}
+Update-NotificationSettingsUI
 
 $diagCard = [System.Windows.Controls.Border]::new()
 $diagCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
@@ -3242,14 +3391,14 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $backToDisksBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backToDisksBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
 
-    foreach ($card in @($genCard, $themeCard, $cacheCard, $diagCard)) {
+    foreach ($card in @($genCard, $themeCard, $cacheCard, $notifyCard, $diagCard)) {
         $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
         $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
     }
-    foreach ($lbl in @($genTitle, $themeTitle, $cacheTitle, $diagTitle)) {
+    foreach ($lbl in @($genTitle, $themeTitle, $cacheTitle, $notifyTitle, $diagTitle)) {
         $lbl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     }
-    foreach ($chk in @($optStartupChk, $optTrayChk, $optStartMinChk, $optExplorerChk, $optAutoMountChk)) {
+    foreach ($chk in @($optStartupChk, $optTrayChk, $optStartMinChk, $optExplorerChk, $optAutoMountChk, $optNotifyMasterChk, $optNotifyStartChk, $optNotifyCompleteChk, $optNotifyGroupFolderChk)) {
         if ($chk) {
             $chk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
         }
@@ -3427,7 +3576,7 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
         # visible through the window and its navigation and dashboard surfaces.
         $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowGlassBg)
         $sidebar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.SidebarGlassBg)
-        foreach ($glassCard in @($gdCard, $tbCard, $genCard, $themeCard, $cacheCard, $diagCard, $helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $overviewCard.Card, $storageCard.Card, $resourceCard.Card, $logsListCard, $logsPrivacyCard)) {
+        foreach ($glassCard in @($gdCard, $tbCard, $genCard, $themeCard, $cacheCard, $notifyCard, $diagCard, $helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $overviewCard.Card, $storageCard.Card, $resourceCard.Card, $logsListCard, $logsPrivacyCard)) {
             $glassCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardGlassBg)
         }
     }
@@ -4125,6 +4274,16 @@ function Complete-AvailableStartupWorkers {
         } catch { }
         $script:StartupAutoMountWorker = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
+        try {
+            $pending = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory)
+            if ($pending.Count -gt 0) {
+                $pendingSize = ($pending | Measure-Object -Property Length -Sum).Sum
+                $sizeFormatted = Format-LocalByteSize $pendingSize
+                if ($script:Settings.EnableNotifications -and $script:Settings.NotifyOnUploadStart -and -not (Test-NotificationsSnoozed $script:Settings)) {
+                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Resuming Background Sync", "Found $($pending.Count) pending staged files ($sizeFormatted) from previous session. Resuming background upload to cloud.", [System.Windows.Forms.ToolTipIcon]::None)
+                }
+            }
+        } catch { }
     }
 
     if ($script:ReconnectWorker -and (Test-NSBackgroundOperationCompleted $script:ReconnectWorker)) {
@@ -5393,7 +5552,28 @@ $menuOpenTB.Add_Click({
 })
 
 $trayMenu.Items.Add('-') | Out-Null
-
+$snoozeSubMenu = [System.Windows.Forms.ToolStripMenuItem]::new('Snooze Notifications')
+$snooze15 = $snoozeSubMenu.DropDownItems.Add('Snooze 15 minutes')
+$snooze15.Add_Click({
+    Set-NotificationSnooze -Minutes 15 -Settings $script:Settings | Out-Null
+    if (Get-Command Update-NotificationSettingsUI -ErrorAction SilentlyContinue) { Update-NotificationSettingsUI }
+})
+$snooze60 = $snoozeSubMenu.DropDownItems.Add('Snooze 1 hour')
+$snooze60.Add_Click({
+    Set-NotificationSnooze -Minutes 60 -Settings $script:Settings | Out-Null
+    if (Get-Command Update-NotificationSettingsUI -ErrorAction SilentlyContinue) { Update-NotificationSettingsUI }
+})
+$snooze240 = $snoozeSubMenu.DropDownItems.Add('Snooze 4 hours')
+$snooze240.Add_Click({
+    Set-NotificationSnooze -Minutes 240 -Settings $script:Settings | Out-Null
+    if (Get-Command Update-NotificationSettingsUI -ErrorAction SilentlyContinue) { Update-NotificationSettingsUI }
+})
+$snoozeClear = $snoozeSubMenu.DropDownItems.Add('Clear Snooze (Unmute)')
+$snoozeClear.Add_Click({
+    Set-NotificationSnooze -Minutes 0 -Settings $script:Settings | Out-Null
+    if (Get-Command Update-NotificationSettingsUI -ErrorAction SilentlyContinue) { Update-NotificationSettingsUI }
+})
+$trayMenu.Items.Add($snoozeSubMenu) | Out-Null
 $menuExit = $trayMenu.Items.Add('Exit NS Cloud Drive')
 $menuExit.Add_Click({
     $script:IsExiting = $true
@@ -5429,6 +5609,31 @@ $notifyIcon.Add_DoubleClick({
     Update-AllUIState
 })
 
+$notifyIcon.Add_BalloonTipClicked({
+    $window.Show()
+    $window.WindowState = [System.Windows.WindowState]::Normal
+    $window.Topmost = $true
+    $window.Topmost = $false
+    $window.Activate() | Out-Null
+    $window.Focus() | Out-Null
+    if ($script:LastNotifiedPath) {
+        try {
+            if (Test-Path -LiteralPath $script:LastNotifiedPath) {
+                if (Test-Path -LiteralPath $script:LastNotifiedPath -PathType Leaf) {
+                    Start-Process 'explorer.exe' -ArgumentList "/select,`"$script:LastNotifiedPath`""
+                } else {
+                    Start-Process 'explorer.exe' -ArgumentList "`"$script:LastNotifiedPath`""
+                }
+            } elseif ($script:CurrentActiveTransferDrive) {
+                $driveRoot = "$($script:CurrentActiveTransferDrive):"
+                if (Test-Path -LiteralPath $driveRoot) {
+                    Start-Process 'explorer.exe' -ArgumentList "`"$driveRoot`""
+                }
+            }
+        } catch { }
+    }
+})
+
 $window.Add_Closing({
     param($sender, $eventArgs)
     if (-not $script:IsExiting) {
@@ -5436,6 +5641,7 @@ $window.Add_Closing({
             $eventArgs.Cancel = $true
             Stop-AnalyticsCollection
             $window.Hide()
+            Invoke-MemoryTrim
             $notifyIcon.ShowBalloonTip(2000, 'NS Cloud Drive', 'Running in background. Double-click tray icon to open.', [System.Windows.Forms.ToolTipIcon]::Info)
         } else {
             $script:IsExiting = $true
@@ -6304,13 +6510,75 @@ function Update-LiveTransferActivity {
             }
         }
 
-        # Balloon tip notification: only notify for files >= 1 MB, no temp or metadata spam, ToolTipIcon::None for clean branding
-        if ($fileName -and $fileName -ne $script:LastNotifiedTransferFile) {
-            $script:LastNotifiedTransferFile = $fileName
-            if ($fileSize -ge 1048576 -and $fileName -ne 'Synchronizing staged files...' -and $fileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $fileName.StartsWith('.')) {
+        $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
+        $minBytes = if ($script:Settings.MinNotificationFileSizeBytes) { [int64]$script:Settings.MinNotificationFileSizeBytes } else { 5242880L }
+
+        # Smart folder detection & grouping
+        $rawName = if ($t -and $t.Name) { [string]$t.Name } else { '' }
+        $dirPart = if ($rawName) { [System.IO.Path]::GetDirectoryName($rawName) } else { '' }
+        $normDir = if ($dirPart) { $dirPart.Replace('/', '\').Trim('\') } else { '' }
+        $isFolderItem = (-not [string]::IsNullOrEmpty($normDir) -and $normDir -ne '.' -and $normDir -ne '\')
+
+        if ($isFolderItem -and $script:Settings.GroupFolderUploads) {
+            $folderKey = "${activeDrive}:\$normDir"
+            $folderDisplayName = [System.IO.Path]::GetFileName($normDir)
+            if (-not $folderDisplayName) { $folderDisplayName = $normDir }
+
+            if (-not $script:ActiveFolderTransfers.ContainsKey($folderKey)) {
+                $totalFolderFiles = 0
+                $totalFolderBytes = 0L
                 try {
-                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::None)
+                    if (Test-Path -LiteralPath $folderKey) {
+                        $fItems = @(Get-ChildItem -LiteralPath $folderKey -Recurse -File -ErrorAction SilentlyContinue)
+                        $totalFolderFiles = $fItems.Count
+                        $totalFolderBytes = ($fItems | Measure-Object -Property Length -Sum).Sum
+                    }
                 } catch { }
+
+                if ($totalFolderFiles -le 0 -and $transferList.Count -gt 0) {
+                    $matching = @($transferList | Where-Object { $_.Name -and ($_.Name.StartsWith("$normDir/") -or $_.Name.StartsWith("$normDir\")) })
+                    $totalFolderFiles = [Math]::Max(1, $matching.Count)
+                    $totalFolderBytes = ($matching | Measure-Object -Property Size -Sum).Sum
+                }
+
+                $script:ActiveFolderTransfers[$folderKey] = @{
+                    FolderKey = $folderKey
+                    FolderName = $folderDisplayName
+                    RelativeDir = $normDir
+                    Drive = $activeDrive
+                    ProviderName = $providerName
+                    TotalItems = $totalFolderFiles
+                    TotalBytes = $totalFolderBytes
+                    NotifiedStart = $false
+                }
+            }
+
+            $folderInfo = $script:ActiveFolderTransfers[$folderKey]
+            $script:LastNotifiedPath = $folderKey
+
+            if (-not $folderInfo.NotifiedStart) {
+                $folderInfo.NotifiedStart = $true
+                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
+                    if ($folderInfo.TotalBytes -ge $minBytes -or $folderInfo.TotalItems -gt 1) {
+                        $sizeStr = if ($folderInfo.TotalBytes -gt 0) { Format-LocalByteSize $folderInfo.TotalBytes } else { "" }
+                        $itemsStr = if ($folderInfo.TotalItems -gt 0) { " (" + [string][char]0x2022 + " $($folderInfo.TotalItems) items)" } else { "" }
+                        try {
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading Folder", "Folder `"$folderDisplayName`" ($sizeStr$itemsStr) staged on drive ${activeDrive}:. Uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                }
+            }
+        } else {
+            $script:LastNotifiedPath = "${activeDrive}:\$rawName"
+            if ($fileName -and $fileName -ne $script:LastNotifiedTransferFile) {
+                $script:LastNotifiedTransferFile = $fileName
+                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
+                    if ($fileSize -ge $minBytes -and $fileName -ne 'Synchronizing staged files...' -and $fileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $fileName.StartsWith('.')) {
+                        try {
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                }
             }
         }
 
@@ -6319,6 +6587,7 @@ function Update-LiveTransferActivity {
             FileSize = $fileSize
             ProviderName = $providerName
             Drive = $activeDrive
+            IsFolderItem = ($isFolderItem -and $script:Settings.GroupFolderUploads)
             CompletedAt = [DateTime]::UtcNow
         }
     } else {
@@ -6334,6 +6603,26 @@ function Update-LiveTransferActivity {
             $analyticsTransferQueueStack.Children.Clear()
         }
 
+        $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
+        $minBytes = if ($script:Settings.MinNotificationFileSizeBytes) { [int64]$script:Settings.MinNotificationFileSizeBytes } else { 5242880L }
+
+        # Notify folder-level completion if any folder transfers concluded
+        if ($script:ActiveFolderTransfers.Count -gt 0) {
+            foreach ($fk in @($script:ActiveFolderTransfers.Keys)) {
+                $fInfo = $script:ActiveFolderTransfers[$fk]
+                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete) {
+                    if ($fInfo.TotalBytes -ge $minBytes -or $fInfo.TotalItems -gt 1) {
+                        $sizeStr = if ($fInfo.TotalBytes -gt 0) { " (" + (Format-LocalByteSize $fInfo.TotalBytes) + ")" } else { "" }
+                        $itemsStr = if ($fInfo.TotalItems -gt 0) { " (" + [string][char]0x2022 + " $($fInfo.TotalItems) items)" } else { "" }
+                        try {
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Folder Upload Complete", "Folder `"$($fInfo.FolderName)`"$sizeStr$itemsStr was successfully uploaded and verified on $($fInfo.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                }
+            }
+            $script:ActiveFolderTransfers.Clear()
+        }
+
         if ($script:LastActiveTransferInfo) {
             $prev = $script:LastActiveTransferInfo
             $script:LastActiveTransferInfo = $null
@@ -6346,12 +6635,15 @@ function Update-LiveTransferActivity {
             $liveTransferDetails.Text = "Verified & safely stored on $($prev.ProviderName). All bytes confirmed remotely."
             $liveTransferEta.Text = "Finished"
 
-            if ($prev.FileSize -ge 1048576 -and $prev.FileName -ne 'Synchronizing staged files...' -and $prev.FileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $prev.FileName.StartsWith('.')) {
-                try {
-                    $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
-                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
-                } catch { }
+            if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete -and -not $prev.IsFolderItem) {
+                if ($prev.FileSize -ge $minBytes -and $prev.FileName -ne 'Synchronizing staged files...' -and $prev.FileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $prev.FileName.StartsWith('.')) {
+                    try {
+                        $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
+                        $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
+                    } catch { }
+                }
             }
+            Invoke-MemoryTrim
         } elseif ($script:LastCompletedTransferTime -ne [DateTime]::MinValue) {
             if (([DateTime]::UtcNow - $script:LastCompletedTransferTime).TotalSeconds -ge 6.0) {
                 $script:LastCompletedTransferTime = [DateTime]::MinValue
