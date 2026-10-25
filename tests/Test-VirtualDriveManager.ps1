@@ -147,4 +147,22 @@ if ($null -eq $pendingUploads -or $pendingUploads.Count -ne 0) {
 }
 Write-Output '  [PASS] Cache refresh and pending uploads helpers verified'
 
+# 13. Test Clear-StaleDriveLetterMapping cleans MountPoints2 and server-share keys
+$testServerKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##server#TestCloudVol'
+New-Item -Path $testServerKey -Force -ErrorAction SilentlyContinue | Out-Null
+Clear-StaleDriveLetterMapping -DriveLetter 'Z' -VolumeLabel 'TestCloudVol'
+if (Test-Path -LiteralPath $testServerKey) {
+    Remove-Item -LiteralPath $testServerKey -Recurse -Force -ErrorAction SilentlyContinue
+    throw 'Clear-StaleDriveLetterMapping failed to clean stale ##server#TestCloudVol key'
+}
+Write-Output '  [PASS] Clear-StaleDriveLetterMapping network-mode cleanup verified'
+
+# 14. Test VirtualDriveHelper native CLR threadpool prewarm
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveHelper').Type) {
+    throw 'NSCloudDrive.VirtualDriveHelper type was not defined'
+}
+[NSCloudDrive.VirtualDriveHelper]::PrewarmRoot(0)
+[NSCloudDrive.VirtualDriveHelper]::PrewarmRoot(12345)
+Write-Output '  [PASS] VirtualDriveHelper PrewarmRoot invocation verified'
+
 Write-Output 'All VirtualDriveManager tests passed.'
