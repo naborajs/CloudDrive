@@ -12,6 +12,48 @@ $script:ActiveMountProcesses = @{}
 $script:ProviderDriveMapping = @{}
 $script:MountProcess = $null
 
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveHelper').Type) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+
+namespace NSCloudDrive
+{
+    public static class VirtualDriveHelper
+    {
+        public static void PrewarmRoot(int rcPort)
+        {
+            if (rcPort <= 0) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    Thread.Sleep(300);
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + rcPort + "/vfs/refresh");
+                    req.Method = "POST";
+                    req.ContentType = "application/json";
+                    req.Timeout = 8000;
+                    byte[] bytes = Encoding.UTF8.GetBytes("{\"dir\":\"\"}");
+                    req.ContentLength = bytes.Length;
+                    using (Stream stream = req.GetRequestStream())
+                    {
+                        stream.Write(bytes, 0, bytes.Length);
+                    }
+                    using (WebResponse resp = req.GetResponse()) { }
+                }
+                catch { }
+            });
+        }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 function Format-SafeProcessArgument([string]$Argument) {
     if ([string]::IsNullOrEmpty($Argument)) { return '""' }
     if ($Argument -notmatch '[\s"\\]') { return $Argument }
@@ -136,7 +178,7 @@ function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 
     }
 }
 
-function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
+function Clear-StaleDriveLetterMapping([string]$DriveLetter, [string]$VolumeLabel = '') {
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($letter.Length -ne 1) { return }
@@ -159,13 +201,24 @@ function Clear-StaleDriveLetterMapping([string]$DriveLetter) {
         }
     } catch { }
 
-    # Remove only the stale Explorer cache entry for this drive letter. Server-share
-    # entries belong to unrelated user mappings and must not be cleared globally.
+    # Remove stale Explorer cache entry for this drive letter.
     try {
         $mpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2'
         $letterSubKey = Join-Path $mpKey $letter
         if (Test-Path -LiteralPath $letterSubKey) {
             Remove-Item -LiteralPath $letterSubKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        # Also purge any stale rclone/WinFsp network redirector keys (##server#*) that cause Explorer
+        # to treat fixed disk mounts as "Network locations" with "\\server".
+        if (Test-Path -LiteralPath $mpKey) {
+            $serverKeys = Get-ChildItem -LiteralPath $mpKey -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -like '##server#*' }
+            foreach ($sk in $serverKeys) {
+                if ([string]::IsNullOrEmpty($VolumeLabel) -or $sk.PSChildName -eq "##server#$VolumeLabel" -or $sk.PSChildName -like '##server#*') {
+                    Remove-Item -LiteralPath $sk.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     } catch { }
 }
@@ -493,7 +546,7 @@ function Start-VirtualDriveMount(
     }
 
     # Clean any stale/orphaned network or subst mapping for this drive letter to prevent Explorer red X artifacts
-    Clear-StaleDriveLetterMapping -DriveLetter $letter
+    Clear-StaleDriveLetterMapping -DriveLetter $letter -VolumeLabel $volName
 
     # Prepare rotating log file for this mount under %LOCALAPPDATA%\NSCloudDrive\logs\
     $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
@@ -583,27 +636,13 @@ function Start-VirtualDriveMount(
                 throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
             }
 
-            # Asynchronously pre-warm the root directory cache so initial Explorer navigation does not freeze on remote HTTP calls
+            # Asynchronously pre-warm the root directory cache using native CLR threadpool
+            # (avoids PowerShell ScriptBlock TLS crash in CLR ThreadPool)
             if ($rcPort -gt 0) {
                 try {
-                    [System.Threading.ThreadPool]::QueueUserWorkItem({
-                        param($port)
-                        try {
-                            [System.Threading.Thread]::Sleep(300)
-                            $body = '{"dir":""}'
-                            [System.Net.HttpWebRequest]$req = [System.Net.WebRequest]::Create("http://127.0.0.1:$port/vfs/refresh")
-                            $req.Method = 'POST'
-                            $req.ContentType = 'application/json'
-                            $req.Timeout = 8000
-                            $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-                            $req.ContentLength = $bytes.Length
-                            $stream = $req.GetRequestStream()
-                            $stream.Write($bytes, 0, $bytes.Length)
-                            $stream.Close()
-                            $resp = $req.GetResponse()
-                            $resp.Close()
-                        } catch { }
-                    }, $rcPort) | Out-Null
+                    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveHelper').Type) {
+                        [NSCloudDrive.VirtualDriveHelper]::PrewarmRoot($rcPort)
+                    }
                 } catch { }
             }
 
