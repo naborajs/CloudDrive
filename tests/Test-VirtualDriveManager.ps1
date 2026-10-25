@@ -136,4 +136,15 @@ if ($accountStatus.IsMounted -ne $false) {
 }
 Write-Output '  [PASS] Multi-account virtual drive status tracking verified'
 
+# 12. Test Cache Refresh & Pending Uploads helper functions
+$refreshResult = Invoke-VirtualDriveCacheRefresh -RcPort 0
+if ($refreshResult -ne $false) {
+    throw 'Expected Invoke-VirtualDriveCacheRefresh to return false for port 0'
+}
+$pendingUploads = Get-VirtualDrivePendingUploads -CacheDirectory 'C:\NonExistent_Test_Cache_Dir'
+if ($null -eq $pendingUploads -or $pendingUploads.Count -ne 0) {
+    throw 'Expected empty array from Get-VirtualDrivePendingUploads for missing directory'
+}
+Write-Output '  [PASS] Cache refresh and pending uploads helpers verified'
+
 Write-Output 'All VirtualDriveManager tests passed.'
