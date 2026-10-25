@@ -942,10 +942,14 @@ function Get-VirtualDriveVfsStats {
         $lastErr = $null
         $transferring = @()
 
+        $totalBytes = 0L
+        $overallEta = $null
         if ($coreResp) {
             if ($coreResp.PSObject.Properties['bytes']) { $bTrans = [int64]$coreResp.bytes }
+            if ($coreResp.PSObject.Properties['totalBytes']) { $totalBytes = [int64]$coreResp.totalBytes }
             if ($coreResp.PSObject.Properties['speed']) { $speed = [double]$coreResp.speed }
             if ($coreResp.PSObject.Properties['errors']) { $errCount = [int]$coreResp.errors }
+            if ($coreResp.PSObject.Properties['eta'] -and $null -ne $coreResp.eta) { $overallEta = [int]$coreResp.eta }
             if ($coreResp.PSObject.Properties['lastError'] -and $coreResp.lastError) { $lastErr = [string]$coreResp.lastError }
             if ($coreResp.PSObject.Properties['transferring'] -and $coreResp.transferring) {
                 foreach ($t in $coreResp.transferring) {
@@ -955,7 +959,9 @@ function Get-VirtualDriveVfsStats {
                         Bytes = if ($t.PSObject.Properties['bytes']) { [int64]$t.bytes } else { 0L }
                         Percentage = if ($t.PSObject.Properties['percentage']) { [double]$t.percentage } else { 0.0 }
                         Speed = if ($t.PSObject.Properties['speed']) { [double]$t.speed } else { 0.0 }
-                        Eta = if ($t.PSObject.Properties['eta']) { [int]$t.eta } else { $null }
+                        Eta = if ($t.PSObject.Properties['eta'] -and $null -ne $t.eta) { [int]$t.eta } else { $null }
+                        SrcFs = if ($t.PSObject.Properties['srcFs']) { [string]$t.srcFs } else { '' }
+                        DstFs = if ($t.PSObject.Properties['dstFs']) { [string]$t.dstFs } else { '' }
                     }
                 }
             }
@@ -978,7 +984,9 @@ function Get-VirtualDriveVfsStats {
             UploadsInProgress = $uploadsInProg
             UploadsQueued = $uploadsQueued
             BytesTransferred = $bTrans
+            TotalBytes = $totalBytes
             TransferSpeed = $speed
+            OverallEta = $overallEta
             Errors = $errCount
             LastError = $lastErr
             Transferring = $transferring
@@ -993,13 +1001,71 @@ function Get-VirtualDriveVfsStats {
             UploadsInProgress = 0
             UploadsQueued = 0
             BytesTransferred = 0L
+            TotalBytes = 0L
             TransferSpeed = 0.0
+            OverallEta = $null
             Errors = 0
             LastError = $null
             Transferring = @()
             CacheBytesUsed = 0L
             State = 'Remote state unknown'
         }
+    }
+}
+
+function Set-VirtualDriveBandwidthLimit {
+    [CmdletBinding()]
+    param(
+        [string]$DriveLetter = '',
+        [string]$Rate = 'off'
+    )
+
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    if ($rcPort -le 0) { return $false }
+
+    try {
+        $body = @{ rate = $Rate } | ConvertTo-Json
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/bwlimit" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 2 -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-VirtualDriveBandwidthLimit {
+    [CmdletBinding()]
+    param(
+        [string]$DriveLetter = ''
+    )
+
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    if ($rcPort -le 0) { return $null }
+
+    try {
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/bwlimit" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+        return $resp
+    } catch {
+        return $null
+    }
+}
+
+function Reset-VirtualDriveStats {
+    [CmdletBinding()]
+    param(
+        [string]$DriveLetter = ''
+    )
+
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    if ($rcPort -le 0) { return $false }
+
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/stats-reset" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2 -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        return $false
     }
 }
 
