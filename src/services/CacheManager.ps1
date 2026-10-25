@@ -194,18 +194,20 @@ function Get-ManagedCacheDirectories {
             }
             if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
             $targetInfo = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
-            if (($targetInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $singleTarget = if ($targetInfo -is [System.Array]) { $targetInfo[0] } else { $targetInfo }
+            if ([bool]($singleTarget.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))) {
                 throw "Refusing cache operation on a reparse-point account cache path: $directory"
             }
-            $targets.Add($targetInfo.FullName)
+            $targets.Add($singleTarget.FullName)
         }
     } elseif (Test-Path -LiteralPath $CacheDirectory -PathType Container) {
         foreach ($directory in Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction Stop) {
             if ($directory.Name -notmatch $managedDirectoryPattern) { continue }
-            if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "Refusing cache operation on a reparse-point account cache path: $($directory.FullName)"
+            $singleDir = if ($directory -is [System.Array]) { $directory[0] } else { $directory }
+            if ([bool]($singleDir.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))) {
+                throw "Refusing cache operation on a reparse-point account cache path: $($singleDir.FullName)"
             }
-            $targets.Add($directory.FullName)
+            $targets.Add($singleDir.FullName)
         }
     }
 
@@ -391,7 +393,8 @@ function Invoke-StartupCacheRecovery {
     foreach ($recoveryTarget in $recoveryTargets) {
         if (-not (Test-Path -LiteralPath $recoveryTarget -PathType Container)) { continue }
         $targetInfo = Get-Item -LiteralPath $recoveryTarget -Force -ErrorAction Stop
-        if (($targetInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $singleTarget = if ($targetInfo -is [System.Array]) { $targetInfo[0] } else { $targetInfo }
+        if ([bool]($singleTarget.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint))) {
             $errors.Add("Skipped cache recovery because the account cache path is a reparse point: $recoveryTarget")
             continue
         }
