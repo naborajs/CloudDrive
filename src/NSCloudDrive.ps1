@@ -4148,6 +4148,7 @@ function Start-StartupCacheRecoveryWorker {
     $script:StartupCacheRecoveryWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, $script:CacheDirectory) -ScriptBlock {
         param([string]$sourceRoot, [string]$cacheDirectory)
         $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
         . (Join-Path $sourceRoot 'services\CacheManager.ps1')
         $targets = [System.Collections.Generic.List[string]]::new()
         $targetSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
