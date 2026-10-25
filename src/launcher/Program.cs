@@ -167,7 +167,7 @@ namespace NSCloudDrive.Launcher
         {
             InitialSessionState initial = InitialSessionState.CreateDefault();
             initial.ApartmentState = ApartmentState.STA;
-            initial.ThreadOptions = PSThreadOptions.UseCurrentThread;
+            initial.ThreadOptions = PSThreadOptions.ReuseThread;
             initial.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
 
             using (Runspace rs = RunspaceFactory.CreateRunspace(initial))
