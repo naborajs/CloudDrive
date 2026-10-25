@@ -211,7 +211,7 @@ function Get-ManagedCacheDirectories {
         }
     }
 
-    return ,$targets.ToArray()
+    return $targets.ToArray()
 }
 
 function Invoke-SafeCacheCleanup {
@@ -425,5 +425,146 @@ function Invoke-StartupCacheRecovery {
         RecoveredFiles = $recoveredFiles
         RecoveredBytes = $recoveredBytes
         Errors = @($errors.ToArray())
+    }
+}
+
+# ==============================================================================
+# DETAILED CACHE FILE LIST & SINGLE-FILE EVICTION
+# ==============================================================================
+
+function Get-DetailedCacheFileList {
+    [CmdletBinding()]
+    param(
+        [string]$CacheDirectory = '',
+        [string[]]$MountCacheDirectories = @()
+    )
+
+    if (-not $CacheDirectory) {
+        $settings = Get-NSCloudDriveSettings
+        $CacheDirectory = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
+    }
+
+    $accountMap = @{}
+    try {
+        $accounts = @(Get-CloudAccounts)
+        foreach ($acc in $accounts) {
+            if ($acc.Id) {
+                $label = if ($acc.DisplayName) { [string]$acc.DisplayName } else { [string]$acc.Id }
+                $drive = if ($acc.DriveLetter) { "$($acc.DriveLetter):" } else { '' }
+                $accountMap[[string]$acc.Id] = if ($drive) { "$label ($drive)" } else { $label }
+            }
+        }
+    } catch { }
+
+    $managedDirs = @()
+    try {
+        $managedDirs = @(Get-ManagedCacheDirectories -CacheDirectory $CacheDirectory -MountCacheDirectories $MountCacheDirectories)
+    } catch {
+        if (Test-Path -LiteralPath $CacheDirectory) {
+            $managedDirs = @(Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        }
+    }
+
+    $fileList = [System.Collections.Generic.List[PSObject]]::new()
+    foreach ($mDir in $managedDirs) {
+        if (-not (Test-Path -LiteralPath $mDir -PathType Container)) { continue }
+        $dirName = [System.IO.Path]::GetFileName($mDir.TrimEnd('\', '/'))
+        $accountLabel = if ($accountMap.ContainsKey($dirName)) { $accountMap[$dirName] } else { $dirName }
+
+        # Scan files inside vfs directory (actual cached data chunks / files)
+        $vfsDir = Join-Path $mDir 'vfs'
+        $scanTarget = if (Test-Path -LiteralPath $vfsDir -PathType Container) { $vfsDir } else { $mDir }
+
+        $files = Get-ChildItem -LiteralPath $scanTarget -Recurse -File -Force -ErrorAction SilentlyContinue
+        if (-not $files) { continue }
+
+        foreach ($f in $files) {
+            # Skip vfsMeta files
+            if ($f.FullName -match '[\\/]vfsMeta[\\/]') { continue }
+
+            $len = [int64]$f.Length
+            $isInUse = Test-FileInUse -FilePath $f.FullName
+
+            # Determine relative cloud path from vfs/<remote>{hash}/<relPath>
+            $relPath = $f.FullName.Substring($scanTarget.Length).TrimStart('\', '/')
+            if ($relPath -match '^[^\\]+\\(.+)$') {
+                $cloudPath = $Matches[1]
+            } else {
+                $cloudPath = $relPath
+            }
+
+            $sizeFormatted = if ($len -ge 1GB) {
+                "$([Math]::Round($len / 1GB, 2)) GB"
+            } elseif ($len -ge 1MB) {
+                "$([Math]::Round($len / 1MB, 2)) MB"
+            } elseif ($len -ge 1KB) {
+                "$([Math]::Round($len / 1KB, 1)) KB"
+            } else {
+                "$len B"
+            }
+
+            $fileList.Add([PSCustomObject]@{
+                Account = $accountLabel
+                AccountId = $dirName
+                FileName = $f.Name
+                RelativePath = $cloudPath
+                FullPath = $f.FullName
+                Directory = $f.DirectoryName
+                SizeBytes = $len
+                SizeFormatted = $sizeFormatted
+                Status = if ($isInUse) { 'Staged / In-Use' } else { 'Cached (Synced)' }
+                IsInUse = $isInUse
+                IsEvictable = (-not $isInUse)
+                LastModified = $f.LastWriteTime
+                LastAccessed = if ($f.LastAccessTime -gt [DateTime]::MinValue) { $f.LastAccessTime } else { $f.LastWriteTime }
+            })
+        }
+    }
+
+    return $fileList.ToArray()
+}
+
+function Remove-SingleCacheFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string]$CacheDirectory = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        return @{ Success = $false; Error = "File does not exist: $FilePath" }
+    }
+
+    if (Test-FileInUse -FilePath $FilePath) {
+        return @{ Success = $false; Error = "File is currently open or transferring to the cloud. Please wait until transfer completes." }
+    }
+
+    try {
+        if (-not $CacheDirectory) {
+            $settings = Get-NSCloudDriveSettings
+            $CacheDirectory = if ($settings.CacheDirectory) { $settings.CacheDirectory } else { 'D:\CloudCache' }
+        }
+        if (Test-Path -LiteralPath $CacheDirectory) {
+            $resolvedCache = (Resolve-Path -LiteralPath $CacheDirectory).Path
+            $resolvedFile = (Resolve-Path -LiteralPath $FilePath).Path
+            if (-not $resolvedFile.StartsWith($resolvedCache, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return @{ Success = $false; Error = "Security error: File is outside the configured cache directory." }
+            }
+        }
+
+        Remove-Item -LiteralPath $FilePath -Force -ErrorAction Stop
+
+        # Remove matching vfsMeta file if present
+        if ($FilePath -match '[\\/]vfs[\\/]') {
+            $metaPath = $FilePath -replace '([\\/])vfs([\\/])', '$1vfsMeta$2'
+            if (Test-Path -LiteralPath $metaPath) {
+                Remove-Item -LiteralPath $metaPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        return @{ Success = $true; FilePath = $FilePath }
+    } catch {
+        return @{ Success = $false; Error = $_.Exception.Message }
     }
 }
