@@ -66,4 +66,36 @@ Assert-True ($mainSource -match '\$script:AnalyticsLastCollectionTime') 'Collect
 Assert-True ($mainSource -match '\$script:AnalyticsLastCollectionDurationMs') 'Collection duration is recorded'
 Assert-True ($mainSource -match 'Stopwatch') 'Stopwatch is used to measure collection duration'
 
+# Focused Lifecycle & Safety Verifications
+Assert-True ($mainSource -match '\$analyticsCancelBtn') 'Cancel collection action exists'
+Assert-True ($mainSource -match '\$analyticsSummaryGrid') '4-column key metrics summary grid exists'
+Assert-True ($mainSource -match 'New-AnalyticsStatCard ''Drive Mounts''') 'Drive Mounts stat card is defined'
+Assert-True ($mainSource -match 'New-AnalyticsStatCard ''Active Transfers''') 'Active Transfers stat card is defined'
+Assert-True ($mainSource -match 'New-AnalyticsStatCard ''SSD Local Cache''') 'SSD Local Cache stat card is defined'
+Assert-True ($mainSource -match 'New-AnalyticsStatCard ''Network Latency''') 'Network Latency stat card is defined'
+Assert-True ($mainSource -match 'New-AnalyticsCard ''Network & latency diagnostics'' ''#06B6D4''') 'Network & latency diagnostics card is defined'
+Assert-True ($mainSource -match 'New-AnalyticsCard ''Local SSD cache & staging diagnostics'' ''#10B981''') 'Local SSD cache & staging diagnostics card is defined'
+
+# Theme and Liquid Glass styling integration
+$applyThemeBlock = [regex]::Match($mainSource, '(?s)function Apply-UITheme\b.*?function Update-NavActiveState').Value
+Assert-True ($applyThemeBlock -match '\$analyticsLandingCard') 'Apply-UITheme includes analyticsLandingCard'
+Assert-True ($applyThemeBlock -match '\$analyticsActionBar') 'Apply-UITheme includes analyticsActionBar'
+Assert-True ($applyThemeBlock -match '\$analyticsRefreshAnalyticsBtn') 'Apply-UITheme includes analyticsRefreshAnalyticsBtn'
+$glassCardList = [regex]::Match($applyThemeBlock, '(?s)foreach\s*\(\$glassCard in @\((.*?)\)\)').Value
+Assert-True ($glassCardList -match '\$analyticsLandingCard') 'Liquid glass card composition includes analyticsLandingCard'
+
+# CPU measurement bounding
+Assert-True ($mainSource -match '\[Math\]::Max\(0\.0,\s*\[Math\]::Min\(100\.0,') 'CPU percent calculation is safely bounded between 0.0 and 100.0'
+
+# Verify absolutely NO automatic collection in timers, startup, or tray
+$timerBlock = [regex]::Match($mainSource, '(?s)\$timer\.Add_Tick\(\{.*?\}\)\s*\r?\n').Value
+Assert-True ($timerBlock -and $timerBlock -notmatch 'Start-AnalyticsCollection|Update-AnalyticsMetrics') 'Main timer tick does not run analytics'
+
+$startupBlock = [regex]::Match($mainSource, '(?s)function Invoke-StartupAutoMount \{.*?\}').Value
+Assert-True ($startupBlock -and $startupBlock -notmatch 'Start-AnalyticsCollection|Update-AnalyticsMetrics') 'Startup auto-mount does not run analytics'
+
+# Verify NO cache cleanup or cloud writes occur inside analytics collection
+$analyticsCollectionFn = [regex]::Match($mainSource, '(?s)function Start-AnalyticsCollection \{.*?function Stop-AnalyticsCollection').Value
+Assert-True ($analyticsCollectionFn -notmatch 'Invoke-SafeCacheCleanup|Remove-Item|Clear-Content|rclone (delete|rmdir|sync)') 'Analytics does not perform cache cleanup or cloud writes'
+
 Write-Output '  [PASS] Analytics dashboard contract verified (on-demand, no automatic polling; mocked/structural; no real provider quota call performed).'
