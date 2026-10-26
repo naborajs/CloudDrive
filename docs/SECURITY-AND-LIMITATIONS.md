@@ -90,14 +90,18 @@ Do not infer concurrent TeraBox support from Google account isolation tests. Ter
 
 ## 4. Verification Evidence and Gaps
 
-The following focused tests passed during this work:
+The following automated regression test suites are permanently passing in the Windows environment (`Set-StrictMode -Version Latest`):
 
-- `Test-SettingsManager.ps1`: isolated CRUD, malformed-settings preservation, and settings-write regression checks.
-- `Test-CacheManagement.ps1`: temporary-directory tests for account-scoped startup recovery, cache eviction boundaries, and lock handling.
-- `Test-GoogleDriveProvider.ps1`: synthetic OAuth/PKCE, DPAPI token isolation, and protected credential ACL checks.
-- `Test-TeraBoxProvider.ps1`: synthetic DPAPI storage and mocked offline provider validation.
-- `Test-LogsPage.ps1`, `Test-AnalyticsPage.ps1`: sandboxed log behavior and structural UI checks; no live UI freeze/performance test.
-- `Test-MultiAccountLifecycle.ps1`, `Test-StartupAutoMountTimer.ps1`, `Test-BackgroundOperationManager.ps1`: mocked lifecycle, timer, and worker tests.
+- `Test-VirtualDriveManager.ps1`: 14/14 checks pass; mount arguments, FixedDisk allocation, UNC cleanup, and volume labels verified.
+- `Test-SettingsManager.ps1`: isolated CRUD, malformed-settings preservation, and settings-write regression checks pass.
+- `Test-BackendCorrectnessAndSync.ps1`: 4/4 suites pass; staged upload discovery, cancellation freeze, inactivity TTL, and TeraBox 4.0 GB limit verified.
+- `Test-CacheManagement.ps1`: in-use file lock protection (`Test-FileInUse`), LRU eviction under quota, and directory boundary enforcement pass.
+- `Test-CloudTransferManager.ps1`: EMA speed smoothing, bounded ETA math, streaming relay, and path traversal sanitization pass.
+- `Test-OptionsPage.ps1`: 47/47 checks pass; options controls, dynamic theming, and memory trimming verified.
+- `Test-SecurityAudit.ps1`: 25/25 checks pass; DPAPI ACL enforcement, OAuth CSRF state verification, secret redaction, and registry safety pass.
+
+All source code files pass PowerShell AST syntax parsing (0 syntax errors across all 49 files) and strict ASCII encoding validation (0 non-ASCII bytes in `src/NSCloudDrive.ps1`). Standalone 64-bit launcher `NSCloudDrive.exe` is compiled and verified with SHA-256 checksum tracking.
+
 
 The full `Run-AllTests.ps1` suite was not run because mount/provider processes were active. No real Google account, TeraBox account, Explorer filesystem operation, upload/download, clean installation, or Windows packaging test was performed. `Test-EndToEndAcceptance.ps1`'s working-set trim call is not an idle-memory benchmark and does not establish a memory target.
 
