@@ -4,9 +4,9 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyTitle("NS Cloud Drive")]
 [assembly: AssemblyDescription("Cloud Drive Virtual Filesystem Manager")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("NS Cloud")]
+[assembly: AssemblyCompany("NABORAJ SARKAR")]
 [assembly: AssemblyProduct("NS Cloud Drive")]
-[assembly: AssemblyCopyright("Copyright © 2026 NS Cloud. All rights reserved.")]
+[assembly: AssemblyCopyright("Copyright © 2026 NABORAJ SARKAR. All rights reserved.")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
