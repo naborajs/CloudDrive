@@ -243,6 +243,96 @@ function Format-SanitizedDiagnosticMessage([string]$Message) {
 # files) so a long session cannot grow logs without limit.
 $script:ApplicationLogRotateBytes = 2MB
 $script:ApplicationLogCheckState = @{ Setting = $null; ReadAt = [DateTime]::MinValue }
+$script:LastLogMaintenanceTime = [DateTime]::MinValue
+
+function Invoke-LogMaintenance {
+    [CmdletBinding()]
+    param(
+        [int]$RetentionDays = 7,
+        [int64]$MaxLogSizeBytes = 5242880L,
+        [switch]$Force = $false
+    )
+
+    try {
+        if (-not $Force) {
+            $elapsedMinutes = ([DateTime]::UtcNow - $script:LastLogMaintenanceTime).TotalMinutes
+            if ($elapsedMinutes -lt 30) {
+                return $null
+            }
+        }
+        $script:LastLogMaintenanceTime = [DateTime]::UtcNow
+
+        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+            return $null
+        }
+
+        $now = [DateTime]::UtcNow
+        $cutoff = $now.AddDays(-$RetentionDays)
+        $staleExtensions = @('.tmp', '.bak', '.old', '.lock')
+
+        $deletedStaleCount = 0
+        $deletedExpiredCount = 0
+        $rotatedLogsCount = 0
+
+        $allFiles = @(Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue)
+
+        foreach ($file in $allFiles) {
+            if ($null -eq $file) { continue }
+
+            $ext = [System.IO.Path]::GetExtension($file.Name).ToLowerInvariant()
+
+            # 1. Delete stale .tmp, .bak, .old, .lock files
+            if ($ext -in $staleExtensions) {
+                try {
+                    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+                    $deletedStaleCount++
+                } catch { }
+                continue
+            }
+
+            # 2. Delete log files older than $RetentionDays
+            if ($file.LastWriteTimeUtc -lt $cutoff) {
+                try {
+                    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+                    $deletedExpiredCount++
+                } catch { }
+                continue
+            }
+
+            # 3. Rotate rclone-*.log files exceeding $MaxLogSizeBytes, keeping at most one .1 predecessor
+            if ($file.Name -like 'rclone-*.log' -and $file.Name -notmatch '\.1\.log$') {
+                if ($file.Length -gt $MaxLogSizeBytes) {
+                    try {
+                        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                        $predPath = Join-Path $logDir "$baseName.1.log"
+                        $altPredPath = Join-Path $logDir "$($file.Name).1"
+
+                        if (Test-Path -LiteralPath $predPath) {
+                            Remove-Item -LiteralPath $predPath -Force -ErrorAction SilentlyContinue
+                        }
+                        if (Test-Path -LiteralPath $altPredPath) {
+                            Remove-Item -LiteralPath $altPredPath -Force -ErrorAction SilentlyContinue
+                        }
+
+                        Move-Item -LiteralPath $file.FullName -Destination $predPath -Force -ErrorAction SilentlyContinue
+                        $rotatedLogsCount++
+                    } catch { }
+                }
+            }
+        }
+
+        return [PSCustomObject]@{
+            ScannedFiles       = $allFiles.Count
+            DeletedStale       = $deletedStaleCount
+            DeletedExpired     = $deletedExpiredCount
+            RotatedLogs        = $rotatedLogsCount
+            LastMaintenanceUtc = $script:LastLogMaintenanceTime
+        }
+    } catch {
+        return $null
+    }
+}
 
 function Get-ApplicationLogSettingEnabled {
     # 'Normal' is the default; 'Off' disables log writes. The setting file is
@@ -287,6 +377,9 @@ function Write-NSCloudLog {
 
     try {
         if (-not (Get-ApplicationLogSettingEnabled)) { return }
+
+        # Automated periodic maintenance of log directory (rate-limited to once every 30 minutes)
+        $null = Invoke-LogMaintenance
 
         $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
         if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
