@@ -39,7 +39,7 @@ namespace NSCloudDrive.Launcher
         private const string AppUserModelId = "NSCloud.NSCloudDrive";
         private const string MutexName = "Local\\NSCloudDrive_AppMutex";
         private const string RestoreEventName = "Local\\NSCloudDrive_RestoreWindow_Event";
-        private const string WindowTitle = "NS Cloud Drive";
+        private const string WindowTitle = "NS Cloud Drive - Developed by NABORAJ SARKAR";
 
         static Program()
         {
