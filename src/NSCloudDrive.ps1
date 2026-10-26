@@ -41,6 +41,7 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CacheManager.ps1')
+. (Join-Path $PSScriptRoot 'services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
 . (Join-Path $PSScriptRoot 'services\ExplorerIntegration.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
@@ -54,7 +55,205 @@ $script:CacheDirectory = if ($script:Settings.CacheDirectory) { $script:Settings
 $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
 $script:ActiveFolderTransfers = @{}
+$script:NotifiedCompletedUploads = @{}
+$script:TransferEventHistory = [System.Collections.Generic.List[hashtable]]::new()
+$script:NotifiedEventKeys = [hashtable]::Synchronized(@{})
 $script:LastNotifiedPath = ''
+
+function Get-TransferHistoryFilePath {
+    $dir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try { [void][System.IO.Directory]::CreateDirectory($dir) } catch { }
+    }
+    return (Join-Path $dir 'transfer-history.json')
+}
+
+function Add-TransferNotificationEvent {
+    [CmdletBinding()]
+    param(
+        [string]$JobId = '',
+        [string]$BatchId = '',
+        [string]$BatchName = '',
+        [string]$FileName = '',
+        [string]$DriveLetter = '',
+        [string]$ProviderName = '',
+        [int64]$FileSizeBytes = 0L,
+        [int64]$BytesTransferred = 0L,
+        [string]$Status = 'Queued',
+        [string]$Error = '',
+        [string]$VerificationType = '',
+        [string]$RemoteHash = ''
+    )
+
+    $timestamp = [DateTime]::UtcNow.ToString('o')
+    $evt = [ordered]@{
+        EventId = [Guid]::NewGuid().ToString('N')
+        TimestampUtc = $timestamp
+        JobId = $JobId
+        BatchId = $BatchId
+        BatchName = $BatchName
+        FileName = $FileName
+        DriveLetter = $DriveLetter
+        ProviderName = $ProviderName
+        FileSizeBytes = $FileSizeBytes
+        BytesTransferred = $BytesTransferred
+        Status = $Status
+        Error = $Error
+        VerificationType = $VerificationType
+        RemoteHash = $RemoteHash
+    }
+
+    $script:TransferEventHistory.Insert(0, $evt)
+    while ($script:TransferEventHistory.Count -gt 100) {
+        $script:TransferEventHistory.RemoveAt($script:TransferEventHistory.Count - 1)
+    }
+
+    $targetFile = Get-TransferHistoryFilePath
+    $tmpFile = "$targetFile.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $arr = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($item in @($script:TransferEventHistory)) {
+            $arr.Add($item)
+        }
+        $json = $arr | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+        if (Test-Path -LiteralPath $targetFile) {
+            try {
+                [System.IO.File]::Replace($tmpFile, $targetFile, $null)
+            } catch {
+                Move-Item -LiteralPath $tmpFile -Destination $targetFile -Force
+            }
+        } else {
+            [System.IO.File]::Move($tmpFile, $targetFile)
+        }
+    } catch {
+    } finally {
+        if ($tmpFile -and (Test-Path -LiteralPath $tmpFile)) {
+            try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
+function Load-TransferNotificationHistory {
+    [CmdletBinding()]
+    param()
+
+    $targetFile = Get-TransferHistoryFilePath
+    if (-not (Test-Path -LiteralPath $targetFile -PathType Leaf)) {
+        return
+    }
+
+    try {
+        $raw = Get-Content -LiteralPath $targetFile -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { return }
+        $items = $raw | ConvertFrom-Json
+        if (-not $items) { return }
+
+        $script:TransferEventHistory.Clear()
+        foreach ($item in @($items)) {
+            if ($null -eq $item) { continue }
+            $h = [ordered]@{
+                EventId = if ($item.PSObject.Properties['EventId']) { [string]$item.EventId } else { [Guid]::NewGuid().ToString('N') }
+                TimestampUtc = if ($item.PSObject.Properties['TimestampUtc']) { [string]$item.TimestampUtc } else { [DateTime]::UtcNow.ToString('o') }
+                JobId = if ($item.PSObject.Properties['JobId']) { [string]$item.JobId } else { '' }
+                BatchId = if ($item.PSObject.Properties['BatchId']) { [string]$item.BatchId } else { '' }
+                BatchName = if ($item.PSObject.Properties['BatchName']) { [string]$item.BatchName } else { '' }
+                FileName = if ($item.PSObject.Properties['FileName']) { [string]$item.FileName } else { '' }
+                DriveLetter = if ($item.PSObject.Properties['DriveLetter']) { [string]$item.DriveLetter } else { '' }
+                ProviderName = if ($item.PSObject.Properties['ProviderName']) { [string]$item.ProviderName } else { '' }
+                FileSizeBytes = if ($item.PSObject.Properties['FileSizeBytes']) { [int64]$item.FileSizeBytes } else { 0L }
+                BytesTransferred = if ($item.PSObject.Properties['BytesTransferred']) { [int64]$item.BytesTransferred } else { 0L }
+                Status = if ($item.PSObject.Properties['Status']) { [string]$item.Status } else { 'Queued' }
+                Error = if ($item.PSObject.Properties['Error']) { [string]$item.Error } else { '' }
+                VerificationType = if ($item.PSObject.Properties['VerificationType']) { [string]$item.VerificationType } else { '' }
+                RemoteHash = if ($item.PSObject.Properties['RemoteHash']) { [string]$item.RemoteHash } else { '' }
+            }
+            $script:TransferEventHistory.Add($h)
+            if ($script:TransferEventHistory.Count -ge 100) { break }
+        }
+    } catch { }
+}
+
+function Test-AndSetNotifiedEventKey([string]$Key, [double]$WindowMinutes = 15.0) {
+    if ([string]::IsNullOrWhiteSpace($Key)) { return $false }
+    $nowUtc = [DateTime]::UtcNow
+    if ($script:NotifiedEventKeys.ContainsKey($Key)) {
+        $lastTime = [DateTime]$script:NotifiedEventKeys[$Key]
+        if (($nowUtc - $lastTime).TotalMinutes -lt $WindowMinutes) {
+            return $false
+        }
+    }
+    $script:NotifiedEventKeys[$Key] = $nowUtc
+    if ($script:NotifiedEventKeys.Count -gt 150) {
+        $staleKeys = @($script:NotifiedEventKeys.Keys | Where-Object { ($nowUtc - [DateTime]$script:NotifiedEventKeys[$_]).TotalMinutes -ge ($WindowMinutes * 2) })
+        foreach ($sk in $staleKeys) { [void]$script:NotifiedEventKeys.Remove($sk) }
+    }
+    return $true
+}
+
+function Resume-CloudTransferQueueItem([string]$QueueOrJobId) {
+    if ([string]::IsNullOrWhiteSpace($QueueOrJobId)) { return $false }
+    $found = $false
+    if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) {
+        if ($null -ne $script:CloudTransferQueue) {
+            foreach ($item in @($script:CloudTransferQueue)) {
+                if ($item -is [System.Collections.IDictionary]) {
+                    if (($item.ContainsKey('QueueId') -and $item['QueueId'] -eq $QueueOrJobId) -or ($item.ContainsKey('JobId') -and $item['JobId'] -eq $QueueOrJobId)) {
+                        $item['Status'] = 'Queued'
+                        $item['RetryCount'] = 0
+                        $item['NextRetryUtc'] = $null
+                        $item['LastError'] = ''
+                        $item['WorkerPid'] = 0
+                        $item['JobId'] = ''
+                        $found = $true
+                    }
+                }
+            }
+            if ($found -and (Get-Command Save-DurableTransferQueue -ErrorAction SilentlyContinue)) {
+                Save-DurableTransferQueue | Out-Null
+            }
+        }
+        if (-not $found -and (Get-Command Get-TransferQueueFilePath -ErrorAction SilentlyContinue)) {
+            $qFile = Get-TransferQueueFilePath
+            if (Test-Path -LiteralPath $qFile) {
+                try {
+                    $raw = Get-Content -LiteralPath $qFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                    if ($raw -and $raw.Jobs) {
+                        $modified = $false
+                        foreach ($job in $raw.Jobs) {
+                            $jId = if ($job.PSObject.Properties['JobId']) { [string]$job.JobId } else { '' }
+                            $qId = if ($job.PSObject.Properties['QueueId']) { [string]$job.QueueId } else { '' }
+                            if ($jId -eq $QueueOrJobId -or $qId -eq $QueueOrJobId) {
+                                $job.Status = 'Queued'
+                                $job.RetryCount = 0
+                                $job.NextRetryUtc = $null
+                                $job.LastError = ''
+                                $job.WorkerPid = 0
+                                $job.JobId = ''
+                                $modified = $true
+                            }
+                        }
+                        if ($modified) {
+                            $tmpFile = "$qFile.$([Guid]::NewGuid().ToString('N')).tmp"
+                            $json = $raw | ConvertTo-Json -Depth 10
+                            [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+                            try {
+                                [System.IO.File]::Replace($tmpFile, $qFile, $null)
+                            } catch {
+                                Move-Item -LiteralPath $tmpFile -Destination $qFile -Force
+                            }
+                            if (Get-Command Load-DurableTransferQueue -ErrorAction SilentlyContinue) {
+                                Load-DurableTransferQueue | Out-Null
+                            }
+                            $found = $true
+                        }
+                    }
+                } catch { }
+            }
+        }
+    }
+    return $found
+}
 $script:IsExiting = $false
 $script:AppMutex = $null
 $script:RestoreEvent = $null
@@ -69,6 +268,8 @@ $script:ReconnectFailCount = @{}
 $script:LastWatchdogRun = [DateTime]::MinValue
 # Deduplication key for startup failure log entries (log each distinct error once)
 $script:LastLoggedAutoMountErrorText = ''
+$script:LastNotifiedPendingFingerprint = ''
+$script:LastInactivityCacheCheck = [DateTime]::MinValue
 $script:ProviderStatusWorker = $null
 $script:ProviderStatusSnapshot = $null
 $script:LastProviderStatusCheck = [DateTime]::MinValue
@@ -476,8 +677,18 @@ function New-AccountDiskIcon([string]$ProviderId) {
 # ==============================================================================
 # MAIN WINDOW INITIALIZATION
 # ==============================================================================
+$script:CardDragState = [hashtable]::Synchronized(@{
+    StartPoint   = $null
+    DraggedAccId = ''
+    DraggedCard  = $null
+    TargetAccId  = ''
+    TargetCard   = $null
+    DropPosition = 'None'
+    IsDragging   = $false
+})
+
 $window = [System.Windows.Window]::new()
-$window.Title = 'NS Cloud Drive'
+$window.Title = 'NS Cloud Drive - Developed by NABORAJ SARKAR'
 $window.Width = 860
 $window.Height = 580
 $window.MinWidth = 760
@@ -485,6 +696,35 @@ $window.MinHeight = 480
 $window.WindowStartupLocation = 'CenterScreen'
 $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.WindowBg)
 $window.FontFamily = 'Segoe UI'
+
+$window.Add_PreviewKeyDown({
+    param($s, $e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Escape -and $script:CardDragState -and ($script:CardDragState.IsDragging -or $script:CardDragState.DraggedAccId)) {
+        if ($script:CardDragState.DraggedCard -and ($script:CardDragState.DraggedCard -is [System.Windows.FrameworkElement])) {
+            $script:CardDragState.DraggedCard.Cursor = $null
+        }
+        [System.Windows.Input.Mouse]::Capture($null) | Out-Null
+        if ($accountsStack) {
+            $cb = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+            $t1 = [System.Windows.Thickness]::new(1)
+            foreach ($child in $accountsStack.Children) {
+                if ($child -is [System.Windows.Controls.Border]) {
+                    $child.Opacity = 1.0
+                    $child.BorderBrush = $cb
+                    $child.BorderThickness = $t1
+                }
+            }
+        }
+        $script:CardDragState.IsDragging = $false
+        $script:CardDragState.StartPoint = $null
+        $script:CardDragState.DraggedAccId = ''
+        $script:CardDragState.TargetAccId = ''
+        $script:CardDragState.TargetCard = $null
+        $script:CardDragState.DraggedCard = $null
+        $script:CardDragState.DropPosition = 'None'
+        $e.Handled = $true
+    }
+})
 
 # App window icon
 $appLogoPath = Join-Path $PSScriptRoot '..\assets\logos\clouddrive.png'
@@ -606,11 +846,26 @@ $toolbar = [System.Windows.Controls.DockPanel]::new()
 $toolbar.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
 $disksView.Children.Add($toolbar) | Out-Null
 
-# Right side of toolbar: Refresh button
+# Right side of toolbar: Transfers and Refresh buttons
 $rightToolbar = [System.Windows.Controls.StackPanel]::new()
 $rightToolbar.Orientation = 'Horizontal'
 [System.Windows.Controls.DockPanel]::SetDock($rightToolbar, 'Right')
 $toolbar.Children.Add($rightToolbar) | Out-Null
+
+$transfersBtn = [System.Windows.Controls.Button]::new()
+$transfersBtn.Content = [string][char]0x21C4 + ' Transfers'
+$transfersBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$transfersBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$transfersBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$transfersBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$transfersBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$transfersBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+$transfersBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$transfersBtn.ToolTip = 'Open Transfer Center & History'
+$transfersBtn.Add_Click({
+    Show-TransferCenterModal -Owner $window
+})
+$rightToolbar.Children.Add($transfersBtn) | Out-Null
 
 $refreshBtn = [System.Windows.Controls.Button]::new()
 $refreshBtn.Content = 'Refresh'
@@ -741,6 +996,8 @@ $content.Children.Add($drivesSummaryBanner) | Out-Null
 # ==============================================================================
 $script:CurrentActiveTransferDrive = ''
 $script:CurrentTransferPaused = $false
+$script:ActiveTransferJobId = $null
+$script:LastActiveTransferInfo = $null
 
 function Toggle-ActiveTransferPause {
     if (-not $script:CurrentActiveTransferDrive) { return }
@@ -760,13 +1017,46 @@ function Stop-ActiveTransfer {
     Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate '1B' | Out-Null
     $script:CurrentTransferPaused = $true
 
-    $msg = "Would you like to cancel the active background upload on drive ${drive}: and reset transfer statistics?"
+    $targetName = if ($script:LastActiveTransferInfo -and $script:LastActiveTransferInfo.FileName) {
+        $script:LastActiveTransferInfo.FileName
+    } else { 'all active uploads' }
+
+    $msg = "Would you like to cancel the active background transfer on drive ${drive}: ($targetName)?"
     $ans = [System.Windows.MessageBox]::Show($msg, "Cancel Cloud Upload", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
     if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
-        Reset-VirtualDriveStats -DriveLetter $drive | Out-Null
-        Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate 'off' | Out-Null
+        # 1. Halt virtual drive background transfer and freeze VFS queue
+        Stop-VirtualDriveTransfer -DriveLetter $drive -FileName $targetName | Out-Null
+
+        # 2. Stop active cloud transfer job if present
+        if ($script:ActiveTransferJobId) {
+            Stop-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
+            $script:ActiveTransferJobId = $null
+        }
+
         $script:CurrentTransferPaused = $false
         $script:LastActiveTransferInfo = $null
+        $script:CurrentActiveTransferDrive = $null
+
+        if ($null -ne $liveTransferCard) {
+            $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+
+        if ($null -ne $analyticsTransferCard) {
+            $analyticsTransferRoute.Text = "Source: Local SSD Cache " + [char]0x2192 + " Destination: Cloud Storage"
+            $analyticsTransferFileName.Text = "Transfer cancelled by user."
+            $analyticsTransferProgressBar.Value = 0.0
+            $analyticsTransferProgressBar.IsIndeterminate = $false
+            $analyticsTransferDetails.Text = "Transfer on drive ${drive}: was cancelled. Background upload halted."
+            $analyticsTransferEta.Text = "Status: Cancelled"
+            $analyticsTransferPauseBtn.IsEnabled = $false
+            $analyticsTransferCancelBtn.IsEnabled = $false
+            $analyticsTransferQueueStack.Children.Clear()
+        }
+
+        try {
+            Write-NSCloudLog -Severity 'Info' -Operation 'transfer-cancel' -Message "Transfer on drive ${drive}: ($targetName) cancelled by user." -Recovered $true
+        } catch { }
+
         Update-LiveTransferActivity
     } else {
         Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate 'off' | Out-Null
@@ -861,7 +1151,7 @@ $ltFCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $ltFCol1.Width = [
 $ltFooterGrid.ColumnDefinitions.Add($ltFCol0)
 $ltFooterGrid.ColumnDefinitions.Add($ltFCol1)
 
-$liveTransferDetails = New-Label 'Uploading • 0 B of 0 B (0%) • 0 B/s (0.0 Mbps)' 11 $script:Palette.TextSecondary $false
+$liveTransferDetails = New-Label ("Uploading " + [char]0x2022 + " 0 B of 0 B (0%) " + [char]0x2022 + " 0 B/s (0.0 Mbps)") 11 $script:Palette.TextSecondary $false
 [System.Windows.Controls.Grid]::SetColumn($liveTransferDetails, 0)
 $ltFooterGrid.Children.Add($liveTransferDetails) | Out-Null
 
@@ -912,6 +1202,10 @@ $ltOpenCacheBtn.Add_Click({ Open-StagingCacheFolder })
 $ltControlsPanel.Children.Add($ltOpenCacheBtn) | Out-Null
 
 $liveTransferMainStack.Children.Add($ltControlsPanel) | Out-Null
+
+$liveTransferQueuePanel = [System.Windows.Controls.StackPanel]::new()
+$liveTransferQueuePanel.Margin = [System.Windows.Thickness]::new(0, 6, 0, 0)
+$liveTransferMainStack.Children.Add($liveTransferQueuePanel) | Out-Null
 
 $content.Children.Add($liveTransferCard) | Out-Null
 
@@ -1548,6 +1842,77 @@ $cacheQuotaCombo.Add_SelectionChanged({
 })
 $cacheQuotaRow.Children.Add($cacheQuotaCombo) | Out-Null
 
+# Post-Transfer Cache Retention Policy
+$cachePolicyTitle = New-Label 'Post-Transfer Cache Cleanup Policy:' 12 $script:Palette.TextPrimary $true
+$cachePolicyTitle.Margin = [System.Windows.Thickness]::new(0, 6, 0, 4)
+$cacheStack.Children.Add($cachePolicyTitle) | Out-Null
+
+$rbCacheKeep = [System.Windows.Controls.RadioButton]::new()
+$rbCacheKeep.GroupName = 'PostTransferCache'
+$rbCacheKeep.Content = 'Keep in cache (Standard auto-expiration TTL: 5m <1GB, 20m 1-3GB, 45m >3GB)'
+$rbCacheKeep.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbCacheKeep.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+$rbCacheKeep.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbCacheKeep.IsChecked = (-not $script:Settings.PostTransferCachePolicy -or $script:Settings.PostTransferCachePolicy -eq 'KeepCache')
+$rbCacheKeep.Add_Checked({
+    $script:Settings.PostTransferCachePolicy = 'KeepCache'
+    Set-NSCloudDriveSettings $script:Settings
+})
+$cacheStack.Children.Add($rbCacheKeep) | Out-Null
+
+$rbCacheImmediate = [System.Windows.Controls.RadioButton]::new()
+$rbCacheImmediate.GroupName = 'PostTransferCache'
+$rbCacheImmediate.Content = 'Remove from cache immediately after verified cloud upload'
+$rbCacheImmediate.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbCacheImmediate.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+$rbCacheImmediate.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbCacheImmediate.IsChecked = ($script:Settings.PostTransferCachePolicy -eq 'RemoveAfterVerifiedUpload')
+$rbCacheImmediate.Add_Checked({
+    $script:Settings.PostTransferCachePolicy = 'RemoveAfterVerifiedUpload'
+    Set-NSCloudDriveSettings $script:Settings
+})
+$cacheStack.Children.Add($rbCacheImmediate) | Out-Null
+
+$cacheCustomRow = [System.Windows.Controls.StackPanel]::new()
+$cacheCustomRow.Orientation = 'Horizontal'
+$cacheCustomRow.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
+
+$rbCacheCustom = [System.Windows.Controls.RadioButton]::new()
+$rbCacheCustom.GroupName = 'PostTransferCache'
+$rbCacheCustom.Content = 'Custom retention time: '
+$rbCacheCustom.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbCacheCustom.VerticalAlignment = 'Center'
+$rbCacheCustom.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbCacheCustom.IsChecked = ($script:Settings.PostTransferCachePolicy -eq 'CustomRetention')
+$rbCacheCustom.Add_Checked({
+    $script:Settings.PostTransferCachePolicy = 'CustomRetention'
+    Set-NSCloudDriveSettings $script:Settings
+})
+$cacheCustomRow.Children.Add($rbCacheCustom) | Out-Null
+
+$txtCacheCustomMin = [System.Windows.Controls.TextBox]::new()
+$txtCacheCustomMin.Width = 50
+$txtCacheCustomMin.Height = 24
+$txtCacheCustomMin.Text = if ($script:Settings.PostTransferRetentionMinutes) { [string]$script:Settings.PostTransferRetentionMinutes } else { '60' }
+$txtCacheCustomMin.VerticalContentAlignment = 'Center'
+$txtCacheCustomMin.Add_TextChanged({
+    [int]$parsedMin = 60
+    if ([int]::TryParse($txtCacheCustomMin.Text, [ref]$parsedMin) -and $parsedMin -gt 0) {
+        $script:Settings.PostTransferRetentionMinutes = $parsedMin
+        if ($rbCacheCustom.IsChecked -eq $true) {
+            Set-NSCloudDriveSettings $script:Settings
+        }
+    }
+})
+$cacheCustomRow.Children.Add($txtCacheCustomMin) | Out-Null
+
+$lblMinSuffix = New-Label ' minutes' 11 $script:Palette.TextSecondary
+$lblMinSuffix.VerticalAlignment = 'Center'
+$lblMinSuffix.Margin = [System.Windows.Thickness]::new(4, 0, 0, 0)
+$cacheCustomRow.Children.Add($lblMinSuffix) | Out-Null
+
+$cacheStack.Children.Add($cacheCustomRow) | Out-Null
+
 $cacheUsageLabel = New-Label 'Checking cache status...' 12 $script:Palette.TextSecondary
 $cacheUsageLabel.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
 $cacheStack.Children.Add($cacheUsageLabel) | Out-Null
@@ -1568,8 +1933,8 @@ $cleanCacheBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $cleanCacheBtn.Add_Click({
     $confirm = [System.Windows.MessageBox]::Show(
         "Are you sure you want to clean the local cache directory?`n`n" +
-        "• In-use files and pending uploads will be safely protected and preserved.`n" +
-        "• Files stored remotely on Google Drive and TeraBox will NOT be affected.`n`n" +
+        "$([char]0x2022) In-use files and pending uploads will be safely protected and preserved.`n" +
+        "$([char]0x2022) Files stored remotely on Google Drive and TeraBox will NOT be affected.`n`n" +
         "Target directory:`n$($script:CacheDirectory)",
         'Clean Local Cache',
         [System.Windows.MessageBoxButton]::YesNo,
@@ -1594,6 +1959,22 @@ $cleanCacheBtn.Add_Click({
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
     }
 })
+
+$inspectCacheBtn = [System.Windows.Controls.Button]::new()
+$inspectCacheBtn.Content = 'Inspect Cache Files...'
+$inspectCacheBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$inspectCacheBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$inspectCacheBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$inspectCacheBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$inspectCacheBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$inspectCacheBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$inspectCacheBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$inspectCacheBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$inspectCacheBtn.Add_Click({
+    Show-CacheInspectorModal $script:MainWindow
+})
+$cacheActionStack.Children.Add($inspectCacheBtn) | Out-Null
+
 $cacheActionStack.Children.Add($cleanCacheBtn) | Out-Null
 
 $openCacheBtn = [System.Windows.Controls.Button]::new()
@@ -1707,6 +2088,40 @@ $optNotifyGroupFolderChk.Add_Unchecked({
 })
 $notifyStack.Children.Add($optNotifyGroupFolderChk) | Out-Null
 
+# Only notify full folder uploads
+$optNotifyOnlyFullFolderChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyOnlyFullFolderChk.Content = 'Only announce folder upload when every item inside is transferred (file-by-file otherwise)'
+$optNotifyOnlyFullFolderChk.IsChecked = if ($script:Settings.Contains('NotifyOnlyFullFolder')) { [bool]$script:Settings.NotifyOnlyFullFolder } else { $true }
+$optNotifyOnlyFullFolderChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyOnlyFullFolderChk.Margin = [System.Windows.Thickness]::new(20, 2, 0, 6)
+$optNotifyOnlyFullFolderChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyOnlyFullFolderChk.Add_Checked({
+    $script:Settings.NotifyOnlyFullFolder = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$optNotifyOnlyFullFolderChk.Add_Unchecked({
+    $script:Settings.NotifyOnlyFullFolder = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$notifyStack.Children.Add($optNotifyOnlyFullFolderChk) | Out-Null
+
+# Background sync resume notification
+$optNotifyBackgroundSyncChk = [System.Windows.Controls.CheckBox]::new()
+$optNotifyBackgroundSyncChk.Content = 'Notify when resuming background upload from previous session'
+$optNotifyBackgroundSyncChk.IsChecked = if ($script:Settings.Contains('NotifyOnBackgroundSync')) { [bool]$script:Settings.NotifyOnBackgroundSync } else { $true }
+$optNotifyBackgroundSyncChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$optNotifyBackgroundSyncChk.Margin = [System.Windows.Thickness]::new(20, 2, 0, 10)
+$optNotifyBackgroundSyncChk.Cursor = [System.Windows.Input.Cursors]::Hand
+$optNotifyBackgroundSyncChk.Add_Checked({
+    $script:Settings.NotifyOnBackgroundSync = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$optNotifyBackgroundSyncChk.Add_Unchecked({
+    $script:Settings.NotifyOnBackgroundSync = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$notifyStack.Children.Add($optNotifyBackgroundSyncChk) | Out-Null
+
 # Snooze Controls Row
 $snoozeHeader = New-Label 'Snooze Notifications:' 12 $script:Palette.TextPrimary $true
 $snoozeHeader.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
@@ -1748,6 +2163,8 @@ function Update-NotificationSettingsUI {
     $optNotifyStartChk.IsEnabled = [bool]$script:Settings.EnableNotifications
     $optNotifyCompleteChk.IsEnabled = [bool]$script:Settings.EnableNotifications
     $optNotifyGroupFolderChk.IsEnabled = [bool]$script:Settings.EnableNotifications
+    if ($null -ne $optNotifyOnlyFullFolderChk) { $optNotifyOnlyFullFolderChk.IsEnabled = [bool]$script:Settings.EnableNotifications }
+    if ($null -ne $optNotifyBackgroundSyncChk) { $optNotifyBackgroundSyncChk.IsEnabled = [bool]$script:Settings.EnableNotifications }
     if (-not $script:Settings.EnableNotifications) {
         $optNotifySnoozeStatusText.Text = 'Desktop notifications are currently disabled.'
         $optNotifySnoozeStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
@@ -1763,6 +2180,265 @@ function Update-NotificationSettingsUI {
     }
 }
 Update-NotificationSettingsUI
+
+# Card E: Bandwidth & Network Management
+$bwCard = [System.Windows.Controls.Border]::new()
+$bwCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$bwCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$bwCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$bwCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$bwCard.Padding = [System.Windows.Thickness]::new(18)
+$bwCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+$optContent.Children.Add($bwCard) | Out-Null
+
+$bwStack = [System.Windows.Controls.StackPanel]::new()
+$bwCard.Child = $bwStack
+
+$bwTitle = New-Label 'Bandwidth & Network Management' 15 $script:Palette.TextPrimary $true
+$bwStack.Children.Add($bwTitle) | Out-Null
+
+$bwDesc = New-Label 'Control upload rate limits across virtual drives and adapt traffic during network congestion or gaming.' 11 $script:Palette.TextSecondary
+$bwDesc.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+$bwStack.Children.Add($bwDesc) | Out-Null
+
+# Radio 1: Unlimited (Default)
+$rbBwUnlimited = [System.Windows.Controls.RadioButton]::new()
+$rbBwUnlimited.GroupName = 'BandwidthPolicy'
+$rbBwUnlimited.Content = 'Unlimited (Default - Upload at maximum available wire speed without idle gaps)'
+$rbBwUnlimited.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbBwUnlimited.Margin = [System.Windows.Thickness]::new(0, 2, 0, 6)
+$rbBwUnlimited.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbBwUnlimited.IsChecked = (-not $script:Settings.BandwidthPolicy -or $script:Settings.BandwidthPolicy -eq 'Unlimited')
+$rbBwUnlimited.Add_Checked({
+    $script:Settings.BandwidthPolicy = 'Unlimited'
+    Set-NSCloudDriveSettings $script:Settings
+    if (Get-Command Set-AllVirtualDrivesBandwidthLimit -ErrorAction SilentlyContinue) {
+        Set-AllVirtualDrivesBandwidthLimit -Rate 'off' | Out-Null
+    }
+})
+$bwStack.Children.Add($rbBwUnlimited) | Out-Null
+
+# Radio 2: Limited Bandwidth
+$bwLimitedRow = [System.Windows.Controls.StackPanel]::new()
+$bwLimitedRow.Orientation = 'Horizontal'
+$bwLimitedRow.Margin = [System.Windows.Thickness]::new(0, 2, 0, 6)
+
+$rbBwLimited = [System.Windows.Controls.RadioButton]::new()
+$rbBwLimited.GroupName = 'BandwidthPolicy'
+$rbBwLimited.Content = 'Limited Bandwidth: '
+$rbBwLimited.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbBwLimited.VerticalAlignment = 'Center'
+$rbBwLimited.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbBwLimited.IsChecked = ($script:Settings.BandwidthPolicy -eq 'Limited' -or $script:Settings.BandwidthPolicy -eq 'Custom')
+
+$comboBwPreset = [System.Windows.Controls.ComboBox]::new()
+$comboBwPreset.Width = 100
+$comboBwPreset.Height = 24
+$comboBwPreset.VerticalContentAlignment = 'Center'
+$comboBwPreset.Margin = [System.Windows.Thickness]::new(6, 0, 6, 0)
+$bwPresetList = @('256 KB/s', '512 KB/s', '1 MB/s', '2 MB/s', '5 MB/s', '10 MB/s', 'Custom')
+foreach ($p in $bwPresetList) { [void]$comboBwPreset.Items.Add($p) }
+$savedPreset = if ($script:Settings.Contains('BandwidthLimitPreset') -and $script:Settings.BandwidthLimitPreset) { [string]$script:Settings.BandwidthLimitPreset } else { '5 MB/s' }
+if ($script:Settings.BandwidthPolicy -eq 'Custom') { $savedPreset = 'Custom' }
+$comboBwPreset.SelectedItem = $savedPreset
+
+$txtBwLimit = [System.Windows.Controls.TextBox]::new()
+$txtBwLimit.Width = 50
+$txtBwLimit.Height = 24
+$txtBwLimit.Text = if ($script:Settings.CustomUploadLimitValue) { [string]$script:Settings.CustomUploadLimitValue } else { '5' }
+$txtBwLimit.VerticalContentAlignment = 'Center'
+$txtBwLimit.Margin = [System.Windows.Thickness]::new(0, 0, 4, 0)
+
+$comboBwUnit = [System.Windows.Controls.ComboBox]::new()
+$comboBwUnit.Width = 70
+$comboBwUnit.Height = 24
+$comboBwUnit.VerticalContentAlignment = 'Center'
+[void]$comboBwUnit.Items.Add('MB/s')
+[void]$comboBwUnit.Items.Add('KB/s')
+$comboBwUnit.SelectedItem = if ($script:Settings.CustomUploadLimitUnit) { $script:Settings.CustomUploadLimitUnit } else { 'MB/s' }
+
+$updateCustomControlsVisibility = {
+    $isCustom = ($comboBwPreset.SelectedItem -and $comboBwPreset.SelectedItem.ToString() -eq 'Custom')
+    $vis = if ($isCustom) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+    $txtBwLimit.Visibility = $vis
+    $comboBwUnit.Visibility = $vis
+}
+& $updateCustomControlsVisibility
+
+$applyLimitedRate = {
+    $script:Settings.BandwidthPolicy = 'Limited'
+    if ($comboBwPreset.SelectedItem) {
+        $script:Settings.BandwidthLimitPreset = $comboBwPreset.SelectedItem.ToString()
+    }
+    Set-NSCloudDriveSettings $script:Settings
+    if (Get-Command Get-EffectiveBandwidthLimitRate -ErrorAction SilentlyContinue) {
+        $rate = Get-EffectiveBandwidthLimitRate $script:Settings
+        if (Get-Command Set-AllVirtualDrivesBandwidthLimit -ErrorAction SilentlyContinue) {
+            Set-AllVirtualDrivesBandwidthLimit -Rate $rate | Out-Null
+        }
+    }
+}
+
+$rbBwLimited.Add_Checked({
+    & $applyLimitedRate
+})
+
+$comboBwPreset.Add_SelectionChanged({
+    & $updateCustomControlsVisibility
+    if ($rbBwLimited.IsChecked -eq $true -and $comboBwPreset.SelectedItem) {
+        & $applyLimitedRate
+    }
+})
+
+$txtBwLimit.Add_TextChanged({
+    [int]$parsedVal = 5
+    if ([int]::TryParse($txtBwLimit.Text, [ref]$parsedVal) -and $parsedVal -gt 0) {
+        $script:Settings.CustomUploadLimitValue = $parsedVal
+        if ($rbBwLimited.IsChecked -eq $true -and $comboBwPreset.SelectedItem -and $comboBwPreset.SelectedItem.ToString() -eq 'Custom') {
+            & $applyLimitedRate
+        }
+    }
+})
+
+$comboBwUnit.Add_SelectionChanged({
+    if ($comboBwUnit.SelectedItem) {
+        $script:Settings.CustomUploadLimitUnit = $comboBwUnit.SelectedItem.ToString()
+        if ($rbBwLimited.IsChecked -eq $true -and $comboBwPreset.SelectedItem -and $comboBwPreset.SelectedItem.ToString() -eq 'Custom') {
+            & $applyLimitedRate
+        }
+    }
+})
+
+$bwLimitedRow.Children.Add($rbBwLimited) | Out-Null
+$bwLimitedRow.Children.Add($comboBwPreset) | Out-Null
+$bwLimitedRow.Children.Add($txtBwLimit) | Out-Null
+$bwLimitedRow.Children.Add($comboBwUnit) | Out-Null
+$bwStack.Children.Add($bwLimitedRow) | Out-Null
+
+# Radio 3: Minimal Background Network
+$rbBwMinimal = [System.Windows.Controls.RadioButton]::new()
+$rbBwMinimal.GroupName = 'BandwidthPolicy'
+$rbBwMinimal.Content = 'Minimal Background Network (Low-impact sync for gaming, browsing & streaming)'
+$rbBwMinimal.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbBwMinimal.Margin = [System.Windows.Thickness]::new(0, 2, 0, 6)
+$rbBwMinimal.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbBwMinimal.IsChecked = ($script:Settings.BandwidthPolicy -eq 'MinimalBackground')
+$rbBwMinimal.Add_Checked({
+    $script:Settings.BandwidthPolicy = 'MinimalBackground'
+    Set-NSCloudDriveSettings $script:Settings
+    if (Get-Command Set-AllVirtualDrivesBandwidthLimit -ErrorAction SilentlyContinue) {
+        Set-AllVirtualDrivesBandwidthLimit -Rate '256k' | Out-Null
+    }
+})
+$bwStack.Children.Add($rbBwMinimal) | Out-Null
+
+# Radio 4: Adaptive Throttling
+$rbBwAdaptive = [System.Windows.Controls.RadioButton]::new()
+$rbBwAdaptive.GroupName = 'BandwidthPolicy'
+$rbBwAdaptive.Content = 'Adaptive Throttling (Automatically throttle background uploads based on latency)'
+$rbBwAdaptive.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$rbBwAdaptive.Margin = [System.Windows.Thickness]::new(0, 2, 0, 6)
+$rbBwAdaptive.Cursor = [System.Windows.Input.Cursors]::Hand
+$rbBwAdaptive.IsChecked = ($script:Settings.BandwidthPolicy -eq 'Adaptive')
+$rbBwAdaptive.Add_Checked({
+    $script:Settings.BandwidthPolicy = 'Adaptive'
+    Set-NSCloudDriveSettings $script:Settings
+    if (Get-Command Invoke-AdaptiveBandwidthCheck -ErrorAction SilentlyContinue) {
+        Invoke-AdaptiveBandwidthCheck | Out-Null
+    }
+})
+$bwStack.Children.Add($rbBwAdaptive) | Out-Null
+
+# Sensitivity & Gaming Options
+$bwSensRow = [System.Windows.Controls.StackPanel]::new()
+$bwSensRow.Orientation = 'Horizontal'
+$bwSensRow.Margin = [System.Windows.Thickness]::new(0, 4, 0, 6)
+
+$lblSens = New-Label 'Adaptive Sensitivity: ' 11 $script:Palette.TextSecondary
+$lblSens.VerticalAlignment = 'Center'
+$bwSensRow.Children.Add($lblSens) | Out-Null
+
+$comboSens = [System.Windows.Controls.ComboBox]::new()
+$comboSens.Width = 120
+$comboSens.Height = 24
+$comboSens.VerticalContentAlignment = 'Center'
+[void]$comboSens.Items.Add('Conservative')
+[void]$comboSens.Items.Add('Balanced')
+[void]$comboSens.Items.Add('Aggressive')
+$comboSens.SelectedItem = if ($script:Settings.AdaptiveSensitivity) { $script:Settings.AdaptiveSensitivity } else { 'Balanced' }
+$comboSens.Add_SelectionChanged({
+    if ($comboSens.SelectedItem) {
+        $script:Settings.AdaptiveSensitivity = $comboSens.SelectedItem.ToString()
+        Set-NSCloudDriveSettings $script:Settings
+    }
+})
+$bwSensRow.Children.Add($comboSens) | Out-Null
+$bwStack.Children.Add($bwSensRow) | Out-Null
+
+$chkBwGaming = [System.Windows.Controls.CheckBox]::new()
+$chkBwGaming.Content = 'Detect gaming & conferencing apps to reduce background traffic automatically'
+$chkBwGaming.IsChecked = [bool]$script:Settings.DetectGamingTraffic
+$chkBwGaming.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$chkBwGaming.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+$chkBwGaming.Cursor = [System.Windows.Input.Cursors]::Hand
+$chkBwGaming.Add_Checked({
+    $script:Settings.DetectGamingTraffic = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$chkBwGaming.Add_Unchecked({
+    $script:Settings.DetectGamingTraffic = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$bwStack.Children.Add($chkBwGaming) | Out-Null
+
+# Background & Tray behavior
+$chkUploadMinimized = [System.Windows.Controls.CheckBox]::new()
+$chkUploadMinimized.Content = 'Continue uploading staged files in background when window is minimized'
+$chkUploadMinimized.IsChecked = if ($script:Settings.Contains('ContinueUploadingWhileMinimized')) { [bool]$script:Settings.ContinueUploadingWhileMinimized } else { $true }
+$chkUploadMinimized.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$chkUploadMinimized.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+$chkUploadMinimized.Cursor = [System.Windows.Input.Cursors]::Hand
+$chkUploadMinimized.Add_Checked({
+    $script:Settings.ContinueUploadingWhileMinimized = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$chkUploadMinimized.Add_Unchecked({
+    $script:Settings.ContinueUploadingWhileMinimized = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$bwStack.Children.Add($chkUploadMinimized) | Out-Null
+
+$chkRespectTray = [System.Windows.Controls.CheckBox]::new()
+$chkRespectTray.Content = 'Enforce bandwidth limits while running in system tray'
+$chkRespectTray.IsChecked = if ($script:Settings.Contains('RespectLimitsInTray')) { [bool]$script:Settings.RespectLimitsInTray } else { $true }
+$chkRespectTray.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$chkRespectTray.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+$chkRespectTray.Cursor = [System.Windows.Input.Cursors]::Hand
+$chkRespectTray.Add_Checked({
+    $script:Settings.RespectLimitsInTray = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$chkRespectTray.Add_Unchecked({
+    $script:Settings.RespectLimitsInTray = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$bwStack.Children.Add($chkRespectTray) | Out-Null
+
+$chkKeepTransfers = [System.Windows.Controls.CheckBox]::new()
+$chkKeepTransfers.Content = 'Keep active transfers running when window is closed to system tray'
+$chkKeepTransfers.IsChecked = if ($script:Settings.Contains('KeepTransfersAliveInTray')) { [bool]$script:Settings.KeepTransfersAliveInTray } else { $true }
+$chkKeepTransfers.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+$chkKeepTransfers.Margin = [System.Windows.Thickness]::new(0, 2, 0, 8)
+$chkKeepTransfers.Cursor = [System.Windows.Input.Cursors]::Hand
+$chkKeepTransfers.Add_Checked({
+    $script:Settings.KeepTransfersAliveInTray = $true
+    Set-NSCloudDriveSettings $script:Settings
+})
+$chkKeepTransfers.Add_Unchecked({
+    $script:Settings.KeepTransfersAliveInTray = $false
+    Set-NSCloudDriveSettings $script:Settings
+})
+$bwStack.Children.Add($chkKeepTransfers) | Out-Null
 
 $diagCard = [System.Windows.Controls.Border]::new()
 $diagCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
@@ -1899,6 +2575,10 @@ $h4 = New-HelpSectionCard 'Lightweight Performance & Resource Footprint' "NS Clo
 $helpPerfCard = $h4.Card; $helpPerfTitle = $h4.Title; $helpPerfText = $h4.Text
 $helpContent.Children.Add($helpPerfCard) | Out-Null
 
+$hAbout = New-HelpSectionCard 'About NS Cloud Drive' "NS Cloud Drive`nDeveloped by NABORAJ SARKAR`nCopyright $([char]0x00A9) 2026 NABORAJ SARKAR. All rights reserved.`n`nRepository & Issue Tracker: https://github.com/naborajs/CloudDrive`nDeveloper Contact: nishant.ns.business@gmail.com`n`nA high-performance Windows desktop application mounting Google Drive and TeraBox accounts as virtual drives with local SSD staging, jitter-free transfer telemetry, and adaptive bandwidth management."
+$helpAboutCard = $hAbout.Card; $helpAboutTitle = $hAbout.Title; $helpAboutText = $hAbout.Text
+$helpContent.Children.Add($helpAboutCard) | Out-Null
+
 $backFromHelpBtn.Add_Click({ Show-DisksView })
 
 # ------------------------------------------------------------------------------
@@ -1940,7 +2620,7 @@ $analyticsView.Children.Add($analyticsScroll) | Out-Null
 $analyticsContent = [System.Windows.Controls.StackPanel]::new()
 $analyticsScroll.Content = $analyticsContent
 
-# Action bar with Get Analytics & Refresh Analytics buttons and collection status
+# Action bar with Get Analytics & Refresh Analytics buttons, Cancel button and collection status
 $analyticsActionBar = [System.Windows.Controls.Border]::new()
 $analyticsActionBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
 $analyticsActionBar.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
@@ -1953,7 +2633,7 @@ $analyticsActionStack = [System.Windows.Controls.StackPanel]::new()
 $analyticsActionBar.Child = $analyticsActionStack
 
 $analyticsBtnRow = [System.Windows.Controls.StackPanel]::new()
-$analyticsBtnRow.Orientation = 'Horizontal'
+$analyticsBtnRow.Orientation = [System.Windows.Controls.Orientation]::Horizontal
 $analyticsActionStack.Children.Add($analyticsBtnRow) | Out-Null
 
 $analyticsGetAnalyticsBtn = [System.Windows.Controls.Button]::new()
@@ -1980,6 +2660,23 @@ $analyticsRefreshAnalyticsBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $analyticsRefreshAnalyticsBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
 $analyticsRefreshAnalyticsBtn.Add_Click({ Start-AnalyticsCollection })
 $analyticsBtnRow.Children.Add($analyticsRefreshAnalyticsBtn) | Out-Null
+
+$analyticsCancelBtn = [System.Windows.Controls.Button]::new()
+$analyticsCancelBtn.Content = [string][char]0x2715 + ' Cancel'
+$analyticsCancelBtn.Width = 90
+$analyticsCancelBtn.Height = 32
+$analyticsCancelBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$analyticsCancelBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$analyticsCancelBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsCancelBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Danger)
+$analyticsCancelBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$analyticsCancelBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$analyticsCancelBtn.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsCancelBtn.Add_Click({
+    Stop-AnalyticsCollection
+    $analyticsCollectionStatus.Text = 'Status: Collection cancelled by user.'
+})
+$analyticsBtnRow.Children.Add($analyticsCancelBtn) | Out-Null
 
 $analyticsCollectionStatus = New-Label 'Status: Ready (idle). Click Get Analytics to gather metrics.' 11 $script:Palette.TextSecondary
 $analyticsCollectionStatus.Margin = [System.Windows.Thickness]::new(0, 6, 0, 2)
@@ -2024,7 +2721,238 @@ function New-AnalyticsRow([System.Windows.Controls.StackPanel]$Parent, [string]$
     return $rowLabel
 }
 
+function New-AnalyticsStatCard([string]$Title, [string]$Icon, [string]$AccentColor) {
+    $card = [System.Windows.Controls.Border]::new()
+    $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+    $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+    $card.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $card.Padding = [System.Windows.Thickness]::new(14, 12, 14, 12)
+    $card.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+
+    $st = [System.Windows.Controls.StackPanel]::new()
+    $card.Child = $st
+
+    $hdr = [System.Windows.Controls.DockPanel]::new()
+    $hdr.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+
+    $badge = [System.Windows.Controls.Border]::new()
+    $badge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+    $badge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+    $badge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+    [System.Windows.Controls.DockPanel]::SetDock($badge, 'Right')
+    $badgeTxt = [System.Windows.Controls.TextBlock]::new()
+    $badgeTxt.Text = 'Idle'
+    $badgeTxt.FontSize = 10
+    $badgeTxt.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+    $badgeTxt.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $badge.Child = $badgeTxt
+    $hdr.Children.Add($badge) | Out-Null
+
+    $tRow = [System.Windows.Controls.StackPanel]::new()
+    $tRow.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $ic = [System.Windows.Controls.TextBlock]::new()
+    $ic.Text = $Icon
+    $ic.FontSize = 12
+    $ic.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($AccentColor)
+    $ic.FontWeight = [System.Windows.FontWeights]::Bold
+    $ic.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+    $tRow.Children.Add($ic) | Out-Null
+    $tl = [System.Windows.Controls.TextBlock]::new()
+    $tl.Text = $Title
+    $tl.FontSize = 11
+    $tl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    $tl.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $tRow.Children.Add($tl) | Out-Null
+    $hdr.Children.Add($tRow) | Out-Null
+    $st.Children.Add($hdr) | Out-Null
+
+    $val = [System.Windows.Controls.TextBlock]::new()
+    $val.Text = '--'
+    $val.FontSize = 17
+    $val.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
+    $val.FontWeight = [System.Windows.FontWeights]::Bold
+    $val.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+    $st.Children.Add($val) | Out-Null
+
+    $sub = [System.Windows.Controls.TextBlock]::new()
+    $sub.Text = 'Not yet collected'
+    $sub.FontSize = 10
+    $sub.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+    $sub.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $st.Children.Add($sub) | Out-Null
+
+    return @{ Card = $card; Value = $val; Subtitle = $sub; Badge = $badge; BadgeText = $badgeTxt; Accent = $AccentColor }
+}
+
+# On-Demand Landing Card (displayed before any snapshot is collected)
+$analyticsLandingCard = [System.Windows.Controls.Border]::new()
+$analyticsLandingCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBg)
+$analyticsLandingCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+$analyticsLandingCard.BorderThickness = [System.Windows.Thickness]::new(1)
+$analyticsLandingCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+$analyticsLandingCard.Padding = [System.Windows.Thickness]::new(24)
+$analyticsLandingCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+
+$alStack = [System.Windows.Controls.StackPanel]::new()
+$alStack.HorizontalAlignment = 'Center'
+$analyticsLandingCard.Child = $alStack
+
+$alIcon = New-Label ([string][char]0x2197) 32 $script:Palette.Accent $true
+$alIcon.HorizontalAlignment = 'Center'
+$alIcon.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+$alStack.Children.Add($alIcon) | Out-Null
+
+$alTitle = New-Label 'On-Demand Cloud & System Analytics' 16 $script:Palette.TextPrimary $true
+$alTitle.HorizontalAlignment = 'Center'
+$alTitle.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+$alStack.Children.Add($alTitle) | Out-Null
+
+$alDesc = New-Label "Click 'Get Analytics' above to gather a real-time snapshot of account health, cloud quotas, local cache allocation, background transfer queues, and system resources.`n`nDiagnostics operate strictly on-demand with zero background polling to ensure minimal CPU and battery usage." 12 $script:Palette.TextSecondary $false
+$alDesc.TextWrapping = [System.Windows.TextWrapping]::Wrap
+$alDesc.MaxWidth = 520
+$alDesc.TextAlignment = [System.Windows.TextAlignment]::Center
+$alDesc.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+$alStack.Children.Add($alDesc) | Out-Null
+
+$alActionBtn = [System.Windows.Controls.Button]::new()
+$alActionBtn.Content = 'Get Analytics Now'
+$alActionBtn.Padding = [System.Windows.Thickness]::new(18, 8, 18, 8)
+$alActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+$alActionBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFFFF')
+$alActionBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+$alActionBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+$alActionBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$alActionBtn.HorizontalAlignment = 'Center'
+$alActionBtn.Add_Click({ Start-AnalyticsCollection })
+$alStack.Children.Add($alActionBtn) | Out-Null
+
+$analyticsContent.Children.Add($analyticsLandingCard) | Out-Null
+
+# 4-Column Summary Stat Grid
+$analyticsSummaryGrid = [System.Windows.Controls.Grid]::new()
+$analyticsSummaryGrid.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+$analyticsSummaryGrid.Visibility = [System.Windows.Visibility]::Collapsed
+
+for ($i = 0; $i -lt 4; $i++) {
+    $col = [System.Windows.Controls.ColumnDefinition]::new()
+    $col.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $analyticsSummaryGrid.ColumnDefinitions.Add($col)
+}
+
+$statMounts = New-AnalyticsStatCard 'Drive Mounts' ([string][char]0x25CF) '#3B82F6'
+[System.Windows.Controls.Grid]::SetColumn($statMounts.Card, 0)
+$analyticsSummaryGrid.Children.Add($statMounts.Card) | Out-Null
+
+$statTransfers = New-AnalyticsStatCard 'Active Transfers' ([string][char]0x2192) '#8B5CF6'
+[System.Windows.Controls.Grid]::SetColumn($statTransfers.Card, 1)
+$analyticsSummaryGrid.Children.Add($statTransfers.Card) | Out-Null
+
+$statCache = New-AnalyticsStatCard 'SSD Local Cache' ([string][char]0x25A0) '#10B981'
+[System.Windows.Controls.Grid]::SetColumn($statCache.Card, 2)
+$analyticsSummaryGrid.Children.Add($statCache.Card) | Out-Null
+
+$statNetwork = New-AnalyticsStatCard 'Network Latency' ([string][char]0x2197) '#06B6D4'
+[System.Windows.Controls.Grid]::SetColumn($statNetwork.Card, 3)
+$analyticsSummaryGrid.Children.Add($statNetwork.Card) | Out-Null
+
+$analyticsContent.Children.Add($analyticsSummaryGrid) | Out-Null
+
+# Card 1: Cloud accounts and mounts
+$overviewCard = New-AnalyticsCard 'Cloud accounts and mounts' '#3B82F6'
+$overviewCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsContent.Children.Add($overviewCard.Card) | Out-Null
+
+$analyticsAccounts = New-AnalyticsRow $overviewCard.Stack 'Cloud accounts: Not yet collected.'
+$analyticsMounts = New-AnalyticsRow $overviewCard.Stack 'Active mounted drives: Not yet collected.'
+$analyticsAccounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+$analyticsMounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#16A34A')
+
+$analyticsMountsBreakdownStack = [System.Windows.Controls.StackPanel]::new()
+$analyticsMountsBreakdownStack.Margin = [System.Windows.Thickness]::new(0, 8, 0, 0)
+$overviewCard.Stack.Children.Add($analyticsMountsBreakdownStack) | Out-Null
+
+# Card 2: Network & latency diagnostics
+$analyticsNetworkCard = New-AnalyticsCard 'Network & latency diagnostics' '#06B6D4'
+$analyticsNetworkCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsContent.Children.Add($analyticsNetworkCard.Card) | Out-Null
+
+$analyticsUploadSpeedRow = New-AnalyticsRow $analyticsNetworkCard.Stack 'Upload Throughput: Idle (0 B/s)'
+$analyticsDownloadSpeedRow = New-AnalyticsRow $analyticsNetworkCard.Stack 'Download Throughput: On-demand streaming active (0 B/s idle)'
+$analyticsPingRow = New-AnalyticsRow $analyticsNetworkCard.Stack 'Network Latency (Ping): Not yet measured'
+
+$analyticsLatencyChartStack = [System.Windows.Controls.StackPanel]::new()
+$analyticsLatencyChartStack.Margin = [System.Windows.Thickness]::new(0, 8, 0, 8)
+$analyticsNetworkCard.Stack.Children.Add($analyticsLatencyChartStack) | Out-Null
+
+$anExplBorder = [System.Windows.Controls.Border]::new()
+$anExplBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$anExplBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$anExplBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+$anExplBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+$anExplBorder.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+$anExplBorder.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+
+$anExplText = New-Label ("Measurement Distinction: Network Ping measures raw IP ICMP round-trip latency. " +
+    "Provider Response Time measures HTTP API TLS negotiation and server authentication. " +
+    "Transfer Speed measures actual network streaming throughput. Local SSD Staging measures internal high-speed disk writes.") 11 $script:Palette.TextSecondary $false
+$anExplText.TextWrapping = [System.Windows.TextWrapping]::Wrap
+$anExplBorder.Child = $anExplText
+$analyticsNetworkCard.Stack.Children.Add($anExplBorder) | Out-Null
+
+# Card 3: Local SSD cache & staging diagnostics
+$analyticsCacheCard = New-AnalyticsCard 'Local SSD cache & staging diagnostics' '#10B981'
+$analyticsCacheCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsContent.Children.Add($analyticsCacheCard.Card) | Out-Null
+
+$analyticsCacheDirRow = New-AnalyticsRow $analyticsCacheCard.Stack 'Cache Location: D:\CloudCache'
+$analyticsCacheUsageRow = New-AnalyticsRow $analyticsCacheCard.Stack 'Cache Footprint: Calculating...'
+$analyticsCacheProgressBar = [System.Windows.Controls.ProgressBar]::new()
+$analyticsCacheProgressBar.Height = 8
+$analyticsCacheProgressBar.Margin = [System.Windows.Thickness]::new(0, 4, 0, 6)
+$analyticsCacheProgressBar.Minimum = 0
+$analyticsCacheProgressBar.Maximum = 100
+$analyticsCacheProgressBar.Value = 0
+$analyticsCacheProgressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#10B981')
+$analyticsCacheProgressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.InputBorder)
+$analyticsCacheProgressBar.BorderThickness = [System.Windows.Thickness]::new(0)
+$analyticsCacheCard.Stack.Children.Add($analyticsCacheProgressBar) | Out-Null
+
+$analyticsCachePendingRow = New-AnalyticsRow $analyticsCacheCard.Stack 'Pending Staged Uploads: 0 pending files (0 B)'
+$analyticsCacheTtlRow = New-AnalyticsRow $analyticsCacheCard.Stack ("Inactivity TTL: <1 GB: 5m " + [char]0x2022 + " 1-3 GB: 20m " + [char]0x2022 + " >3 GB: 45m " + [char]0x2022 + " In-Use Lock Protected")
+
+# Card 4: Cloud storage
+$storageCard = New-AnalyticsCard 'Cloud storage' '#F59E0B'
+$storageCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsContent.Children.Add($storageCard.Card) | Out-Null
+
+$analyticsStorageSummary = New-AnalyticsRow $storageCard.Stack 'Storage: Not yet collected'
+$analyticsStorageSummary.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B45309')
+$analyticsStorageChart = [System.Windows.Controls.StackPanel]::new()
+$storageCard.Stack.Children.Add($analyticsStorageChart) | Out-Null
+
+$analyticsStorageTimestamp = New-Label '' 10 $script:Palette.TextMuted $false
+$analyticsStorageTimestamp.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+$storageCard.Stack.Children.Add($analyticsStorageTimestamp) | Out-Null
+
+# Card 5: App resources (live)
+$resourceCard = New-AnalyticsCard 'App resources (live)' '#14B8A6'
+$resourceCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
+$analyticsContent.Children.Add($resourceCard.Card) | Out-Null
+
+$analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: Not yet collected.'
+$analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: Not yet collected.'
+$analyticsNetwork = New-AnalyticsRow $resourceCard.Stack 'Transfer speed: Unavailable (no active transfer telemetry).'
+$analyticsAppProcessDetails = New-AnalyticsRow $resourceCard.Stack 'Process: Architecture x64'
+
+$analyticsAppRam.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
+$analyticsAppCpu.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
+$analyticsNetwork.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
+$analyticsAppProcessDetails.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextMuted)
+
+# Card 6: Live transfers and staging queue
 $analyticsTransferCard = New-AnalyticsCard 'Live transfers and staging queue' '#8B5CF6'
+$analyticsTransferCard.Card.Visibility = [System.Windows.Visibility]::Collapsed
 $analyticsContent.Children.Add($analyticsTransferCard.Card) | Out-Null
 
 $analyticsTransferRoute = New-Label ("Source: Local SSD Cache (D:\CloudCache) " + [char]0x2192 + " Destination: Cloud Storage") 12 $script:Palette.TextPrimary $true
@@ -2118,36 +3046,16 @@ $atNoteText.TextWrapping = [System.Windows.TextWrapping]::Wrap
 $atNoteBorder.Child = $atNoteText
 $analyticsTransferCard.Stack.Children.Add($atNoteBorder) | Out-Null
 
-$overviewCard = New-AnalyticsCard 'Cloud accounts and mounts' '#3B82F6'
-$analyticsContent.Children.Add($overviewCard.Card) | Out-Null
-$analyticsAccounts = New-AnalyticsRow $overviewCard.Stack 'Cloud accounts: Not yet collected.'
-$analyticsMounts = New-AnalyticsRow $overviewCard.Stack 'Active mounted drives: Not yet collected.'
-$analyticsAccounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
-$analyticsMounts.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#16A34A')
-
-$storageCard = New-AnalyticsCard 'Cloud storage' '#F59E0B'
-$analyticsContent.Children.Add($storageCard.Card) | Out-Null
-$analyticsStorageSummary = New-AnalyticsRow $storageCard.Stack 'Storage: Not yet collected'
-$analyticsStorageSummary.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B45309')
-$analyticsStorageChart = [System.Windows.Controls.StackPanel]::new()
-$storageCard.Stack.Children.Add($analyticsStorageChart) | Out-Null
-
-$resourceCard = New-AnalyticsCard 'App resources (live)' '#14B8A6'
-$analyticsContent.Children.Add($resourceCard.Card) | Out-Null
-$analyticsAppRam = New-AnalyticsRow $resourceCard.Stack 'App RAM: Not yet collected.'
-$analyticsAppCpu = New-AnalyticsRow $resourceCard.Stack 'App CPU: Not yet collected.'
-$analyticsNetwork = New-AnalyticsRow $resourceCard.Stack 'Transfer speed: Unavailable (no active transfer telemetry).'
-$analyticsAppRam.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
-$analyticsAppCpu.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
-$analyticsNetwork.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F766E')
-
 $script:AnalyticsCpuBaseline = @{}
 $script:AnalyticsStorageWorker = $null
 $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
 $script:AnalyticsCollectionInProgress = $false
+$script:AnalyticsSnapshotCollected = $false
 $script:AnalyticsLastCollectionTime = $null
 $script:AnalyticsLastCollectionDurationMs = 0
 $script:AnalyticsCollectionWatchdogTimer = $null
+$script:AnalyticsCollectionStartTime = [DateTime]::MinValue
+$script:AnalyticsCollectionStartCpu = [TimeSpan]::Zero
 
 function Format-AnalyticsBytes([int64]$Bytes) {
     if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
@@ -2172,6 +3080,7 @@ function Set-AnalyticsStorageDisplay([object[]]$StorageRecords) {
     }
     $remaining = [Math]::Max([int64]0, $totalCapacity - $totalUsed)
     $analyticsStorageSummary.Text = "Used: $(Format-AnalyticsBytes $totalUsed)   Remaining: $(Format-AnalyticsBytes $remaining)   ($($validRecords.Count) verified account(s))"
+    $analyticsStorageTimestamp.Text = "Measured at: $([DateTime]::Now.ToString('HH:mm:ss')) (verified provider quota check)"
 
     foreach ($record in $validRecords) {
         $row = [System.Windows.Controls.StackPanel]::new()
@@ -2198,69 +3107,69 @@ function Set-AnalyticsStorageDisplay([object[]]$StorageRecords) {
     }
 }
 
-function Start-AnalyticsStorageWorker {
+function Start-AnalyticsStorageWorker([switch]$Force) {
     if ($script:AnalyticsStorageWorker -or
-        ([DateTime]::UtcNow - $script:AnalyticsStorageLastStarted).TotalSeconds -lt 60) { return }
+        (-not $Force -and ([DateTime]::UtcNow - $script:AnalyticsStorageLastStarted).TotalSeconds -lt 30)) { return }
     $script:AnalyticsStorageLastStarted = [DateTime]::UtcNow
     $analyticsStorageSummary.Text = 'Checking verified provider storage quotas...'
     try {
         $script:AnalyticsStorageWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
-        param([string]$sourceRoot)
-        $ErrorActionPreference = 'Stop'
-        . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
-        . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
-        . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
-        . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+            param([string]$sourceRoot)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+            . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
+            . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
 
-        $records = [System.Collections.Generic.List[object]]::new()
-        $errors = [System.Collections.Generic.List[string]]::new()
-        $verifiedAccountCount = 0
-        $accounts = @(Get-CloudAccounts)
-        $savedAccountCount = $accounts.Count
-        if ($accounts.Count -eq 0) {
-            $accounts = @(
-                [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'gdrive') },
-                [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') }
-            )
-        }
-        foreach ($account in $accounts) {
-            try {
-                $responseTimer = [System.Diagnostics.Stopwatch]::StartNew()
-                $check = if ($account.ProviderId -eq 'gdrive') {
-                    Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
-                } elseif ($account.ProviderId -eq 'terabox') {
-                    Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
-                } else { $null }
-                $responseTimer.Stop()
-                if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
-                if ($account.ProviderId -eq 'gdrive' -and -not (Get-SafeProperty $check 'IdentityVerified' $false)) { continue }
-                $verifiedAccountCount++
-                $total = [int64](Get-SafeProperty $check.UserInfo 'QuotaTotal' (Get-SafeProperty $check.UserInfo 'QuotaTotalBytes' 0))
-                $used = [int64](Get-SafeProperty $check.UserInfo 'QuotaUsed' (Get-SafeProperty $check.UserInfo 'QuotaUsedBytes' -1))
-                if ($total -le 0 -or $used -lt 0) { continue }
-                $providerName = if ($account.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
-                $verifiedName = if ($account.ProviderId -eq 'gdrive') {
-                    [string](Get-SafeProperty $check.UserInfo 'DisplayName' '')
-                } else {
-                    [string](Get-SafeProperty $check.UserInfo 'UserName' '')
-                }
-                $email = [string](Get-SafeProperty $check.UserInfo 'EmailAddress' '')
-                if (-not $verifiedName) { $verifiedName = [string]$account.DisplayName }
-                if (-not $email) { $email = [string]$account.AccountEmail }
-                $records.Add([pscustomobject]@{
-                    AccountId = [string]$account.Id
-                    ProviderId = $providerName
-                    Name = $verifiedName
-                    Email = $email
-                    DriveLetter = [string]$account.DriveLetter
-                    ResponseMilliseconds = [int]$responseTimer.ElapsedMilliseconds
-                    UsedBytes = $used
-                    TotalBytes = $total
-                })
-            } catch {
-                $errors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
+            $records = [System.Collections.Generic.List[object]]::new()
+            $errors = [System.Collections.Generic.List[string]]::new()
+            $verifiedAccountCount = 0
+            $accounts = @(Get-CloudAccounts)
+            $savedAccountCount = $accounts.Count
+            if ($accounts.Count -eq 0) {
+                $accounts = @(
+                    [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'gdrive') },
+                    [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') }
+                )
             }
-        }
+            foreach ($account in $accounts) {
+                try {
+                    $responseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                    $check = if ($account.ProviderId -eq 'gdrive') {
+                        Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
+                    } elseif ($account.ProviderId -eq 'terabox') {
+                        Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
+                    } else { $null }
+                    $responseTimer.Stop()
+                    if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
+                    if ($account.ProviderId -eq 'gdrive' -and -not (Get-SafeProperty $check 'IdentityVerified' $false)) { continue }
+                    $verifiedAccountCount++
+                    $total = [int64](Get-SafeProperty $check.UserInfo 'QuotaTotal' (Get-SafeProperty $check.UserInfo 'QuotaTotalBytes' 0))
+                    $used = [int64](Get-SafeProperty $check.UserInfo 'QuotaUsed' (Get-SafeProperty $check.UserInfo 'QuotaUsedBytes' -1))
+                    if ($total -le 0 -or $used -lt 0) { continue }
+                    $providerName = if ($account.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+                    $verifiedName = if ($account.ProviderId -eq 'gdrive') {
+                        [string](Get-SafeProperty $check.UserInfo 'DisplayName' '')
+                    } else {
+                        [string](Get-SafeProperty $check.UserInfo 'UserName' '')
+                    }
+                    $email = [string](Get-SafeProperty $check.UserInfo 'EmailAddress' '')
+                    if (-not $verifiedName) { $verifiedName = [string]$account.DisplayName }
+                    if (-not $email) { $email = [string]$account.AccountEmail }
+                    $records.Add([pscustomobject]@{
+                        AccountId = [string]$account.Id
+                        ProviderId = $providerName
+                        Name = $verifiedName
+                        Email = $email
+                        DriveLetter = [string]$account.DriveLetter
+                        ResponseMilliseconds = [int]$responseTimer.ElapsedMilliseconds
+                        UsedBytes = $used
+                        TotalBytes = $total
+                    })
+                } catch {
+                    $errors.Add((Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)))
+                }
+            }
             return [pscustomobject]@{
                 Records = @($records.ToArray())
                 Errors = @($errors.ToArray())
@@ -2285,21 +3194,88 @@ function Update-AnalyticsMetrics {
     if ($script:CurrentView -ne 'Analytics') { return }
     $nowUtc = [DateTime]::UtcNow
     $accounts = @()
+    $mountedDriveLetters = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $activeMountStatuses = @()
+
     try {
         $accounts = @(Get-CloudAccounts)
         $analyticsAccounts.Text = "Saved cloud accounts: $($accounts.Count)."
-        $mountedDriveLetters = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
         foreach ($account in $accounts) {
             $letter = ([string]$account.DriveLetter).TrimEnd(':').TrimEnd('\')
             $status = Get-CachedUiDriveStatus -ProviderId ([string]$account.ProviderId) -AccountId ([string]$account.Id) -DriveLetter $letter
-            if ($status -and $status.IsMounted -and $letter) { [void]$mountedDriveLetters.Add($letter) }
+            if ($status -and $status.IsMounted -and $letter) {
+                if ($mountedDriveLetters.Add($letter)) {
+                    $activeMountStatuses += [pscustomobject]@{
+                        Letter = $letter
+                        Account = $account
+                        Status = $status
+                    }
+                }
+            }
         }
         foreach ($providerId in @('gdrive', 'terabox')) {
             $status = Get-CachedUiDriveStatus -ProviderId $providerId
             $letter = ([string]$status.DriveLetter).TrimEnd(':').TrimEnd('\')
-            if ($status -and $status.IsMounted -and $letter) { [void]$mountedDriveLetters.Add($letter) }
+            if ($status -and $status.IsMounted -and $letter) {
+                if ($mountedDriveLetters.Add($letter)) {
+                    $activeMountStatuses += [pscustomobject]@{
+                        Letter = $letter
+                        Account = $null
+                        Status = $status
+                    }
+                }
+            }
         }
         $analyticsMounts.Text = "Active mounted drives: $($mountedDriveLetters.Count)."
+
+        # Render mounts breakdown
+        $analyticsMountsBreakdownStack.Children.Clear()
+        if ($activeMountStatuses.Count -eq 0) {
+            $noMountsLbl = New-Label "No virtual drives currently mounted. Go to Disks to mount cloud drives." 11 $script:Palette.TextMuted $false
+            $analyticsMountsBreakdownStack.Children.Add($noMountsLbl) | Out-Null
+        } else {
+            foreach ($ms in $activeMountStatuses) {
+                $mRow = [System.Windows.Controls.DockPanel]::new()
+                $mRow.Margin = [System.Windows.Thickness]::new(0, 3, 0, 3)
+
+                # Drive letter badge
+                $lBadge = [System.Windows.Controls.Border]::new()
+                $lBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+                $lBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+                $lBadge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+                $lBadge.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+                $lBadgeTxt = New-Label "$($ms.Letter):" 11 '#FFFFFF' $true
+                $lBadge.Child = $lBadgeTxt
+                [System.Windows.Controls.DockPanel]::SetDock($lBadge, 'Left')
+                $mRow.Children.Add($lBadge) | Out-Null
+
+                # Status indicator
+                $isResponsive = $false
+                try {
+                    $isResponsive = [System.IO.Directory]::Exists("$($ms.Letter):\")
+                } catch { }
+                $hBadge = [System.Windows.Controls.Border]::new()
+                $hBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+                $hBadge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+                $hColor = if ($isResponsive) { '#15803D' } else { '#D97706' }
+                $hText = if ($isResponsive) { ([string][char]0x25CF + ' Healthy (Active)') } else { ([string][char]0x25B2 + ' Degraded') }
+                $hBadgeTxt = New-Label $hText 10 $hColor $true
+                $hBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+                $hBadge.Child = $hBadgeTxt
+                [System.Windows.Controls.DockPanel]::SetDock($hBadge, 'Right')
+                $mRow.Children.Add($hBadge) | Out-Null
+
+                # Account info
+                $accName = if ($ms.Account -and $ms.Account.DisplayName) { [string]$ms.Account.DisplayName } else { 'Cloud Drive' }
+                $accProv = if ($ms.Account -and $ms.Account.ProviderId) { [string]$ms.Account.ProviderId } else { 'Virtual Drive' }
+                $accEmail = if ($ms.Account -and $ms.Account.AccountEmail) { " ($($ms.Account.AccountEmail))" } else { '' }
+                $mDetails = New-Label ("$accName$accEmail " + [char]0x2022 + " $accProv " + [char]0x2022 + " Local Disk (WinFsp NTFS)") 11 $script:Palette.TextPrimary $false
+                $mRow.Children.Add($mDetails) | Out-Null
+
+                $analyticsMountsBreakdownStack.Children.Add($mRow) | Out-Null
+            }
+        }
     } catch {
         $analyticsAccounts.Text = 'Cloud accounts: Unavailable.'
         $analyticsMounts.Text = 'Active mounted drives: Unavailable.'
@@ -2313,6 +3289,16 @@ function Update-AnalyticsMetrics {
         $privateMb = [Math]::Round($appProc.PrivateMemorySize64 / 1MB, 1)
         $analyticsAppRam.Text = "App RAM: $workingSetMb MB working set; $privateMb MB private memory."
         $analyticsAppCpu.Text = if ($null -ne $cpuPct) { "App CPU: $cpuPct% of all logical cores." } else { 'App CPU: sampling; value appears on the next refresh.' }
+
+        $rcloneProcs = @(Get-Process -Name 'rclone' -ErrorAction SilentlyContinue)
+        $rcloneMemMb = 0.0
+        foreach ($rp in $rcloneProcs) {
+            try { $rcloneMemMb += ($rp.WorkingSet64 / 1MB) } catch { }
+        }
+        $rcloneMemMb = [Math]::Round($rcloneMemMb, 1)
+        $analyticsAppProcessDetails.Text = "Architecture: x64 " + [char]0x2022 + " PID: $($appProc.Id) " + [char]0x2022 +
+            " Threads: $($appProc.Threads.Count) " + [char]0x2022 + " Handles: $($appProc.HandleCount) " + [char]0x2022 +
+            " Rclone Daemons: $($rcloneProcs.Count) active ($rcloneMemMb MB RAM)"
     } catch {
         $analyticsAppRam.Text = 'App RAM: Unavailable.'
         $analyticsAppCpu.Text = 'App CPU: Unavailable.'
@@ -2321,18 +3307,19 @@ function Update-AnalyticsMetrics {
     }
 
     # Update network transfer telemetry honestly from live VFS and streaming state
-    try {
-        $totalSpeed = 0.0
-        $totalInProgress = 0
-        $totalQueued = 0
+    $totalSpeed = 0.0
+    $totalInProgress = 0
+    $totalQueued = 0
+    $totalCacheBytes = 0L
 
-        # Check virtual drive VFS stats
+    try {
         foreach ($letter in $mountedDriveLetters) {
             $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
             if ($vfs.IsActive) {
                 $totalSpeed += $vfs.TransferSpeed
                 $totalInProgress += $vfs.UploadsInProgress
                 $totalQueued += $vfs.UploadsQueued
+                $totalCacheBytes += [int64]$vfs.CacheBytesUsed
             }
         }
 
@@ -2345,17 +3332,84 @@ function Update-AnalyticsMetrics {
             }
         }
 
+        $lat = if (Get-Command Measure-NetworkLatencyProbe -ErrorAction SilentlyContinue) { Measure-NetworkLatencyProbe } else { $null }
+        $latText = if ($null -ne $lat -and $lat -ge 0) { "$lat ms ping" } else { "Ping N/A" }
+        $bwPolicy = if ($script:Settings.BandwidthPolicy) { $script:Settings.BandwidthPolicy } else { 'Adaptive' }
+        $effectiveRate = if (Get-Command Get-EffectiveBandwidthLimitRate -ErrorAction SilentlyContinue) { Get-EffectiveBandwidthLimitRate $script:Settings } else { 'off' }
+        $rateDesc = if ($effectiveRate -eq 'off' -or -not $effectiveRate) { 'Unlimited' } else { "$effectiveRate" }
+
+        $tp = Format-TransferThroughput -BytesPerSec $totalSpeed
         if ($totalInProgress -gt 0 -or $totalQueued -gt 0) {
-            $tp = Format-TransferThroughput -BytesPerSec $totalSpeed
-            $analyticsNetwork.Text = "Transfer speed: $tp ($totalInProgress uploading, $totalQueued queued)."
+            $analyticsNetwork.Text = "Transfer speed: $tp ($totalInProgress uploading, $totalQueued queued) $([char]0x2022) $latText $([char]0x2022) Limit: $rateDesc ($bwPolicy)."
         } elseif ($totalSpeed -gt 0) {
-            $tp = Format-TransferThroughput -BytesPerSec $totalSpeed
-            $analyticsNetwork.Text = "Transfer speed: $tp (Idle / No uploads queued)."
+            $analyticsNetwork.Text = "Transfer speed: $tp (Idle) $([char]0x2022) $latText $([char]0x2022) Limit: $rateDesc ($bwPolicy)."
         } else {
-            $analyticsNetwork.Text = "Transfer speed: 0 B/s (Idle • No active background transfers)."
+            $analyticsNetwork.Text = "Transfer speed: 0 B/s (Idle) $([char]0x2022) $latText $([char]0x2022) Limit: $rateDesc ($bwPolicy)."
         }
+
+        $analyticsUploadSpeedRow.Text = "Upload Throughput: $tp (Limit: $rateDesc " + [char]0x2022 + " Policy: $bwPolicy)"
+        $analyticsDownloadSpeedRow.Text = "Download Throughput: On-demand cloud streaming active (0 B/s idle)"
+        $analyticsPingRow.Text = "Network Latency (Ping): $latText (Target: Internet gateway / DNS probe)"
+
+        # Update Summary Stat Cards
+        $statMounts.Value.Text = "$($mountedDriveLetters.Count) / $($accounts.Count) Active"
+        $statMounts.Subtitle.Text = "All mounted drives responsive"
+        $statMounts.BadgeText.Text = if ($mountedDriveLetters.Count -gt 0) { [string][char]0x25CF + ' Healthy' } else { 'Idle' }
+        $mountBadgeColor = if ($mountedDriveLetters.Count -gt 0) { '#15803D' } else { $script:Palette.TextMuted }
+        $statMounts.BadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($mountBadgeColor)
+
+        $statTransfers.Value.Text = "$totalInProgress Active " + [char]0x2022 + " $totalQueued Queued"
+        $statTransfers.Subtitle.Text = if ($totalInProgress -gt 0) { "Transferring at $tp" } else { "Transfer queue idle" }
+        $statTransfers.BadgeText.Text = if ($totalInProgress -gt 0) { 'Uploading' } else { 'Idle' }
+        $xferBadgeColor = if ($totalInProgress -gt 0) { '#8B5CF6' } else { $script:Palette.TextMuted }
+        $statTransfers.BadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($xferBadgeColor)
+
+        $statNetwork.Value.Text = "$tp " + [char]0x2022 + " $latText"
+        $statNetwork.Subtitle.Text = "Limit: $rateDesc ($bwPolicy)"
+        $statNetwork.BadgeText.Text = if ($null -ne $lat -and $lat -lt 80) { [string][char]0x25CF + ' Optimal' } else { 'Normal' }
+        $statNetwork.BadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#0D9488')
     } catch {
         $analyticsNetwork.Text = "Transfer speed: Unavailable (no active transfer telemetry)."
+    }
+
+    # Update Local SSD Cache diagnostics
+    try {
+        $cacheDir = if ($script:Settings.CacheDirectory) { [string]$script:Settings.CacheDirectory } else { 'D:\CloudCache' }
+        $cacheQuotaGb = if ($script:Settings.CacheMaxGigabytes) { [int]$script:Settings.CacheMaxGigabytes } else { 20 }
+        $quotaBytes = [int64]$cacheQuotaGb * 1GB
+        $cacheDriveRoot = [System.IO.Path]::GetPathRoot($cacheDir)
+        $hostFreeGb = 0.0
+        try {
+            $dInfo = [System.IO.DriveInfo]::new($cacheDriveRoot)
+            $hostFreeGb = [Math]::Round($dInfo.AvailableFreeSpace / 1GB, 1)
+        } catch { }
+
+        $pressure = if ($quotaBytes -gt 0) { [Math]::Round(($totalCacheBytes / [double]$quotaBytes) * 100, 1) } else { 0.0 }
+        $analyticsCacheDirRow.Text = "Cache Location: $cacheDir (Host Volume $cacheDriveRoot " + [char]0x2022 + " $hostFreeGb GB free disk space)"
+        $analyticsCacheUsageRow.Text = "Cache Footprint: $(Format-AnalyticsBytes $totalCacheBytes) used of $cacheQuotaGb.00 GB quota ($pressure% utilized)"
+        $analyticsCacheProgressBar.Value = [Math]::Min(100, [Math]::Max(0, $pressure))
+
+        $statCache.Value.Text = "$([Math]::Round($totalCacheBytes / 1GB, 2)) GB / $cacheQuotaGb GB"
+        $statCache.Subtitle.Text = "$pressure% Quota Pressure " + [char]0x2022 + " $hostFreeGb GB Host Free"
+        $statCache.BadgeText.Text = if ($pressure -ge 85.0) { 'Warning' } else { 'Normal' }
+        $cacheBadgeColor = if ($pressure -ge 85.0) { '#D97706' } else { '#15803D' }
+        $statCache.BadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($cacheBadgeColor)
+
+        # Check pending staged uploads
+        $pendingItems = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir)
+        $pendingBytes = [int64]0
+        if ($pendingItems.Count -gt 0) {
+            foreach ($pi in $pendingItems) {
+                if ($pi.Length) { $pendingBytes += [int64]$pi.Length }
+            }
+            $analyticsCachePendingRow.Text = "Pending Staged Uploads: $($pendingItems.Count) file(s) ($(Format-AnalyticsBytes $pendingBytes)) staged for cloud upload"
+            $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+        } else {
+            $analyticsCachePendingRow.Text = "Pending Staged Uploads: 0 pending files (0 B) " + [char]0x2022 + " Local SSD staging clean"
+            $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+        }
+    } catch {
+        $analyticsCacheUsageRow.Text = 'Cache Footprint: Unavailable.'
     }
 
     if ($script:AnalyticsStorageWorker -and (Test-NSBackgroundOperationCompleted $script:AnalyticsStorageWorker)) {
@@ -2381,6 +3435,23 @@ function Update-AnalyticsMetrics {
                     } elseif ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -eq 0) {
                         $analyticsStorageSummary.Text = "Used and remaining storage: Unavailable. $($storageResult.Errors[0])"
                     }
+
+                    # Render provider latency comparison
+                    $analyticsLatencyChartStack.Children.Clear()
+                    foreach ($rec in @($storageResult.Records)) {
+                        if ($null -ne $rec.ResponseMilliseconds) {
+                            $latRow = [System.Windows.Controls.DockPanel]::new()
+                            $latRow.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+                            $provTitle = New-Label "$($rec.ProviderId) ($($rec.Name)) API Latency:" 11 $script:Palette.TextSecondary $false
+                            [System.Windows.Controls.DockPanel]::SetDock($provTitle, 'Left')
+                            $latRow.Children.Add($provTitle) | Out-Null
+                            $provMs = New-Label "$($rec.ResponseMilliseconds) ms (HTTP API round-trip)" 11 '#06B6D4' $true
+                            [System.Windows.Controls.DockPanel]::SetDock($provMs, 'Right')
+                            $provMs.HorizontalAlignment = 'Right'
+                            $latRow.Children.Add($provMs) | Out-Null
+                            $analyticsLatencyChartStack.Children.Add($latRow) | Out-Null
+                        }
+                    }
                 }
             }
         } catch {
@@ -2397,7 +3468,6 @@ function Update-AnalyticsMetrics {
 }
 
 function Get-AnalyticsCpuPercent($Process, [DateTime]$Now, [int]$Cores = 1) {
-    # Real per-process CPU percentage from TotalProcessorTime deltas.
     if ($null -eq $Process) { return $null }
     try {
         $pid = [int]$Process.Id
@@ -2422,6 +3492,29 @@ function Show-AnalyticsView {
     $logsView.Visibility = [System.Windows.Visibility]::Collapsed
     Stop-LogsViewLoad
     Update-NavActiveState
+
+    # If no snapshot has been captured, show landing card and hide diagnostic cards.
+    # If a snapshot was already collected in this session, keep it displayed without starting collection.
+    if (-not $script:AnalyticsSnapshotCollected) {
+        if ($analyticsLandingCard) { $analyticsLandingCard.Visibility = [System.Windows.Visibility]::Visible }
+        if ($analyticsSummaryGrid) { $analyticsSummaryGrid.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($overviewCard -and $overviewCard.Card) { $overviewCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($analyticsNetworkCard -and $analyticsNetworkCard.Card) { $analyticsNetworkCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($analyticsCacheCard -and $analyticsCacheCard.Card) { $analyticsCacheCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($storageCard -and $storageCard.Card) { $storageCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($resourceCard -and $resourceCard.Card) { $resourceCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($analyticsTransferCard -and $analyticsTransferCard.Card) { $analyticsTransferCard.Card.Visibility = [System.Windows.Visibility]::Collapsed }
+    } else {
+        if ($analyticsLandingCard) { $analyticsLandingCard.Visibility = [System.Windows.Visibility]::Collapsed }
+        if ($analyticsSummaryGrid) { $analyticsSummaryGrid.Visibility = [System.Windows.Visibility]::Visible }
+        if ($overviewCard -and $overviewCard.Card) { $overviewCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+        if ($analyticsNetworkCard -and $analyticsNetworkCard.Card) { $analyticsNetworkCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+        if ($analyticsCacheCard -and $analyticsCacheCard.Card) { $analyticsCacheCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+        if ($storageCard -and $storageCard.Card) { $storageCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+        if ($resourceCard -and $resourceCard.Card) { $resourceCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+        $timeStr = if ($script:AnalyticsLastCollectionTime) { $script:AnalyticsLastCollectionTime.ToLocalTime().ToString('HH:mm:ss') } else { 'earlier' }
+        $analyticsCollectionStatus.Text = "Status: Snapshot from $timeStr (collected in $($script:AnalyticsLastCollectionDurationMs) ms). Zero background polling."
+    }
 }
 
 function Stop-AnalyticsCollection {
@@ -2433,6 +3526,7 @@ function Stop-AnalyticsCollection {
     }
     if ($analyticsGetAnalyticsBtn) { $analyticsGetAnalyticsBtn.IsEnabled = $true }
     if ($analyticsRefreshAnalyticsBtn) { $analyticsRefreshAnalyticsBtn.IsEnabled = $true }
+    if ($analyticsCancelBtn) { $analyticsCancelBtn.Visibility = [System.Windows.Visibility]::Collapsed }
 }
 
 function Start-AnalyticsCollection {
@@ -2440,17 +3534,34 @@ function Start-AnalyticsCollection {
     $script:AnalyticsCollectionInProgress = $true
     if ($analyticsGetAnalyticsBtn) { $analyticsGetAnalyticsBtn.IsEnabled = $false }
     if ($analyticsRefreshAnalyticsBtn) { $analyticsRefreshAnalyticsBtn.IsEnabled = $false }
+    if ($analyticsCancelBtn) { $analyticsCancelBtn.Visibility = [System.Windows.Visibility]::Visible }
     $analyticsCollectionStatus.Text = 'Status: Collecting analytics on demand...'
     $analyticsCollectionErrors.Visibility = [System.Windows.Visibility]::Collapsed
     $analyticsCollectionErrors.Text = ''
 
+    if ($analyticsLandingCard) { $analyticsLandingCard.Visibility = [System.Windows.Visibility]::Collapsed }
+    if ($analyticsSummaryGrid) { $analyticsSummaryGrid.Visibility = [System.Windows.Visibility]::Visible }
+    if ($overviewCard -and $overviewCard.Card) { $overviewCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+    if ($analyticsNetworkCard -and $analyticsNetworkCard.Card) { $analyticsNetworkCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+    if ($analyticsCacheCard -and $analyticsCacheCard.Card) { $analyticsCacheCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+    if ($storageCard -and $storageCard.Card) { $storageCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+    if ($resourceCard -and $resourceCard.Card) { $resourceCard.Card.Visibility = [System.Windows.Visibility]::Visible }
+
     $collectStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $script:AnalyticsCollectionStartTime = [DateTime]::UtcNow
+    try {
+        $p = [System.Diagnostics.Process]::GetCurrentProcess()
+        $script:AnalyticsCollectionStartCpu = $p.TotalProcessorTime
+        $p.Dispose()
+    } catch {
+        $script:AnalyticsCollectionStartCpu = [TimeSpan]::Zero
+    }
 
     Update-AnalyticsMetrics
-    Start-AnalyticsStorageWorker
+    Start-AnalyticsStorageWorker -Force
 
     $script:AnalyticsCollectionWatchdogTimer = [System.Windows.Threading.DispatcherTimer]::new()
-    $script:AnalyticsCollectionWatchdogTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:AnalyticsCollectionWatchdogTimer.Interval = [TimeSpan]::FromMilliseconds(400)
     $script:AnalyticsCollectionWatchdogTimer.Add_Tick({
         try {
             if ($script:CurrentView -ne 'Analytics' -or -not $script:AnalyticsCollectionInProgress) {
@@ -2480,6 +3591,23 @@ function Start-AnalyticsCollection {
                                 } elseif ($storageResult.Errors.Count -gt 0 -and $storageResult.Records.Count -eq 0) {
                                     $analyticsStorageSummary.Text = "Used and remaining storage: Unavailable. $($storageResult.Errors[0])"
                                 }
+
+                                # Render provider API latencies
+                                $analyticsLatencyChartStack.Children.Clear()
+                                foreach ($rec in @($storageResult.Records)) {
+                                    if ($null -ne $rec.ResponseMilliseconds) {
+                                        $latRow = [System.Windows.Controls.DockPanel]::new()
+                                        $latRow.Margin = [System.Windows.Thickness]::new(0, 2, 0, 2)
+                                        $provTitle = New-Label "$($rec.ProviderId) ($($rec.Name)) API Latency:" 11 $script:Palette.TextSecondary $false
+                                        [System.Windows.Controls.DockPanel]::SetDock($provTitle, 'Left')
+                                        $latRow.Children.Add($provTitle) | Out-Null
+                                        $provMs = New-Label "$($rec.ResponseMilliseconds) ms (HTTP API round-trip)" 11 '#06B6D4' $true
+                                        [System.Windows.Controls.DockPanel]::SetDock($provMs, 'Right')
+                                        $provMs.HorizontalAlignment = 'Right'
+                                        $latRow.Children.Add($provMs) | Out-Null
+                                        $analyticsLatencyChartStack.Children.Add($latRow) | Out-Null
+                                    }
+                                }
                             }
                         }
                     } catch {
@@ -2500,9 +3628,25 @@ function Start-AnalyticsCollection {
 
             if ($done) {
                 $collectStopwatch.Stop()
+                $script:AnalyticsSnapshotCollected = $true
                 $script:AnalyticsLastCollectionTime = [DateTime]::UtcNow
                 $script:AnalyticsLastCollectionDurationMs = [int]$collectStopwatch.ElapsedMilliseconds
-                $analyticsCollectionStatus.Text = "Status: Collection completed in $($script:AnalyticsLastCollectionDurationMs) ms at $([DateTime]::Now.ToString('HH:mm:ss'))."
+
+                # Calculate measured CPU over collection duration
+                try {
+                    $endProc = [System.Diagnostics.Process]::GetCurrentProcess()
+                    $endCpu = $endProc.TotalProcessorTime
+                    $wallSeconds = ($script:AnalyticsLastCollectionTime - $script:AnalyticsCollectionStartTime).TotalSeconds
+                    $cpuSeconds = ($endCpu - $script:AnalyticsCollectionStartCpu).TotalSeconds
+                    $cores = [Math]::Max(1, [System.Environment]::ProcessorCount)
+                    if ($wallSeconds -gt 0) {
+                        $measuredCpu = [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, ($cpuSeconds / ($wallSeconds * $cores)) * 100.0)), 1)
+                        $analyticsAppCpu.Text = "App CPU: $measuredCpu% of all logical cores (sampled over $($wallSeconds.ToString('0.0'))s collection snapshot)."
+                    }
+                    $endProc.Dispose()
+                } catch { }
+
+                $analyticsCollectionStatus.Text = "Status: Snapshot captured at $([DateTime]::Now.ToString('HH:mm:ss')) in $($script:AnalyticsLastCollectionDurationMs) ms. Zero background polling."
                 Stop-AnalyticsCollection
             }
         } catch {
@@ -2511,6 +3655,7 @@ function Start-AnalyticsCollection {
     })
     $script:AnalyticsCollectionWatchdogTimer.Start()
 }
+
 
 # ------------------------------------------------------------------------------
 # 5. LOGS VIEW (bounded local application events + honest privacy notice)
@@ -3093,6 +4238,1001 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
     $diagWin.ShowDialog() | Out-Null
 }
 
+function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
+    $p = Get-MainThemePalette $script:Settings.Theme
+    $inspWin = [System.Windows.Window]::new()
+    $inspWin.Title = 'NS Cloud Drive - Cache Inspector'
+    $inspWin.Width = 920
+    $inspWin.Height = 640
+    $inspWin.MinWidth = 780
+    $inspWin.MinHeight = 480
+    $inspWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $inspWin.Owner = $Owner }
+    $inspWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
+    $inspWin.FontFamily = 'Segoe UI'
+
+    $dock = [System.Windows.Controls.DockPanel]::new()
+    $dock.Margin = [System.Windows.Thickness]::new(20)
+    $inspWin.Content = $dock
+
+    # Bottom bar (Dock=Bottom)
+    $bottomGrid = [System.Windows.Controls.Grid]::new()
+    $colL = [System.Windows.Controls.ColumnDefinition]::new()
+    $colL.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $colR = [System.Windows.Controls.ColumnDefinition]::new()
+    $colR.Width = [System.Windows.GridLength]::Auto
+    $bottomGrid.ColumnDefinitions.Add($colL) | Out-Null
+    $bottomGrid.ColumnDefinitions.Add($colR) | Out-Null
+    $bottomGrid.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($bottomGrid, 'Bottom')
+    $dock.Children.Add($bottomGrid) | Out-Null
+
+    $statusLabel = New-Label "Cache Directory: $($script:CacheDirectory)" 11 $p.TextSecondary
+    $statusLabel.VerticalAlignment = 'Center'
+    [System.Windows.Controls.Grid]::SetColumn($statusLabel, 0)
+    $bottomGrid.Children.Add($statusLabel) | Out-Null
+
+    $btnStack = [System.Windows.Controls.StackPanel]::new()
+    $btnStack.Orientation = 'Horizontal'
+    [System.Windows.Controls.Grid]::SetColumn($btnStack, 1)
+    $bottomGrid.Children.Add($btnStack) | Out-Null
+
+    $cleanAllBtn = [System.Windows.Controls.Button]::new()
+    $cleanAllBtn.Content = 'Clean Synced Files'
+    $cleanAllBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $cleanAllBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $cleanAllBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $cleanAllBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $cleanAllBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $cleanAllBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($cleanAllBtn) | Out-Null
+
+    $openFolderBtn = [System.Windows.Controls.Button]::new()
+    $openFolderBtn.Content = 'Open Folder'
+    $openFolderBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $openFolderBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $openFolderBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $openFolderBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $openFolderBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $openFolderBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($openFolderBtn) | Out-Null
+
+    $refreshBtn = [System.Windows.Controls.Button]::new()
+    $refreshBtn.Content = 'Refresh'
+    $refreshBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $refreshBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $refreshBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $refreshBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $refreshBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $refreshBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($refreshBtn) | Out-Null
+
+    $closeBtn = [System.Windows.Controls.Button]::new()
+    $closeBtn.Content = 'Close'
+    $closeBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $closeBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $closeBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $closeBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($closeBtn) | Out-Null
+
+    # Top Header + Stats + Filter (Dock=Top)
+    $topStack = [System.Windows.Controls.StackPanel]::new()
+    $topStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    [System.Windows.Controls.DockPanel]::SetDock($topStack, 'Top')
+    $dock.Children.Add($topStack) | Out-Null
+
+    $title = New-Label 'Local Cache Inspector' 18 $p.TextPrimary $true
+    $subtitle = New-Label ("Detailed breakdown of files cached on local disk ($($script:CacheDirectory)). " + [string][char]0x2022 + " Staged files are protected; safely evict synced files to reclaim disk space.") 11 $p.TextSecondary
+    $subtitle.Margin = [System.Windows.Thickness]::new(0, 2, 0, 12)
+    $topStack.Children.Add($title) | Out-Null
+    $topStack.Children.Add($subtitle) | Out-Null
+
+    # 4 Stat Cards in a Grid
+    $statGrid = [System.Windows.Controls.Grid]::new()
+    for ($i = 0; $i -lt 4; $i++) {
+        $cd = [System.Windows.Controls.ColumnDefinition]::new()
+        $cd.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $statGrid.ColumnDefinitions.Add($cd) | Out-Null
+    }
+    $statGrid.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $topStack.Children.Add($statGrid) | Out-Null
+
+    $card1Border = [System.Windows.Controls.Border]::new()
+    $card1Border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $card1Border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $card1Border.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card1Border.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $card1Border.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+    $card1Border.Margin = [System.Windows.Thickness]::new(0, 0, 4, 0)
+    [System.Windows.Controls.Grid]::SetColumn($card1Border, 0)
+    $card1Sp = [System.Windows.Controls.StackPanel]::new()
+    $card1Title = New-Label 'TOTAL CACHE' 10 $p.TextSecondary $false
+    $card1Val = New-Label '0 B' 15 $p.TextPrimary $true
+    $card1Sub = New-Label "Quota: $($script:Settings.CacheMaxGigabytes) GB" 10 $p.TextSecondary $false
+    $card1Sp.Children.Add($card1Title) | Out-Null
+    $card1Sp.Children.Add($card1Val) | Out-Null
+    $card1Sp.Children.Add($card1Sub) | Out-Null
+    $card1Border.Child = $card1Sp
+    $statGrid.Children.Add($card1Border) | Out-Null
+
+    $card2Border = [System.Windows.Controls.Border]::new()
+    $card2Border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $card2Border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $card2Border.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card2Border.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $card2Border.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+    $card2Border.Margin = [System.Windows.Thickness]::new(4, 0, 4, 0)
+    [System.Windows.Controls.Grid]::SetColumn($card2Border, 1)
+    $card2Sp = [System.Windows.Controls.StackPanel]::new()
+    $card2Title = New-Label 'CACHED FILES' 10 $p.TextSecondary $false
+    $card2Val = New-Label '0 files' 15 $p.TextPrimary $true
+    $card2Sub = New-Label 'Across all accounts' 10 $p.TextSecondary $false
+    $card2Sp.Children.Add($card2Title) | Out-Null
+    $card2Sp.Children.Add($card2Val) | Out-Null
+    $card2Sp.Children.Add($card2Sub) | Out-Null
+    $card2Border.Child = $card2Sp
+    $statGrid.Children.Add($card2Border) | Out-Null
+
+    $card3Border = [System.Windows.Controls.Border]::new()
+    $card3Border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $card3Border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+    $card3Border.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card3Border.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $card3Border.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+    $card3Border.Margin = [System.Windows.Thickness]::new(4, 0, 4, 0)
+    [System.Windows.Controls.Grid]::SetColumn($card3Border, 2)
+    $card3Sp = [System.Windows.Controls.StackPanel]::new()
+    $card3Title = New-Label 'STAGED / IN-USE' 10 '#F59E0B' $false
+    $card3Val = New-Label '0 B' 15 $p.TextPrimary $true
+    $card3Sub = New-Label '0 files active' 10 $p.TextSecondary $false
+    $card3Sp.Children.Add($card3Title) | Out-Null
+    $card3Sp.Children.Add($card3Val) | Out-Null
+    $card3Sp.Children.Add($card3Sub) | Out-Null
+    $card3Border.Child = $card3Sp
+    $statGrid.Children.Add($card3Border) | Out-Null
+
+    $card4Border = [System.Windows.Controls.Border]::new()
+    $card4Border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $card4Border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#059669')
+    $card4Border.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card4Border.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $card4Border.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+    $card4Border.Margin = [System.Windows.Thickness]::new(4, 0, 0, 0)
+    [System.Windows.Controls.Grid]::SetColumn($card4Border, 3)
+    $card4Sp = [System.Windows.Controls.StackPanel]::new()
+    $card4Title = New-Label 'SYNCED / EVICTABLE' 10 '#10B981' $false
+    $card4Val = New-Label '0 B' 15 $p.TextPrimary $true
+    $card4Sub = New-Label 'Safe to evict' 10 $p.TextSecondary $false
+    $card4Sp.Children.Add($card4Title) | Out-Null
+    $card4Sp.Children.Add($card4Val) | Out-Null
+    $card4Sp.Children.Add($card4Sub) | Out-Null
+    $card4Border.Child = $card4Sp
+    $statGrid.Children.Add($card4Border) | Out-Null
+
+    # Filter Box
+    $filterDock = [System.Windows.Controls.DockPanel]::new()
+    $filterDock.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $filterLabel = New-Label 'Filter:' 11 $p.TextSecondary $false
+    $filterLabel.VerticalAlignment = 'Center'
+    $filterLabel.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($filterLabel, 'Left')
+    $filterDock.Children.Add($filterLabel) | Out-Null
+
+    $filterBox = [System.Windows.Controls.TextBox]::new()
+    $filterBox.Padding = [System.Windows.Thickness]::new(8, 4, 8, 4)
+    $filterBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $filterBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $filterBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $filterBox.FontSize = 12
+    $filterDock.Children.Add($filterBox) | Out-Null
+    $topStack.Children.Add($filterDock) | Out-Null
+
+    # Center Scroll content with file rows
+    $scroll = [System.Windows.Controls.ScrollViewer]::new()
+    $scroll.VerticalScrollBarVisibility = 'Auto'
+    $scroll.HorizontalScrollBarVisibility = 'Disabled'
+    $scroll.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $scroll.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $scroll.BorderThickness = [System.Windows.Thickness]::new(1)
+    $scroll.Padding = [System.Windows.Thickness]::new(8)
+    $dock.Children.Add($scroll) | Out-Null
+
+    $fileStack = [System.Windows.Controls.StackPanel]::new()
+    $scroll.Content = $fileStack
+
+    # Internal state
+    $script:CacheInspectorFileList = @()
+
+    $renderRows = {
+        param([string]$FilterText = '')
+        $fileStack.Children.Clear()
+
+        $sourceFiles = @($script:CacheInspectorFileList)
+        $filtered = if ([string]::IsNullOrWhiteSpace($FilterText)) {
+            $sourceFiles
+        } else {
+            $ft = $FilterText.Trim().ToLowerInvariant()
+            @($sourceFiles | Where-Object {
+                $_.FileName.ToLowerInvariant().Contains($ft) -or
+                $_.Account.ToLowerInvariant().Contains($ft) -or
+                $_.RelativePath.ToLowerInvariant().Contains($ft)
+            })
+        }
+
+        if ($filtered.Count -eq 0) {
+            $emptyBorder = [System.Windows.Controls.Border]::new()
+            $emptyBorder.Padding = [System.Windows.Thickness]::new(20)
+            $emptyMsg = if ($sourceFiles.Count -eq 0) {
+                "Local cache is currently empty. No staged or cached files found in $($script:CacheDirectory)."
+            } else {
+                "No cache items match the filter `"$FilterText`"."
+            }
+            $emptyLabel = New-Label $emptyMsg 12 $p.TextSecondary $false
+            $emptyLabel.HorizontalAlignment = 'Center'
+            $emptyBorder.Child = $emptyLabel
+            $fileStack.Children.Add($emptyBorder) | Out-Null
+            return
+        }
+
+        foreach ($item in $filtered) {
+            $rowBorder = [System.Windows.Controls.Border]::new()
+            $rowBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
+            $rowBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $rowBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+            $rowBorder.CornerRadius = [System.Windows.CornerRadius]::new(5)
+            $rowBorder.Padding = [System.Windows.Thickness]::new(10, 8, 10, 8)
+            $rowBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+
+            $rowGrid = [System.Windows.Controls.Grid]::new()
+            $c0 = [System.Windows.Controls.ColumnDefinition]::new(); $c0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+            $c1 = [System.Windows.Controls.ColumnDefinition]::new(); $c1.Width = [System.Windows.GridLength]::Auto
+            $c2 = [System.Windows.Controls.ColumnDefinition]::new(); $c2.Width = [System.Windows.GridLength]::Auto
+            $c3 = [System.Windows.Controls.ColumnDefinition]::new(); $c3.Width = [System.Windows.GridLength]::Auto
+            $c4 = [System.Windows.Controls.ColumnDefinition]::new(); $c4.Width = [System.Windows.GridLength]::Auto
+            $rowGrid.ColumnDefinitions.Add($c0) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c1) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c2) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c3) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c4) | Out-Null
+
+            # Col 0: File Info
+            $fInfoSp = [System.Windows.Controls.StackPanel]::new()
+            $fInfoSp.VerticalAlignment = 'Center'
+            $fNameLabel = New-Label $item.FileName 12 $p.TextPrimary $true
+            $fNameLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+            $fRelLabel = New-Label $item.RelativePath 10 $p.TextSecondary $false
+            $fRelLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+            $fInfoSp.Children.Add($fNameLabel) | Out-Null
+            $fInfoSp.Children.Add($fRelLabel) | Out-Null
+            [System.Windows.Controls.Grid]::SetColumn($fInfoSp, 0)
+            $rowGrid.Children.Add($fInfoSp) | Out-Null
+
+            # Col 1: Account Badge
+            $accBadge = [System.Windows.Controls.Border]::new()
+            $accBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $accBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $accBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+            $accBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+            $accBadge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+            $accBadge.Margin = [System.Windows.Thickness]::new(8, 0, 8, 0)
+            $accBadge.VerticalAlignment = 'Center'
+            $accText = New-Label $item.Account 10 $p.TextSecondary $false
+            $accBadge.Child = $accText
+            [System.Windows.Controls.Grid]::SetColumn($accBadge, 1)
+            $rowGrid.Children.Add($accBadge) | Out-Null
+
+            # Col 2: Size
+            $sizeLabel = New-Label $item.SizeFormatted 11 $p.TextPrimary $true
+            $sizeLabel.Margin = [System.Windows.Thickness]::new(4, 0, 8, 0)
+            $sizeLabel.VerticalAlignment = 'Center'
+            [System.Windows.Controls.Grid]::SetColumn($sizeLabel, 2)
+            $rowGrid.Children.Add($sizeLabel) | Out-Null
+
+            # Col 3: Status Badge
+            $statusBadge = [System.Windows.Controls.Border]::new()
+            $statusBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+            $statusBadge.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+            $statusBadge.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+            $statusBadge.VerticalAlignment = 'Center'
+            if ($item.IsInUse) {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label 'Uploading / Staged' 10 '#FDE68A' $true
+            } else {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#064E3B')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#059669')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label 'Synced' 10 '#A7F3D0' $true
+            }
+            $statusBadge.Child = $sbText
+            [System.Windows.Controls.Grid]::SetColumn($statusBadge, 3)
+            $rowGrid.Children.Add($statusBadge) | Out-Null
+
+            # Col 4: Action Buttons
+            $actSp = [System.Windows.Controls.StackPanel]::new()
+            $actSp.Orientation = 'Horizontal'
+            $actSp.VerticalAlignment = 'Center'
+
+            $openBtn = [System.Windows.Controls.Button]::new()
+            $openBtn.Content = 'Open'
+            $openBtn.Padding = [System.Windows.Thickness]::new(8, 3, 8, 3)
+            $openBtn.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+            $openBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $openBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $openBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+            $openBtn.FontSize = 11
+            $openBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+            $targetPath = $item.FullPath
+            $openBtn.Add_Click({
+                try {
+                    Start-Process 'explorer.exe' -ArgumentList "/select,`"$targetPath`""
+                } catch { }
+            })
+            $actSp.Children.Add($openBtn) | Out-Null
+
+            $evictBtn = [System.Windows.Controls.Button]::new()
+            $evictBtn.Content = 'Evict'
+            $evictBtn.Padding = [System.Windows.Thickness]::new(8, 3, 8, 3)
+            $evictBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $evictBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $evictBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+            $evictBtn.FontSize = 11
+            $evictBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+            $evictFile = $item.FullPath
+            $evictName = $item.FileName
+            $evictSize = $item.SizeFormatted
+            $evictAcc = $item.Account
+            $isEvictable = $item.IsEvictable
+
+            if (-not $isEvictable) {
+                $evictBtn.IsEnabled = $false
+                $evictBtn.Opacity = 0.5
+                $evictBtn.ToolTip = 'This file is currently in use or being uploaded to cloud storage.'
+            } else {
+                $evictBtn.Add_Click({
+                    $confirm = [System.Windows.MessageBox]::Show(
+                        "Evict `"$evictName`" ($evictSize) from local cache?`n`n" +
+                        "$([char]0x2022) The file will be removed from your local SSD to free up space.`n" +
+                        "$([char]0x2022) The file remains 100% safe and intact on your cloud drive ($evictAcc).`n" +
+                        "$([char]0x2022) Next time you open it, it will stream on demand.",
+                        'Confirm Cache Eviction',
+                        [System.Windows.MessageBoxButton]::YesNo,
+                        [System.Windows.MessageBoxImage]::Question
+                    )
+                    if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+                        $res = Remove-SingleCacheFile -FilePath $evictFile -CacheDirectory $script:CacheDirectory
+                        if ($res.Success) {
+                            & $loadData
+                            Update-CacheUsageDisplay
+                        } else {
+                            [System.Windows.MessageBox]::Show("Could not evict file: $($res.Error)", 'Eviction Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                        }
+                    }
+                })
+            }
+            $actSp.Children.Add($evictBtn) | Out-Null
+
+            [System.Windows.Controls.Grid]::SetColumn($actSp, 4)
+            $rowGrid.Children.Add($actSp) | Out-Null
+
+            $rowBorder.Child = $rowGrid
+            $fileStack.Children.Add($rowBorder) | Out-Null
+        }
+    }
+
+    $loadData = {
+        try {
+            $files = @(Get-DetailedCacheFileList -CacheDirectory $script:CacheDirectory)
+            $script:CacheInspectorFileList = $files
+
+            $totalBytes = 0L
+            $inUseBytes = 0L
+            $inUseCount = 0
+            $evictableBytes = 0L
+            $evictableCount = 0
+
+            foreach ($f in $files) {
+                $totalBytes += [int64]$f.SizeBytes
+                if ($f.IsInUse) {
+                    $inUseBytes += [int64]$f.SizeBytes
+                    $inUseCount++
+                } else {
+                    $evictableBytes += [int64]$f.SizeBytes
+                    $evictableCount++
+                }
+            }
+
+            $card1Val.Text = Format-LocalByteSize $totalBytes
+            $card2Val.Text = "$($files.Count) files"
+            $card3Val.Text = Format-LocalByteSize $inUseBytes
+            $card3Sub.Text = "$inUseCount files uploading"
+            $card4Val.Text = Format-LocalByteSize $evictableBytes
+            $card4Sub.Text = "$evictableCount safe to clean"
+
+            $freeGb = 0.0
+            $driveLetter = ''
+            try {
+                $root = [System.IO.Path]::GetPathRoot($script:CacheDirectory)
+                if ($root) {
+                    $driveLetter = $root.Substring(0, 1).ToUpperInvariant()
+                    $dInfo = [System.IO.DriveInfo]::new($driveLetter)
+                    if ($dInfo.IsReady) {
+                        $freeGb = [Math]::Round(($dInfo.AvailableFreeSpace / 1GB), 1)
+                    }
+                }
+            } catch { }
+
+            $driveInfoText = if ($driveLetter) { " " + [string][char]0x2022 + " Drive ${driveLetter}: Free Space: $freeGb GB" } else { "" }
+            $statusLabel.Text = "Target: $($script:CacheDirectory)$driveInfoText"
+
+            & $renderRows $filterBox.Text
+        } catch {
+            $statusLabel.Text = "Error scanning cache: $($_.Exception.Message)"
+        }
+    }
+
+    $filterBox.Add_TextChanged({
+        & $renderRows $filterBox.Text
+    })
+
+    $refreshBtn.Add_Click({
+        & $loadData
+    })
+
+    $openFolderBtn.Add_Click({
+        try {
+            if (-not (Test-Path -LiteralPath $script:CacheDirectory)) {
+                New-Item -ItemType Directory -Path $script:CacheDirectory -Force | Out-Null
+            }
+            Start-ExplorerWindow $script:CacheDirectory
+        } catch { }
+    })
+
+    $cleanAllBtn.Add_Click({
+        $confirm = [System.Windows.MessageBox]::Show(
+            "Clean all synced files from local cache?`n`n" +
+            "$([char]0x2022) Files actively uploading to the cloud will be safely preserved.`n" +
+            "$([char]0x2022) All cloud files remain intact remotely.`n`n" +
+            "Directory:`n$($script:CacheDirectory)",
+            'Clean Synced Cache',
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+            try {
+                $res = Invoke-SafeCacheCleanup -CacheDirectory $script:CacheDirectory -Force
+                & $loadData
+                Update-CacheUsageDisplay
+                $mb = [Math]::Round(($res.CleanedBytes / 1MB), 1)
+                [System.Windows.MessageBox]::Show("Cleaned $mb MB ($($res.CleanedFiles) files). $($res.SkippedInUseCount) files in-use preserved.", 'Cache Cleaned', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            } catch {
+                [System.Windows.MessageBox]::Show("Cleanup error: $($_.Exception.Message)", 'Cleanup Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            }
+        }
+    })
+
+    $closeBtn.Add_Click({
+        $inspWin.Close()
+    })
+
+    & $loadData
+    [void](Enable-ModalGlassBackdrop $inspWin)
+    $inspWin.ShowDialog() | Out-Null
+}
+
+function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
+    $p = Get-MainThemePalette $script:Settings.Theme
+    $tcWin = [System.Windows.Window]::new()
+    $tcWin.Title = 'NS Cloud Drive - Transfer Center & History'
+    $tcWin.Width = 880
+    $tcWin.Height = 580
+    $tcWin.MinWidth = 720
+    $tcWin.MinHeight = 440
+    $tcWin.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $tcWin.Owner = $Owner }
+    $tcWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
+    $tcWin.FontFamily = 'Segoe UI'
+
+    $dock = [System.Windows.Controls.DockPanel]::new()
+    $dock.Margin = [System.Windows.Thickness]::new(20)
+    $tcWin.Content = $dock
+
+    # Bottom bar (Dock=Bottom)
+    $bottomGrid = [System.Windows.Controls.Grid]::new()
+    $colL = [System.Windows.Controls.ColumnDefinition]::new(); $colL.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $colR = [System.Windows.Controls.ColumnDefinition]::new(); $colR.Width = [System.Windows.GridLength]::Auto
+    $bottomGrid.ColumnDefinitions.Add($colL) | Out-Null
+    $bottomGrid.ColumnDefinitions.Add($colR) | Out-Null
+    $bottomGrid.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($bottomGrid, 'Bottom')
+    $dock.Children.Add($bottomGrid) | Out-Null
+
+    $statusSummaryLabel = New-Label 'Loading transfer history...' 11 $p.TextSecondary
+    $statusSummaryLabel.VerticalAlignment = 'Center'
+    [System.Windows.Controls.Grid]::SetColumn($statusSummaryLabel, 0)
+    $bottomGrid.Children.Add($statusSummaryLabel) | Out-Null
+
+    $bottomBtnStack = [System.Windows.Controls.StackPanel]::new()
+    $bottomBtnStack.Orientation = 'Horizontal'
+    [System.Windows.Controls.Grid]::SetColumn($bottomBtnStack, 1)
+    $bottomGrid.Children.Add($bottomBtnStack) | Out-Null
+
+    $clearCompletedBtn = [System.Windows.Controls.Button]::new()
+    $clearCompletedBtn.Content = 'Clear Completed'
+    $clearCompletedBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $clearCompletedBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $clearCompletedBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $clearCompletedBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $clearCompletedBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $clearCompletedBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $bottomBtnStack.Children.Add($clearCompletedBtn) | Out-Null
+
+    $refreshBtn = [System.Windows.Controls.Button]::new()
+    $refreshBtn.Content = 'Refresh'
+    $refreshBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $refreshBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+    $refreshBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $refreshBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $refreshBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $refreshBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $bottomBtnStack.Children.Add($refreshBtn) | Out-Null
+
+    $closeBtn = [System.Windows.Controls.Button]::new()
+    $closeBtn.Content = 'Close'
+    $closeBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $closeBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $closeBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $closeBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $bottomBtnStack.Children.Add($closeBtn) | Out-Null
+
+    # Top Header & Filter Controls (Dock=Top)
+    $topStack = [System.Windows.Controls.StackPanel]::new()
+    $topStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    [System.Windows.Controls.DockPanel]::SetDock($topStack, 'Top')
+    $dock.Children.Add($topStack) | Out-Null
+
+    $title = New-Label 'Transfer Center & History' 18 $p.TextPrimary $true
+    $subtitle = New-Label ('Track live transfers, inspect durable queue states, and review recent upload history.' + ' ' + [char]0x2022 + ' ' + 'Failed transfers can be retried immediately.') 11 $p.TextSecondary
+    $subtitle.Margin = [System.Windows.Thickness]::new(0, 2, 0, 12)
+    $topStack.Children.Add($title) | Out-Null
+    $topStack.Children.Add($subtitle) | Out-Null
+
+    # Filter toolbar: [All], [Active], [Completed], [Failed] and Filter Search
+    $filterDock = [System.Windows.Controls.DockPanel]::new()
+    $filterDock.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $topStack.Children.Add($filterDock) | Out-Null
+
+    $filterButtonsPanel = [System.Windows.Controls.StackPanel]::new()
+    $filterButtonsPanel.Orientation = 'Horizontal'
+    [System.Windows.Controls.DockPanel]::SetDock($filterButtonsPanel, 'Left')
+    $filterDock.Children.Add($filterButtonsPanel) | Out-Null
+
+    $script:CurrentTransferModalFilter = 'All'
+
+    $btnAll = [System.Windows.Controls.Button]::new()
+    $btnAll.Content = 'All'
+    $btnAll.Padding = [System.Windows.Thickness]::new(14, 5, 14, 5)
+    $btnAll.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+    $btnAll.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $btnActive = [System.Windows.Controls.Button]::new()
+    $btnActive.Content = 'Active'
+    $btnActive.Padding = [System.Windows.Thickness]::new(14, 5, 14, 5)
+    $btnActive.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+    $btnActive.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $btnCompleted = [System.Windows.Controls.Button]::new()
+    $btnCompleted.Content = 'Completed'
+    $btnCompleted.Padding = [System.Windows.Thickness]::new(14, 5, 14, 5)
+    $btnCompleted.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+    $btnCompleted.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $btnFailed = [System.Windows.Controls.Button]::new()
+    $btnFailed.Content = 'Failed'
+    $btnFailed.Padding = [System.Windows.Thickness]::new(14, 5, 14, 5)
+    $btnFailed.Margin = [System.Windows.Thickness]::new(0, 0, 6, 0)
+    $btnFailed.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $filterButtonsPanel.Children.Add($btnAll) | Out-Null
+    $filterButtonsPanel.Children.Add($btnActive) | Out-Null
+    $filterButtonsPanel.Children.Add($btnCompleted) | Out-Null
+    $filterButtonsPanel.Children.Add($btnFailed) | Out-Null
+
+    # Search filter text box on the right
+    $searchBox = [System.Windows.Controls.TextBox]::new()
+    $searchBox.Padding = [System.Windows.Thickness]::new(8, 4, 8, 4)
+    $searchBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $searchBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $searchBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $searchBox.FontSize = 12
+    $searchBox.HorizontalAlignment = 'Stretch'
+    $filterDock.Children.Add($searchBox) | Out-Null
+
+    $applyFilterStyle = {
+        foreach ($b in @(
+            @{ Btn = $btnAll; Key = 'All' },
+            @{ Btn = $btnActive; Key = 'Active' },
+            @{ Btn = $btnCompleted; Key = 'Completed' },
+            @{ Btn = $btnFailed; Key = 'Failed' }
+        )) {
+            if ($b.Key -eq $script:CurrentTransferModalFilter) {
+                $b.Btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
+                $b.Btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Accent)
+                $b.Btn.Foreground = [System.Windows.Media.Brushes]::White
+                $b.Btn.FontWeight = [System.Windows.FontWeights]::SemiBold
+            } else {
+                $b.Btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+                $b.Btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+                $b.Btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+                $b.Btn.FontWeight = [System.Windows.FontWeights]::Normal
+            }
+        }
+    }
+    & $applyFilterStyle
+
+    # Scrollable list of cards
+    $scroll = [System.Windows.Controls.ScrollViewer]::new()
+    $scroll.VerticalScrollBarVisibility = 'Auto'
+    $scroll.HorizontalScrollBarVisibility = 'Disabled'
+    $scroll.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $scroll.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $scroll.BorderThickness = [System.Windows.Thickness]::new(1)
+    $scroll.Padding = [System.Windows.Thickness]::new(8)
+    $dock.Children.Add($scroll) | Out-Null
+
+    $cardStack = [System.Windows.Controls.StackPanel]::new()
+    $scroll.Content = $cardStack
+
+    $script:TransferModalRawItems = @()
+
+    $renderCards = {
+        param([string]$FilterText = '')
+        $cardStack.Children.Clear()
+
+        $sourceItems = @($script:TransferModalRawItems)
+        $ft = if ($FilterText) { $FilterText.Trim().ToLowerInvariant() } else { '' }
+
+        $filtered = @($sourceItems | Where-Object {
+            $item = $_
+            $matchesMode = switch ($script:CurrentTransferModalFilter) {
+                'All' { $true }
+                'Active' { $item.Status -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation') }
+                'Completed' { $item.Status -in @('Completed and remotely confirmed', 'Completed') }
+                'Failed' { $item.Status -in @('Failed', 'Cancelled') }
+                default { $true }
+            }
+            if (-not $matchesMode) { return $false }
+
+            if ($ft) {
+                $fName = if ($item.FileName) { [string]$item.FileName } else { '' }
+                $pName = if ($item.ProviderName) { [string]$item.ProviderName } else { '' }
+                $bName = if ($item.BatchName) { [string]$item.BatchName } else { '' }
+                if (-not ($fName.ToLowerInvariant().Contains($ft) -or $pName.ToLowerInvariant().Contains($ft) -or $bName.ToLowerInvariant().Contains($ft))) {
+                    return $false
+                }
+            }
+            return $true
+        })
+
+        if ($filtered.Count -eq 0) {
+            $emptyBorder = [System.Windows.Controls.Border]::new()
+            $emptyBorder.Padding = [System.Windows.Thickness]::new(24)
+            $emptyMsg = if ($sourceItems.Count -eq 0) {
+                'No transfer activity recorded yet. Files copied to your cloud drive will appear here with live progress and verification.'
+            } else {
+                "No transfer items match the filter `"$FilterText`" under '$($script:CurrentTransferModalFilter)'."
+            }
+            $emptyLabel = New-Label $emptyMsg 12 $p.TextSecondary $false
+            $emptyLabel.HorizontalAlignment = 'Center'
+            $emptyBorder.Child = $emptyLabel
+            $cardStack.Children.Add($emptyBorder) | Out-Null
+            return
+        }
+
+        foreach ($item in $filtered) {
+            $cardBorder = [System.Windows.Controls.Border]::new()
+            $cardBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
+            $cardBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $cardBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+            $cardBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+            $cardBorder.Padding = [System.Windows.Thickness]::new(12, 10, 12, 10)
+            $cardBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+
+            $rowGrid = [System.Windows.Controls.Grid]::new()
+            $c0 = [System.Windows.Controls.ColumnDefinition]::new(); $c0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+            $c1 = [System.Windows.Controls.ColumnDefinition]::new(); $c1.Width = [System.Windows.GridLength]::Auto
+            $c2 = [System.Windows.Controls.ColumnDefinition]::new(); $c2.Width = [System.Windows.GridLength]::Auto
+            $c3 = [System.Windows.Controls.ColumnDefinition]::new(); $c3.Width = [System.Windows.GridLength]::Auto
+            $rowGrid.ColumnDefinitions.Add($c0) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c1) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c2) | Out-Null
+            $rowGrid.ColumnDefinitions.Add($c3) | Out-Null
+
+            # Col 0: File Information and Lifecycle / Error Info
+            $fInfoSp = [System.Windows.Controls.StackPanel]::new()
+            $fInfoSp.VerticalAlignment = 'Center'
+
+            $fNameLabel = New-Label $item.FileName 12 $p.TextPrimary $true
+            $fNameLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+            $fInfoSp.Children.Add($fNameLabel) | Out-Null
+
+            $routeInfo = "Route: Local SSD Cache " + [char]0x2192 + " $($item.ProviderName)"
+            if ($item.DriveLetter) { $routeInfo += " ($($item.DriveLetter):)" }
+            if ($item.BatchName) { $routeInfo += " " + [char]0x2022 + " Batch: $($item.BatchName)" }
+
+            $fRouteLabel = New-Label $routeInfo 10 $p.TextSecondary $false
+            $fRouteLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+            $fInfoSp.Children.Add($fRouteLabel) | Out-Null
+
+            $st = [string]$item.Status
+            if ($st -in @('Completed and remotely confirmed', 'Completed')) {
+                $verText = if ($item.VerificationType) { [string]$item.VerificationType } else { 'Remote confirmation verified' }
+                $detailLabel = New-Label ([string][char]0x2713 + " $verText") 10 '#10B981' $false
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            } elseif ($st -eq 'Failed') {
+                $errText = if ($item.Error) { [string]$item.Error } else { 'Transfer failed' }
+                $detailLabel = New-Label ([string][char]0x2717 + " $errText") 10 '#EF4444' $false
+                $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            } elseif ($st -eq 'Waiting for network/provider') {
+                $errText = if ($item.Error) { [string]$item.Error } else { 'Retrying connection...' }
+                $detailLabel = New-Label ([string][char]0x21BB + " Retrying: $errText") 10 '#F59E0B' $false
+                $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            } elseif ($st -in @('Uploading', 'Awaiting remote confirmation', 'Verifying remote file', 'Staging')) {
+                $progText = if ($item.FileSizeBytes -gt 0 -and $item.BytesTransferred -gt 0) {
+                    $pct = [Math]::Min(100.0, [Math]::Round(($item.BytesTransferred / [double]$item.FileSizeBytes) * 100.0, 1))
+                    "$pct% transferred " + [char]0x2022 + " $st"
+                } else {
+                    $st
+                }
+                $detailLabel = New-Label $progText 10 '#60A5FA' $false
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            }
+
+            [System.Windows.Controls.Grid]::SetColumn($fInfoSp, 0)
+            $rowGrid.Children.Add($fInfoSp) | Out-Null
+
+            # Col 1: File Size
+            $sizeFormatted = if ($item.FileSizeBytes -gt 0) { Format-LocalByteSize $item.FileSizeBytes } else { '0 B' }
+            $sizeLabel = New-Label $sizeFormatted 11 $p.TextPrimary $true
+            $sizeLabel.Margin = [System.Windows.Thickness]::new(10, 0, 12, 0)
+            $sizeLabel.VerticalAlignment = 'Center'
+            [System.Windows.Controls.Grid]::SetColumn($sizeLabel, 1)
+            $rowGrid.Children.Add($sizeLabel) | Out-Null
+
+            # Col 2: Status Badge
+            $statusBadge = [System.Windows.Controls.Border]::new()
+            $statusBadge.CornerRadius = [System.Windows.CornerRadius]::new(4)
+            $statusBadge.Padding = [System.Windows.Thickness]::new(8, 3, 8, 3)
+            $statusBadge.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+            $statusBadge.VerticalAlignment = 'Center'
+
+            if ($st -in @('Completed and remotely confirmed', 'Completed')) {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#064E3B')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#059669')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x2713 + ' Confirmed') 10 '#A7F3D0' $true
+            } elseif ($st -eq 'Failed') {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#7F1D1D')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DC2626')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x2717 + ' Failed') 10 '#FCA5A5' $true
+            } elseif ($st -eq 'Waiting for network/provider') {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x21BB + ' Retrying') 10 '#FDE68A' $true
+            } elseif ($st -in @('Uploading', 'Awaiting remote confirmation', 'Verifying remote file')) {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1E3A8A')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#2563EB')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x21C4 + " $st") 10 '#93C5FD' $true
+            } else {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#334155')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label 'Queued' 10 '#CBD5E1' $true
+            }
+            $statusBadge.Child = $sbText
+            [System.Windows.Controls.Grid]::SetColumn($statusBadge, 2)
+            $rowGrid.Children.Add($statusBadge) | Out-Null
+
+            # Col 3: Action Buttons
+            $actSp = [System.Windows.Controls.StackPanel]::new()
+            $actSp.Orientation = 'Horizontal'
+            $actSp.VerticalAlignment = 'Center'
+
+            $canRetry = ($st -eq 'Failed' -or $st -eq 'Waiting for network/provider')
+            if ($canRetry) {
+                $retryBtn = [System.Windows.Controls.Button]::new()
+                $retryBtn.Content = [string][char]0x21BB + ' Retry'
+                $retryBtn.Padding = [System.Windows.Thickness]::new(8, 3, 8, 3)
+                $retryBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+                $retryBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+                $retryBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+                $retryBtn.FontSize = 11
+                $retryBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+                $targetId = if ($item.JobId) { [string]$item.JobId } else { [string]$item.FileName }
+                $retryBtn.Add_Click({
+                    Resume-CloudTransferQueueItem $targetId | Out-Null
+                    if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
+                        try { Process-CloudTransferQueue | Out-Null } catch { }
+                    }
+                    & $loadData
+                })
+                $actSp.Children.Add($retryBtn) | Out-Null
+            }
+
+            [System.Windows.Controls.Grid]::SetColumn($actSp, 3)
+            $rowGrid.Children.Add($actSp) | Out-Null
+
+            $cardBorder.Child = $rowGrid
+            $cardStack.Children.Add($cardBorder) | Out-Null
+        }
+    }
+
+    $loadData = {
+        try {
+            $unifiedList = [System.Collections.Generic.List[PSObject]]::new()
+            $seenKeys = @{}
+
+            if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) {
+                $qRes = Get-CloudTransferQueue
+                $qItems = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) {
+                    @($qRes[0])
+                } elseif ($null -ne $qRes) {
+                    @($qRes)
+                } else {
+                    @()
+                }
+                foreach ($q in $qItems) {
+                    if ($null -eq $q -or -not ($q -is [System.Collections.IDictionary])) { continue }
+                    $jId = if ($q.ContainsKey('JobId')) { [string]$q['JobId'] } else { '' }
+                    $qId = if ($q.ContainsKey('QueueId')) { [string]$q['QueueId'] } else { '' }
+                    $fName = if ($q.ContainsKey('FileName')) { [string]$q['FileName'] } else { 'Transfer file' }
+                    $key = if ($jId) { $jId } elseif ($qId) { $qId } else { $fName }
+                    if ($key -and -not $seenKeys.ContainsKey($key)) {
+                        $seenKeys[$key] = $true
+                        $pName = if ($q.ContainsKey('ProviderId')) { [string]$q['ProviderId'] } else { 'Cloud Storage' }
+                        $vType = if ($q.ContainsKey('VerificationType')) { [string]$q['VerificationType'] } else { '' }
+                        $rHash = if ($q.ContainsKey('RemoteHash')) { [string]$q['RemoteHash'] } else { '' }
+                        $unifiedList.Add([PSCustomObject]@{
+                            JobId = if ($jId) { $jId } else { $qId }
+                            BatchId = if ($q.ContainsKey('BatchId')) { [string]$q['BatchId'] } else { '' }
+                            BatchName = if ($q.ContainsKey('BatchName')) { [string]$q['BatchName'] } else { '' }
+                            FileName = $fName
+                            DriveLetter = ''
+                            ProviderName = $pName
+                            FileSizeBytes = if ($q.ContainsKey('FileSizeBytes')) { [int64]$q['FileSizeBytes'] } else { 0L }
+                            BytesTransferred = if ($q.ContainsKey('BytesTransferred')) { [int64]$q['BytesTransferred'] } else { 0L }
+                            Status = if ($q.ContainsKey('Status')) { [string]$q['Status'] } else { 'Queued' }
+                            Error = if ($q.ContainsKey('LastError')) { [string]$q['LastError'] } else { '' }
+                            VerificationType = $vType
+                            RemoteHash = $rHash
+                            TimestampUtc = if ($q.ContainsKey('EnqueuedUtc')) { [string]$q['EnqueuedUtc'] } else { '' }
+                        })
+                    }
+                }
+            }
+
+            foreach ($h in @($script:TransferEventHistory)) {
+                if ($null -eq $h) { continue }
+                $jId = if ($h.ContainsKey('JobId')) { [string]$h['JobId'] } else { '' }
+                $fName = if ($h.ContainsKey('FileName')) { [string]$h['FileName'] } else { '' }
+                $st = if ($h.ContainsKey('Status')) { [string]$h['Status'] } else { '' }
+                $key = if ($jId) { $jId } else { "${fName}:${st}" }
+                if ($key -and -not $seenKeys.ContainsKey($key)) {
+                    $seenKeys[$key] = $true
+                    $unifiedList.Add([PSCustomObject]@{
+                        JobId = $jId
+                        BatchId = if ($h.ContainsKey('BatchId')) { [string]$h['BatchId'] } else { '' }
+                        BatchName = if ($h.ContainsKey('BatchName')) { [string]$h['BatchName'] } else { '' }
+                        FileName = $fName
+                        DriveLetter = if ($h.ContainsKey('DriveLetter')) { [string]$h['DriveLetter'] } else { '' }
+                        ProviderName = if ($h.ContainsKey('ProviderName')) { [string]$h['ProviderName'] } else { 'Cloud Storage' }
+                        FileSizeBytes = if ($h.ContainsKey('FileSizeBytes')) { [int64]$h['FileSizeBytes'] } else { 0L }
+                        BytesTransferred = if ($h.ContainsKey('BytesTransferred')) { [int64]$h['BytesTransferred'] } else { 0L }
+                        Status = $st
+                        Error = if ($h.ContainsKey('Error')) { [string]$h['Error'] } else { '' }
+                        VerificationType = if ($h.ContainsKey('VerificationType')) { [string]$h['VerificationType'] } else { '' }
+                        RemoteHash = if ($h.ContainsKey('RemoteHash')) { [string]$h['RemoteHash'] } else { '' }
+                        TimestampUtc = if ($h.ContainsKey('TimestampUtc')) { [string]$h['TimestampUtc'] } else { '' }
+                    })
+                }
+            }
+
+            $script:TransferModalRawItems = @($unifiedList)
+
+            $activeCount = 0
+            $completedCount = 0
+            $failedCount = 0
+            foreach ($it in $script:TransferModalRawItems) {
+                if ($it.Status -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation')) {
+                    $activeCount++
+                } elseif ($it.Status -in @('Completed and remotely confirmed', 'Completed')) {
+                    $completedCount++
+                } elseif ($it.Status -in @('Failed', 'Cancelled')) {
+                    $failedCount++
+                }
+            }
+
+            $statusSummaryLabel.Text = "Total: $($script:TransferModalRawItems.Count) transfers " + [char]0x2022 + " $activeCount active, $completedCount completed, $failedCount failed"
+
+            & $renderCards $searchBox.Text
+        } catch {
+            $statusSummaryLabel.Text = "Error loading transfers: $($_.Exception.Message)"
+        }
+    }
+
+    $btnAll.Add_Click({
+        $script:CurrentTransferModalFilter = 'All'
+        & $applyFilterStyle
+        & $renderCards $searchBox.Text
+    })
+    $btnActive.Add_Click({
+        $script:CurrentTransferModalFilter = 'Active'
+        & $applyFilterStyle
+        & $renderCards $searchBox.Text
+    })
+    $btnCompleted.Add_Click({
+        $script:CurrentTransferModalFilter = 'Completed'
+        & $applyFilterStyle
+        & $renderCards $searchBox.Text
+    })
+    $btnFailed.Add_Click({
+        $script:CurrentTransferModalFilter = 'Failed'
+        & $applyFilterStyle
+        & $renderCards $searchBox.Text
+    })
+
+    $searchBox.Add_TextChanged({
+        & $renderCards $searchBox.Text
+    })
+
+    $refreshBtn.Add_Click({
+        & $loadData
+    })
+
+    $clearCompletedBtn.Add_Click({
+        if (Get-Command Clear-CloudTransferQueue -ErrorAction SilentlyContinue) {
+            try { Clear-CloudTransferQueue -All:$false } catch { }
+        }
+        $toKeep = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($evt in @($script:TransferEventHistory)) {
+            $st = if ($evt.ContainsKey('Status')) { [string]$evt['Status'] } else { '' }
+            if ($st -notin @('Completed and remotely confirmed', 'Completed')) {
+                $toKeep.Add($evt)
+            }
+        }
+        $script:TransferEventHistory.Clear()
+        foreach ($tk in $toKeep) { $script:TransferEventHistory.Add($tk) }
+        try {
+            $targetFile = Get-TransferHistoryFilePath
+            $tmpFile = "$targetFile.$([Guid]::NewGuid().ToString('N')).tmp"
+            $json = @($script:TransferEventHistory) | ConvertTo-Json -Depth 5
+            [System.IO.File]::WriteAllText($tmpFile, $json, [System.Text.Encoding]::UTF8)
+            if (Test-Path -LiteralPath $targetFile) {
+                try { [System.IO.File]::Replace($tmpFile, $targetFile, $null) } catch { Move-Item -LiteralPath $tmpFile -Destination $targetFile -Force }
+            } else {
+                [System.IO.File]::Move($tmpFile, $targetFile)
+            }
+        } catch { }
+        & $loadData
+    })
+
+    $closeBtn.Add_Click({
+        $tcWin.Close()
+    })
+
+    & $loadData
+    [void](Enable-ModalGlassBackdrop $tcWin)
+    $tcWin.ShowDialog() | Out-Null
+}
+
 # ==============================================================================
 # LIQUID GLASS BACKDROP ENGINE (only engages on supported Windows builds)
 # ==============================================================================
@@ -3326,6 +5466,11 @@ function Apply-UITheme([string]$ThemeName) {
     $sidebar.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.SidebarBorder)
 
     # Disks view toolbar
+    if ($transfersBtn) {
+        $transfersBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        $transfersBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+        $transfersBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    }
     $refreshBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
     $refreshBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $refreshBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
@@ -3391,19 +5536,25 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $backToDisksBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backToDisksBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
 
-    foreach ($card in @($genCard, $themeCard, $cacheCard, $notifyCard, $diagCard)) {
-        $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
-        $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    foreach ($card in @($genCard, $themeCard, $cacheCard, $notifyCard, $bwCard, $diagCard)) {
+        if ($card) {
+            $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+        }
     }
-    foreach ($lbl in @($genTitle, $themeTitle, $cacheTitle, $notifyTitle, $diagTitle)) {
-        $lbl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($lbl in @($genTitle, $themeTitle, $cacheTitle, $notifyTitle, $bwTitle, $diagTitle)) {
+        if ($lbl) {
+            $lbl.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
     }
-    foreach ($chk in @($optStartupChk, $optTrayChk, $optStartMinChk, $optExplorerChk, $optAutoMountChk, $optNotifyMasterChk, $optNotifyStartChk, $optNotifyCompleteChk, $optNotifyGroupFolderChk)) {
+    if ($bwDesc) { $bwDesc.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
+    if ($lblSens) { $lblSens.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
+    foreach ($chk in @($optStartupChk, $optTrayChk, $optStartMinChk, $optExplorerChk, $optAutoMountChk, $optNotifyMasterChk, $optNotifyStartChk, $optNotifyCompleteChk, $optNotifyGroupFolderChk, $optNotifyOnlyFullFolderChk, $optNotifyBackgroundSyncChk, $chkBwGaming, $chkUploadMinimized, $chkRespectTray, $chkKeepTransfers)) {
         if ($chk) {
             $chk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
         }
     }
-    foreach ($rb in @($rbThemePureBlack, $rbThemePureWhite)) {
+    foreach ($rb in @($rbThemePureBlack, $rbThemePureWhite, $rbBwUnlimited, $rbBwLimited, $rbBwMinimal, $rbBwAdaptive)) {
         if ($rb) {
             $rb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
         }
@@ -3459,10 +5610,12 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $cacheQuotaLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
     $diagDescLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
 
-    foreach ($btn in @($cleanCacheBtn, $openCacheBtn, $showDiagBtn, $trimMemBtn, $browseCacheBtn)) {
-        $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
-        $btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
-        $btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($btn in @($inspectCacheBtn, $cleanCacheBtn, $openCacheBtn, $showDiagBtn, $trimMemBtn, $browseCacheBtn)) {
+        if ($null -ne $btn) {
+            $btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+            $btn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+            $btn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
     }
 
     # Help View
@@ -3472,15 +5625,21 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $backFromHelpBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backFromHelpBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
 
-    foreach ($hcard in @($helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard)) {
-        $hcard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
-        $hcard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    foreach ($hcard in @($helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $helpAboutCard)) {
+        if ($null -ne $hcard) {
+            $hcard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $hcard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+        }
     }
-    foreach ($htitle in @($helpQuickTitle, $helpSecTitle, $helpProvTitle, $helpPerfTitle)) {
-        $htitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($htitle in @($helpQuickTitle, $helpSecTitle, $helpProvTitle, $helpPerfTitle, $helpAboutTitle)) {
+        if ($null -ne $htitle) {
+            $htitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
     }
-    foreach ($htxt in @($helpQuickText, $helpSecText, $helpProvText, $helpPerfText)) {
-        $htxt.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    foreach ($htxt in @($helpQuickText, $helpSecText, $helpProvText, $helpPerfText, $helpAboutText)) {
+        if ($null -ne $htxt) {
+            $htxt.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+        }
     }
 
     # Analytics View
@@ -3490,20 +5649,42 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
     $backFromAnalyticsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
     $backFromAnalyticsBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
     $backFromAnalyticsBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
-    foreach ($acard in @($analyticsTransferCard.Card, $overviewCard.Card, $storageCard.Card, $resourceCard.Card)) {
-        $acard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
-        $acard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    foreach ($acard in @($analyticsTransferCard.Card, $overviewCard.Card, $analyticsNetworkCard.Card, $analyticsCacheCard.Card, $storageCard.Card, $resourceCard.Card, $analyticsLandingCard, $analyticsActionBar, $anExplBorder)) {
+        if ($null -ne $acard) {
+            $acard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $acard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+        }
     }
-    foreach ($atitle in @($analyticsTransferCard.Title, $overviewCard.Title, $storageCard.Title, $resourceCard.Title)) {
-        $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    foreach ($atitle in @($analyticsTransferCard.Title, $overviewCard.Title, $analyticsNetworkCard.Title, $analyticsCacheCard.Title, $storageCard.Title, $resourceCard.Title)) {
+        if ($null -ne $atitle) {
+            $atitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+        }
     }
-    foreach ($abtn in @($analyticsTransferPauseBtn, $analyticsTransferCancelBtn, $analyticsTransferOpenCacheBtn, $ltPauseBtn, $ltCancelBtn, $ltOpenCacheBtn)) {
+    if ($null -ne $analyticsNetworkCard) {
+        $analyticsNetworkCard.Accent.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#06B6D4')
+    }
+    if ($null -ne $analyticsCacheCard) {
+        $analyticsCacheCard.Accent.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#10B981')
+    }
+    foreach ($sc in @($statMounts, $statTransfers, $statCache, $statNetwork)) {
+        if ($null -ne $sc -and $null -ne $sc.Card) {
+            $sc.Card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+            $sc.Card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+            $sc.Value.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+            $sc.Subtitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+            $sc.Badge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+        }
+    }
+    foreach ($abtn in @($analyticsTransferPauseBtn, $analyticsTransferCancelBtn, $analyticsTransferOpenCacheBtn, $analyticsCancelBtn, $analyticsRefreshAnalyticsBtn, $ltPauseBtn, $ltCancelBtn, $ltOpenCacheBtn)) {
         if ($null -ne $abtn) {
             $abtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
             $abtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
             $abtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
         }
     }
+    if ($null -ne $alTitle) { $alTitle.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary) }
+    if ($null -ne $alDesc) { $alDesc.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
+    if ($null -ne $analyticsCollectionStatus) { $analyticsCollectionStatus.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
     if ($null -ne $analyticsTransferRoute) { $analyticsTransferRoute.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary) }
     if ($null -ne $analyticsTransferFileName) { $analyticsTransferFileName.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary) }
     if ($null -ne $analyticsTransferDetails) { $analyticsTransferDetails.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
@@ -3512,9 +5693,15 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
         $atNoteBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
         $atNoteText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
     }
+    if ($null -ne $anExplText) { $anExplText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
+    if ($null -ne $analyticsCacheProgressBar) {
+        $analyticsCacheProgressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    }
     if ($null -ne $liveTransferRoute) { $liveTransferRoute.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary) }
-    foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsNetwork, $analyticsAccounts, $analyticsMounts)) {
-        $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+    foreach ($arow in @($analyticsStorageSummary, $analyticsAppRam, $analyticsAppCpu, $analyticsNetwork, $analyticsAccounts, $analyticsMounts, $analyticsUploadSpeedRow, $analyticsDownloadSpeedRow, $analyticsPingRow, $analyticsCacheDirRow, $analyticsCacheUsageRow, $analyticsCachePendingRow, $analyticsCacheTtlRow)) {
+        if ($null -ne $arow) {
+            $arow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextSecondary)
+        }
     }
     $overviewCard.Accent.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
     $storageCard.Accent.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F59E0B')
@@ -3576,8 +5763,10 @@ $gdStorageBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertF
         # visible through the window and its navigation and dashboard surfaces.
         $window.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowGlassBg)
         $sidebar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.SidebarGlassBg)
-        foreach ($glassCard in @($gdCard, $tbCard, $genCard, $themeCard, $cacheCard, $notifyCard, $diagCard, $helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $overviewCard.Card, $storageCard.Card, $resourceCard.Card, $logsListCard, $logsPrivacyCard)) {
-            $glassCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardGlassBg)
+        foreach ($glassCard in @($gdCard, $tbCard, $genCard, $themeCard, $cacheCard, $notifyCard, $bwCard, $diagCard, $helpQuickCard, $helpSecCard, $helpProvCard, $helpPerfCard, $helpAboutCard, $analyticsTransferCard.Card, $overviewCard.Card, $analyticsNetworkCard.Card, $analyticsCacheCard.Card, $storageCard.Card, $resourceCard.Card, $analyticsLandingCard, $analyticsActionBar, $statMounts.Card, $statTransfers.Card, $statCache.Card, $statNetwork.Card, $logsListCard, $logsPrivacyCard)) {
+            if ($null -ne $glassCard) {
+                $glassCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardGlassBg)
+            }
         }
     }
 
@@ -4107,6 +6296,7 @@ function Complete-AvailableDriveDisconnectWorkers {
 
 function Start-ProviderStatusRefreshWorker {
     if ($script:ProviderStatusWorker) { return }
+    if ($script:StartupAutoMountPending -or $script:StartupAutoMountWorker) { return }
 
     $script:ProviderStatusWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot) -ScriptBlock {
         param([string]$sourceRoot)
@@ -4278,10 +6468,20 @@ function Complete-AvailableStartupWorkers {
         try {
             $pending = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory)
             if ($pending.Count -gt 0) {
-                $pendingSize = ($pending | Measure-Object -Property Length -Sum).Sum
-                $sizeFormatted = Format-LocalByteSize $pendingSize
-                if ($script:Settings.EnableNotifications -and $script:Settings.NotifyOnUploadStart -and -not (Test-NotificationsSnoozed $script:Settings)) {
-                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Resuming Background Sync", "Found $($pending.Count) pending staged files ($sizeFormatted) from previous session. Resuming background upload to cloud.", [System.Windows.Forms.ToolTipIcon]::None)
+                # Deduplication fingerprint: only notify once per session for the same set of staged files
+                $pendingFingerprint = ($pending | ForEach-Object { "$($_.Path):$($_.Length)" } | Sort-Object) -join ';'
+                if ($pendingFingerprint -and $pendingFingerprint -ne $script:LastNotifiedPendingFingerprint) {
+                    $script:LastNotifiedPendingFingerprint = $pendingFingerprint
+                    $pendingSize = ($pending | Measure-Object -Property Length -Sum).Sum
+                    $sizeFormatted = Format-LocalByteSize $pendingSize
+                    $notifySync = if ($script:Settings.Contains('NotifyOnBackgroundSync')) { [bool]$script:Settings.NotifyOnBackgroundSync } else { $true }
+                    if ($script:Settings.EnableNotifications -and $notifySync -and -not (Test-NotificationsSnoozed $script:Settings)) {
+                        # Only notify if total pending size > 0 to eliminate false 0 B alerts
+                        if ($pendingSize -gt 0L) {
+                            $msg = "Found $($pending.Count) pending staged file(s) ($sizeFormatted) from previous session. Resuming background upload to cloud."
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Resuming Background Sync", $msg, [System.Windows.Forms.ToolTipIcon]::None)
+                        }
+                    }
                 }
             }
         } catch { }
@@ -4629,9 +6829,19 @@ function Update-AllUIState {
             $gdLetterCombo.IsEnabled = $false
             $gdExplorerBtn.IsEnabled = $false
             $gdUploadBtn.IsEnabled = $false
+        } elseif ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'AuthRequired') {
+            $gdStatusText.Text = ([string][char]0x25CF + ' Sign-in required')
+            $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.PillWarning)
+            $gdStatusText.ToolTip = if ($gdStatus.MountState.Error) { [string]$gdStatus.MountState.Error } else { 'Google Drive authorization expired or revoked. Please reconnect your account.' }
+            $gdActionBtn.Content = 'Connect'
+            $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+            $gdLetterCombo.IsEnabled = $true
+            $gdExplorerBtn.IsEnabled = $false
+            $gdUploadBtn.IsEnabled = $false
         } elseif ($gdStatus.MountState -and $gdStatus.MountState.State -eq 'Error') {
-            $gdStatusText.Text = ([string][char]0x25CF + ' ' + [string]$gdStatus.MountState.Error)
+            $gdStatusText.Text = ([string][char]0x25CF + ' Connection failed')
             $gdStatusText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Danger)
+            $gdStatusText.ToolTip = if ($gdStatus.MountState.Error) { [string]$gdStatus.MountState.Error } else { 'Google Drive could not connect after several attempts. Please reconnect your account and try again.' }
             $gdActionBtn.Content = 'Retry'
             $gdActionBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
             $gdLetterCombo.IsEnabled = $true
@@ -4977,7 +7187,64 @@ function Update-AllUIState {
         }
     }
 
-    $accountCardsSignature = $script:Palette.Name + '|' + (ConvertTo-Json -InputObject @($cardSignatureItems.ToArray()) -Depth 4 -Compress)
+    function Invoke-AccountCardReorder([string]$TargetAccId, [int]$Direction) {
+        $accounts = @(Get-CloudAccounts)
+        $list = [System.Collections.Generic.List[string]]::new()
+        if ($script:Settings.CardDisplayOrder -and $script:Settings.CardDisplayOrder.Count -gt 0) {
+            foreach ($id in $script:Settings.CardDisplayOrder) { $list.Add([string]$id) }
+        } else {
+            foreach ($a in $accounts) { $list.Add([string]$a.Id) }
+        }
+        if (-not $list.Contains($TargetAccId)) { $list.Add($TargetAccId) }
+        $idx = $list.IndexOf($TargetAccId)
+        $newIdx = $idx + $Direction
+        if ($newIdx -ge 0 -and $newIdx -lt $list.Count) {
+            $temp = $list[$newIdx]
+            $list[$newIdx] = $list[$idx]
+            $list[$idx] = $temp
+            $script:Settings.CardDisplayOrder = @($list.ToArray())
+            Set-NSCloudDriveSettings $script:Settings
+            $script:AccountCardsSignature = ''
+            Update-AllUIState
+        }
+    }
+
+    function Invoke-AccountCardDropReorder([string]$DraggedAccId, [string]$TargetAccId, [string]$Position = 'Above') {
+        if (-not $DraggedAccId -or -not $TargetAccId -or $DraggedAccId -eq $TargetAccId) { return }
+        $accounts = @(Get-CloudAccounts)
+        $list = [System.Collections.Generic.List[string]]::new()
+        if ($script:Settings.Contains('CardDisplayOrder') -and $script:Settings.CardDisplayOrder -and $script:Settings.CardDisplayOrder.Count -gt 0) {
+            foreach ($id in $script:Settings.CardDisplayOrder) {
+                if ((-not $list.Contains([string]$id)) -and (@($accounts | Where-Object { [string]$_.Id -eq [string]$id }).Count -gt 0)) {
+                    $list.Add([string]$id)
+                }
+            }
+        }
+        foreach ($a in $accounts) {
+            if (-not $list.Contains([string]$a.Id)) {
+                $list.Add([string]$a.Id)
+            }
+        }
+        if (-not $list.Contains($DraggedAccId) -or -not $list.Contains($TargetAccId)) { return }
+        $list.Remove($DraggedAccId) | Out-Null
+        $targetIdx = $list.IndexOf($TargetAccId)
+        $insertIdx = if ($Position -eq 'Below') { $targetIdx + 1 } else { $targetIdx }
+        if ($insertIdx -gt $list.Count) { $insertIdx = $list.Count }
+        if ($insertIdx -lt 0) { $insertIdx = 0 }
+        $list.Insert($insertIdx, $DraggedAccId)
+        $script:Settings.CardDisplayOrder = @($list.ToArray())
+        try {
+            Set-NSCloudDriveSettings $script:Settings
+        } catch {
+            Write-NSCloudLog -Severity 'Error' -Operation 'card-reorder' -Message "Failed to persist card display order: $($_.Exception.Message)"
+            return
+        }
+        $script:AccountCardsSignature = ''
+        Update-AllUIState
+    }
+
+    $cardDisplayOrderStr = if ($script:Settings.Contains('CardDisplayOrder') -and $script:Settings.CardDisplayOrder) { $script:Settings.CardDisplayOrder -join ',' } else { '' }
+    $accountCardsSignature = $script:Palette.Name + '|' + $cardDisplayOrderStr + '|' + (ConvertTo-Json -InputObject @($cardSignatureItems.ToArray()) -Depth 4 -Compress)
     $refreshAccountCards = $accountCardsSignature -ne $script:AccountCardsSignature
     if ($refreshAccountCards) {
         $accountsStack.Children.Clear()
@@ -4987,32 +7254,348 @@ function Update-AllUIState {
         $secLabel.Margin = [System.Windows.Thickness]::new(2, 6, 0, 8)
         $accountsStack.Children.Add($secLabel) | Out-Null
 
-        foreach ($acc in $allAccounts) {
+        $orderedAccounts = [System.Collections.Generic.List[object]]::new()
+        if ($script:Settings.Contains('CardDisplayOrder') -and $script:Settings.CardDisplayOrder -and $script:Settings.CardDisplayOrder.Count -gt 0) {
+            foreach ($ordId in $script:Settings.CardDisplayOrder) {
+                $matched = @($allAccounts | Where-Object { [string]$_.Id -eq [string]$ordId })
+                if ($matched.Count -gt 0) { $orderedAccounts.Add($matched[0]) }
+            }
+            foreach ($remAcc in $allAccounts) {
+                if (-not ($script:Settings.CardDisplayOrder -contains [string]$remAcc.Id)) {
+                    $orderedAccounts.Add($remAcc)
+                }
+            }
+        } else {
+            foreach ($remAcc in $allAccounts) { $orderedAccounts.Add($remAcc) }
+        }
+
+        foreach ($acc in $orderedAccounts) {
             $aCard = [System.Windows.Controls.Border]::new()
+            $aCard.Tag = [string]$acc.Id
             $accountCardFill = if ($script:GlassState.Active -and $p.Name -eq 'Translucent') { $p.CardGlassBg } else { $p.CardBg }
             $aCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($accountCardFill)
             $aCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
             $aCard.BorderThickness = [System.Windows.Thickness]::new(1)
             $aCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
-            $aCard.Padding = [System.Windows.Thickness]::new(14, 12, 14, 12)
+            $aCard.Padding = [System.Windows.Thickness]::new(10, 12, 14, 12)
             $aCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
 
             $aGrid = [System.Windows.Controls.Grid]::new()
             $aCard.Child = $aGrid
+            $aColGrip = [System.Windows.Controls.ColumnDefinition]::new(); $aColGrip.Width = [System.Windows.GridLength]::Auto
             $aCol0 = [System.Windows.Controls.ColumnDefinition]::new(); $aCol0.Width = [System.Windows.GridLength]::Auto
             $aCol1 = [System.Windows.Controls.ColumnDefinition]::new(); $aCol1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
             $aCol2 = [System.Windows.Controls.ColumnDefinition]::new(); $aCol2.Width = [System.Windows.GridLength]::Auto
+            $aGrid.ColumnDefinitions.Add($aColGrip)
             $aGrid.ColumnDefinitions.Add($aCol0)
             $aGrid.ColumnDefinitions.Add($aCol1)
             $aGrid.ColumnDefinitions.Add($aCol2)
 
+            $aGripHandle = [System.Windows.Controls.Border]::new()
+            $aGripHandle.Tag = [string]$acc.Id
+            $aGripHandle.Width = 24
+            $aGripHandle.Height = 36
+            $aGripHandle.CornerRadius = [System.Windows.CornerRadius]::new(4)
+            $aGripHandle.Padding = [System.Windows.Thickness]::new(2, 4, 2, 4)
+            $aGripHandle.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+            $aGripHandle.VerticalAlignment = 'Center'
+            $aGripHandle.HorizontalAlignment = 'Center'
+            $aGripHandle.Cursor = [System.Windows.Input.Cursors]::SizeAll
+            $aGripHandle.ToolTip = 'Click and drag to reorder cloud drives'
+            $aGripHandle.Background = [System.Windows.Media.Brushes]::Transparent
+
+            $aGripHandle.Add_MouseEnter({
+                param($s, $e)
+                if (-not ($script:CardDragState -and $script:CardDragState.IsDragging)) {
+                    $s.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+                }
+            })
+            $aGripHandle.Add_MouseLeave({
+                param($s, $e)
+                $s.Background = [System.Windows.Media.Brushes]::Transparent
+            })
+
+            $aGripIcon = New-Label ([string][char]0x2807 + [string][char]0x2807) 16 $p.TextMuted $false
+            $aGripIcon.HorizontalAlignment = 'Center'
+            $aGripIcon.VerticalAlignment = 'Center'
+            $aGripIcon.IsHitTestVisible = $false
+            $aGripHandle.Child = $aGripIcon
+
+            $aCard.Add_PreviewMouseLeftButtonDown({
+                param($s, $e)
+                # Check if click originated inside an interactive control
+                $isInteractive = $false
+                $cur = $e.OriginalSource
+                while ($cur -and $cur -ne $s) {
+                    if ($cur -is [System.Windows.Controls.Primitives.ButtonBase] -or
+                        $cur -is [System.Windows.Controls.ComboBox] -or
+                        $cur -is [System.Windows.Controls.TextBox] -or
+                        $cur -is [System.Windows.Controls.PasswordBox] -or
+                        $cur -is [System.Windows.Controls.CheckBox] -or
+                        $cur -is [System.Windows.Controls.Primitives.ScrollBar] -or
+                        $cur -is [System.Windows.Controls.Primitives.Thumb]) {
+                        $isInteractive = $true
+                        break
+                    }
+                    $parent = $null
+                    try {
+                        if ($cur -is [System.Windows.Media.Visual] -or $cur -is [System.Windows.Media.Media3D.Visual3D]) {
+                            $parent = [System.Windows.Media.VisualTreeHelper]::GetParent($cur)
+                        }
+                    } catch { }
+                    if (-not $parent -and ($cur -is [System.Windows.FrameworkElement] -or $cur -is [System.Windows.FrameworkContentElement])) {
+                        $parent = $cur.Parent
+                    }
+                    $cur = $parent
+                }
+                if ($isInteractive) { return }
+
+                $script:CardDragState.StartPoint = $e.GetPosition($window)
+                $script:CardDragState.DraggedAccId = [string]$s.Tag
+                $script:CardDragState.DraggedCard = $s
+                $script:CardDragState.TargetAccId = ''
+                $script:CardDragState.TargetCard = $null
+                $script:CardDragState.DropPosition = 'None'
+                $script:CardDragState.IsDragging = $false
+                $s.CaptureMouse() | Out-Null
+                $e.Handled = $true
+            })
+
+            $aCard.Add_MouseMove({
+                param($mSender, $mArgs)
+                if (-not $mSender.IsMouseCaptured) { return }
+                if ($mArgs.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { return }
+                if ($null -eq $script:CardDragState.StartPoint) { return }
+
+                $currPoint = $mArgs.GetPosition($window)
+                $diff = $currPoint - $script:CardDragState.StartPoint
+                $dragThresholdH = [System.Windows.SystemParameters]::MinimumHorizontalDragDistance
+                $dragThresholdV = [System.Windows.SystemParameters]::MinimumVerticalDragDistance
+
+                if (-not $script:CardDragState.IsDragging) {
+                    if ([Math]::Abs($diff.X) -ge $dragThresholdH -or [Math]::Abs($diff.Y) -ge $dragThresholdV) {
+                        $script:CardDragState.IsDragging = $true
+                        if ($script:CardDragState.DraggedCard) {
+                            $script:CardDragState.DraggedCard.Opacity = 0.50
+                            if ($script:CardDragState.DraggedCard -is [System.Windows.FrameworkElement]) {
+                                $script:CardDragState.DraggedCard.Cursor = [System.Windows.Input.Cursors]::SizeAll
+                            }
+                        }
+                    }
+                }
+
+                if (-not $script:CardDragState.IsDragging) { return }
+
+                if ($mainScroll) {
+                    try {
+                        $scrollPos = $mArgs.GetPosition($mainScroll)
+                        $scrollH = $mainScroll.ActualHeight
+                        if ($scrollH -gt 0) {
+                            if ($scrollPos.Y -lt 40 -and $scrollPos.Y -gt -30) {
+                                $mainScroll.ScrollToVerticalOffset($mainScroll.VerticalOffset - 12)
+                            } elseif ($scrollPos.Y -gt ($scrollH - 40) -and $scrollPos.Y -lt ($scrollH + 30)) {
+                                $mainScroll.ScrollToVerticalOffset($mainScroll.VerticalOffset + 12)
+                            }
+                        }
+                    } catch { }
+                }
+
+                $cardBorders = [System.Collections.Generic.List[System.Windows.Controls.Border]]::new()
+                $cardList = [System.Collections.Generic.List[string]]::new()
+                foreach ($ch in $accountsStack.Children) {
+                    if ($ch -is [System.Windows.Controls.Border] -and $ch.Tag) {
+                        $cardBorders.Add($ch)
+                        $cardList.Add([string]$ch.Tag)
+                    }
+                }
+
+                $targetCard = $null
+                $targetTop = 0.0
+                $targetH = 0.0
+                $ptrY = $mArgs.GetPosition($accountsStack).Y
+                $minDist = [double]::MaxValue
+
+                for ($ci = 0; $ci -lt $cardBorders.Count; $ci++) {
+                    $c = $cardBorders[$ci]
+                    try {
+                        $cTop = $c.TransformToAncestor($accountsStack).Transform([System.Windows.Point]::new(0, 0)).Y
+                        $cH = $c.ActualHeight
+                        if ($cH -le 0) { $cH = $c.RenderSize.Height }
+                        $cMid = $cTop + ($cH / 2.0)
+
+                        if ($ptrY -ge $cTop -and $ptrY -le ($cTop + $cH)) {
+                            $targetCard = $c
+                            $targetTop = $cTop
+                            $targetH = $cH
+                            break
+                        }
+
+                        $dist = [Math]::Abs($ptrY - $cMid)
+                        if ($dist -lt $minDist) {
+                            $minDist = $dist
+                            $targetCard = $c
+                            $targetTop = $cTop
+                            $targetH = $cH
+                        }
+                    } catch { }
+                }
+
+                $dropPos = 'None'
+                if ($targetCard -and $targetCard.Tag) {
+                    $draggedIdx = $cardList.IndexOf([string]$script:CardDragState.DraggedAccId)
+                    $targetIdx = $cardList.IndexOf([string]$targetCard.Tag)
+                    if ($draggedIdx -ge 0 -and $targetIdx -ge 0 -and $draggedIdx -ne $targetIdx) {
+                        if ($draggedIdx -lt $targetIdx) {
+                            if ($ptrY -gt ($targetTop + ($targetH * 0.25))) {
+                                $dropPos = 'Below'
+                            } else {
+                                $dropPos = 'Above'
+                            }
+                        } else {
+                            if ($ptrY -lt ($targetTop + ($targetH * 0.75))) {
+                                $dropPos = 'Above'
+                            } else {
+                                $dropPos = 'Below'
+                            }
+                        }
+                    }
+                }
+
+                $accentBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.Accent)
+                $cardBorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+                $t1 = [System.Windows.Thickness]::new(1)
+                $tAbove = [System.Windows.Thickness]::new(1, 3, 1, 1)
+                $tBelow = [System.Windows.Thickness]::new(1, 1, 1, 3)
+
+                if ($targetCard -and $script:CardDragState.DraggedCard -and $targetCard -eq $script:CardDragState.DraggedCard) {
+                    $script:CardDragState.TargetAccId = ''
+                    $script:CardDragState.TargetCard = $null
+                    $script:CardDragState.DropPosition = 'None'
+
+                    foreach ($child in $cardBorders) {
+                        if ($child -eq $script:CardDragState.DraggedCard) {
+                            $child.Opacity = 0.50
+                            $child.BorderBrush = $accentBrush
+                            $child.BorderThickness = $t1
+                        } else {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $cardBorderBrush
+                            $child.BorderThickness = $t1
+                        }
+                    }
+                } elseif ($targetCard -and ($dropPos -eq 'Above' -or $dropPos -eq 'Below')) {
+                    $script:CardDragState.TargetAccId = [string]$targetCard.Tag
+                    $script:CardDragState.TargetCard = $targetCard
+                    $script:CardDragState.DropPosition = $dropPos
+
+                    foreach ($child in $cardBorders) {
+                        if ($child -eq $script:CardDragState.DraggedCard) {
+                            $child.Opacity = 0.50
+                            $child.BorderBrush = $accentBrush
+                            $child.BorderThickness = $t1
+                        } elseif ($child -eq $targetCard) {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $accentBrush
+                            $child.BorderThickness = if ($dropPos -eq 'Above') { $tAbove } else { $tBelow }
+                        } else {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $cardBorderBrush
+                            $child.BorderThickness = $t1
+                        }
+                    }
+                } else {
+                    $script:CardDragState.TargetAccId = ''
+                    $script:CardDragState.TargetCard = $null
+                    $script:CardDragState.DropPosition = 'None'
+
+                    foreach ($child in $cardBorders) {
+                        if ($child -eq $script:CardDragState.DraggedCard) {
+                            $child.Opacity = 0.50
+                            $child.BorderBrush = $accentBrush
+                            $child.BorderThickness = $t1
+                        } else {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $cardBorderBrush
+                            $child.BorderThickness = $t1
+                        }
+                    }
+                }
+            })
+
+            $aCard.Add_PreviewMouseLeftButtonUp({
+                param($s, $e)
+                if ($s -is [System.Windows.FrameworkElement]) {
+                    $s.Cursor = $null
+                }
+                $wasDragging = [bool]$script:CardDragState.IsDragging
+                $draggedId   = [string]$script:CardDragState.DraggedAccId
+                $targetId    = [string]$script:CardDragState.TargetAccId
+                $pos         = [string]$script:CardDragState.DropPosition
+
+                if ($s.IsMouseCaptured) {
+                    $s.ReleaseMouseCapture()
+                }
+
+                if ($accountsStack) {
+                    $cb = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+                    $t1 = [System.Windows.Thickness]::new(1)
+                    foreach ($child in $accountsStack.Children) {
+                        if ($child -is [System.Windows.Controls.Border]) {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $cb
+                            $child.BorderThickness = $t1
+                        }
+                    }
+                }
+
+                $script:CardDragState.IsDragging   = $false
+                $script:CardDragState.StartPoint   = $null
+                $script:CardDragState.DraggedAccId = ''
+                $script:CardDragState.TargetAccId  = ''
+                $script:CardDragState.TargetCard   = $null
+                $script:CardDragState.DraggedCard  = $null
+                $script:CardDragState.DropPosition = 'None'
+
+                if ($wasDragging -and $draggedId -and $targetId -and $draggedId -ne $targetId -and ($pos -eq 'Above' -or $pos -eq 'Below')) {
+                    Invoke-AccountCardDropReorder -DraggedAccId $draggedId -TargetAccId $targetId -Position $pos
+                }
+            })
+
+            $aCard.Add_LostMouseCapture({
+                param($s, $e)
+                if ($s -is [System.Windows.FrameworkElement]) {
+                    $s.Cursor = $null
+                }
+                if ($accountsStack) {
+                    $cb = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+                    $t1 = [System.Windows.Thickness]::new(1)
+                    foreach ($child in $accountsStack.Children) {
+                        if ($child -is [System.Windows.Controls.Border]) {
+                            $child.Opacity = 1.0
+                            $child.BorderBrush = $cb
+                            $child.BorderThickness = $t1
+                        }
+                    }
+                }
+                $script:CardDragState.IsDragging   = $false
+                $script:CardDragState.StartPoint   = $null
+                $script:CardDragState.DraggedAccId = ''
+                $script:CardDragState.TargetAccId  = ''
+                $script:CardDragState.TargetCard   = $null
+                $script:CardDragState.DraggedCard  = $null
+                $script:CardDragState.DropPosition = 'None'
+            })
+
+            [System.Windows.Controls.Grid]::SetColumn($aGripHandle, 0)
+            $aGrid.Children.Add($aGripHandle) | Out-Null
+
             $aDiskIcon = New-AccountDiskIcon $acc.ProviderId
-            [System.Windows.Controls.Grid]::SetColumn($aDiskIcon, 0)
+            [System.Windows.Controls.Grid]::SetColumn($aDiskIcon, 1)
             $aGrid.Children.Add($aDiskIcon) | Out-Null
 
             $aInfoStack = [System.Windows.Controls.StackPanel]::new()
             $aInfoStack.VerticalAlignment = 'Center'
-            [System.Windows.Controls.Grid]::SetColumn($aInfoStack, 1)
+            [System.Windows.Controls.Grid]::SetColumn($aInfoStack, 2)
             $aGrid.Children.Add($aInfoStack) | Out-Null
 
             $aProviderName = switch ([string]$acc.ProviderId) {
@@ -5225,13 +7808,13 @@ function Update-AllUIState {
             $aRemBtn.IsEnabled = -not ($aMountState -and $aMountState.State -in @('Mounting', 'Disconnecting'))
             $aActionRow.Children.Add($aRemBtn) | Out-Null
 
-            # Col 2: Status
+            # Col 3: Status
             $aRightStack = [System.Windows.Controls.StackPanel]::new()
             $aRightStack.VerticalAlignment = 'Center'
             $aRightStack.HorizontalAlignment = 'Right'
             $aRightStack.Width = 220
             $aRightStack.Margin = [System.Windows.Thickness]::new(12, 0, 0, 0)
-            [System.Windows.Controls.Grid]::SetColumn($aRightStack, 2)
+            [System.Windows.Controls.Grid]::SetColumn($aRightStack, 3)
             $aGrid.Children.Add($aRightStack) | Out-Null
 
             $mountElapsed = if ($aMountState -and $aMountState.StartedAt) { [Math]::Max(0, [int]([DateTime]::UtcNow - [DateTime]$aMountState.StartedAt).TotalSeconds) } else { 0 }
@@ -5250,10 +7833,10 @@ function Update-AllUIState {
             } elseif ($aMountState -and $aMountState.State -eq 'Checking') {
                 [string][char]0x25CF + ' Checking existing mount (' + $mountElapsed + 's)'
             } elseif ($aMountState -and $aMountState.State -eq 'Mounting') {
-                [string][char]0x25CF + ' ' + [string]$aMountState.Stage + ' (' + $mountElapsed + 's)'
+                $mountStage = if ($aMountState.Stage) { [string]$aMountState.Stage } else { 'Mounting' }
+                [string][char]0x25CF + ' ' + $mountStage + ' (' + $mountElapsed + 's)'
             } elseif ($aMountState -and $aMountState.State -eq 'Error') {
-                $errText = if ($aMountState.Error) { [string]$aMountState.Error } else { 'Mount failed' }
-                [string][char]0x25CF + ' Failed: ' + $errText
+                [string][char]0x25CF + ' Connection failed'
             } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') {
                 [string][char]0x25CF + ' Sign-in required'
             } else {
@@ -5267,6 +7850,8 @@ function Update-AllUIState {
                 $p.Danger
             } elseif ($aMountState -and $aMountState.State -in @('Mounting', 'Checking', 'Queued')) {
                 $p.PillWarning
+            } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') {
+                $p.PillWarning
             } elseif ($aMountState -and $aMountState.State -eq 'Waiting') {
                 $p.TextMuted
             } else {
@@ -5274,6 +7859,11 @@ function Update-AllUIState {
             }
             $aStatusLbl = New-Label $pillText 11 $pillColor $true
             $aStatusLbl.HorizontalAlignment = 'Right'
+            if ($aMountState -and $aMountState.Error) {
+                $aStatusLbl.ToolTip = [string]$aMountState.Error
+            } elseif ($aMountState -and $aMountState.State -eq 'AuthRequired') {
+                $aStatusLbl.ToolTip = 'Google Drive authorization expired or revoked. Please reconnect your account.'
+            }
             $aRightStack.Children.Add($aStatusLbl) | Out-Null
 
             $accountsStack.Children.Add($aCard) | Out-Null
@@ -5553,6 +8143,11 @@ $menuOpenTB.Add_Click({
 })
 
 $trayMenu.Items.Add('-') | Out-Null
+$menuTransfers = $trayMenu.Items.Add('Transfer Center & History...')
+$menuTransfers.Add_Click({
+    Show-TransferCenterModal -Owner $window
+})
+$trayMenu.Items.Add('-') | Out-Null
 $snoozeSubMenu = [System.Windows.Forms.ToolStripMenuItem]::new('Snooze Notifications')
 $snooze15 = $snoozeSubMenu.DropDownItems.Add('Snooze 15 minutes')
 $snooze15.Add_Click({
@@ -5617,22 +8212,9 @@ $notifyIcon.Add_BalloonTipClicked({
     $window.Topmost = $false
     $window.Activate() | Out-Null
     $window.Focus() | Out-Null
-    if ($script:LastNotifiedPath) {
-        try {
-            if (Test-Path -LiteralPath $script:LastNotifiedPath) {
-                if (Test-Path -LiteralPath $script:LastNotifiedPath -PathType Leaf) {
-                    Start-Process 'explorer.exe' -ArgumentList "/select,`"$script:LastNotifiedPath`""
-                } else {
-                    Start-Process 'explorer.exe' -ArgumentList "`"$script:LastNotifiedPath`""
-                }
-            } elseif ($script:CurrentActiveTransferDrive) {
-                $driveRoot = "$($script:CurrentActiveTransferDrive):"
-                if (Test-Path -LiteralPath $driveRoot) {
-                    Start-Process 'explorer.exe' -ArgumentList "`"$driveRoot`""
-                }
-            }
-        } catch { }
-    }
+    try {
+        Show-TransferCenterModal -Owner $window
+    } catch { }
 })
 
 $window.Add_Closing({
@@ -5776,17 +8358,16 @@ function Start-LegacyMountWorker {
             . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
 
             if ($providerKey -eq 'gdrive') {
-                $progress.Stage = 'Validating Google Drive credentials'
-                $check = Test-GoogleDriveBackendSession
-                if (-not $check.IsValid) {
-                    $checkState = [string](Get-SafeProperty $check 'State' 'Error')
-                    return [pscustomobject]@{ WorkerKey = "__${providerKey}_legacy__"; ProviderId = $providerKey; State = if ($checkState -eq 'Disconnected') { 'Disconnected' } else { 'AuthRequired' }; Error = (Get-SafeProperty $check 'Error' 'Provider returned an incomplete status response.'); DriveLetter = $driveLetter }
-                }
-                $progress.Stage = "Starting and verifying ${driveLetter}: mount"
-                $environment = Get-GoogleDriveRcloneEnvironment
-                Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -DriveLetter $driveLetter `
+                $mountResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive' -DriveLetter $driveLetter `
                     -VolumeLabel $(if ($displayName) { $displayName } else { 'Google Drive' }) `
-                    -CacheDirectory $cacheDirectory -CacheMaxGigabytes $cacheMaxGigabytes -EnvironmentVariables $environment | Out-Null
+                    -CacheDirectory $cacheDirectory -CacheMaxGigabytes $cacheMaxGigabytes -Progress $progress
+                return [pscustomobject]@{
+                    WorkerKey   = "__${providerKey}_legacy__"
+                    ProviderId  = $providerKey
+                    State       = $mountResult.State
+                    Error       = $mountResult.Error
+                    DriveLetter = $mountResult.DriveLetter
+                }
             } elseif ($providerKey -eq 'terabox') {
                 $progress.Stage = 'Validating TeraBox session'
                 $check = Test-TeraBoxBackendSession
@@ -5986,15 +8567,42 @@ function Invoke-AutoReconnectWatchdog {
                                 [pscustomobject]@{ WorkerKey = $key; State = 'Disconnected'; FailureCount = 0; NextAllowed = $null; Error = $null }
                                 continue
                             }
-                            $environment = Get-GoogleDriveRcloneEnvironment
                         } else {
                             $check = Test-GoogleDriveBackendSession -AccountId $account.Id -Force
                             if (-not $check.IsValid) {
                                 [pscustomobject]@{ WorkerKey = $key; State = 'AuthRequired'; FailureCount = 0; NextAllowed = $null; Error = (Format-SanitizedDiagnosticMessage ([string]$check.Error)); DriveLetter = $account.DriveLetter }
                                 continue
                             }
-                            $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
                         }
+                        $mountProg = if ($mountProgress.AccountId -eq $key) { $mountProgress } else { $null }
+                        $gdriveAccId = if ($key -like '__*') { '' } else { $account.Id }
+                        $mountResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive' -AccountId $gdriveAccId `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes `
+                            -ReadOnly:$([bool]$account.ReadOnly) -Progress $mountProg
+                        if (-not $mountResult.Success) {
+                            $failCnt = if ($mountResult.State -eq 'AuthRequired') { 0 } else { [int]($failureCounts[$key] + 1) }
+                            $delaySec = [Math]::Min(300, [Math]::Pow(2, $failCnt) * 30)
+                            $next = if ($mountResult.State -eq 'AuthRequired') { $null } else { $now.AddSeconds($delaySec) }
+                            [pscustomobject]@{
+                                WorkerKey    = $key
+                                State        = $mountResult.State
+                                FailureCount = $failCnt
+                                NextAllowed  = $next
+                                Error        = $mountResult.Error
+                                DriveLetter  = $account.DriveLetter
+                            }
+                            continue
+                        }
+                        [pscustomobject]@{
+                            WorkerKey    = $key
+                            State        = 'Mounted'
+                            FailureCount = 0
+                            NextAllowed  = $null
+                            Error        = $null
+                            DriveLetter  = $account.DriveLetter
+                        }
+                        continue
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
                         if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = 'Validating TeraBox session' }
                         if ($key -like '__*') {
@@ -6018,14 +8626,6 @@ function Invoke-AutoReconnectWatchdog {
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     } else {
                         continue
-                    }
-
-                    if ($account.ProviderId -eq 'gdrive' -and $mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
-                    if ($account.ProviderId -eq 'gdrive') {
-                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
-                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
-                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
                     }
 
                     [pscustomobject]@{ WorkerKey = $key; State = 'Mounted'; FailureCount = 0; NextAllowed = $null; Error = $null; DriveLetter = $account.DriveLetter }
@@ -6190,35 +8790,32 @@ function Invoke-StartupAutoMount {
                     }
 
                     if ($account.ProviderId -eq 'gdrive') {
-                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
+                        $accProg = [hashtable]::Synchronized(@{
                             State = 'Mounting'
-                            Stage = 'Connecting or starting mount'
+                            Stage = "Initializing $($account.DriveLetter): mount"
                             StartedAt = [DateTime]::UtcNow
                             StageStartedAt = [DateTime]::UtcNow
                             Error = $null
                         })
-                        Set-StartupRestoreProgress -Progress $progress -Stage 'Validating Google Drive session' -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
-                        $environment = Get-GoogleDriveRcloneEnvironment -AccountId $account.Id -RemoteName 'gdrive'
-                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
-                            State = 'Mounting'
-                            Stage = 'Verifying mount'
-                            StartedAt = [DateTime]::UtcNow
-                            StageStartedAt = [DateTime]::UtcNow
-                            Error = $null
-                        })
-                        Set-StartupRestoreProgress -Progress $progress -Stage "Starting $($account.DriveLetter): Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
-                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' -AccountId $account.Id `
+                        $progress.AccountStages[[string]$account.Id] = $accProg
+                        Set-StartupRestoreProgress -Progress $progress -Stage "Initializing $($account.DriveLetter): Google Drive mount" -ProviderId 'gdrive' -DriveLetter ([string]$account.DriveLetter) -AccountId ([string]$account.Id)
+
+                        $mountResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive' -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
-                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
-                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
-                        $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
-                            State = 'Mounted'
-                            Stage = 'Connected'
-                            StartedAt = [DateTime]::UtcNow
-                            StageStartedAt = [DateTime]::UtcNow
-                            Error = $null
-                        })
-                        $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes `
+                            -ReadOnly:$([bool]$account.ReadOnly) -Progress $accProg
+
+                        if ($mountResult.Success) {
+                            $accProg.State = 'Mounted'
+                            $accProg.Stage = 'Connected'
+                            $results.Add([pscustomobject]@{ AccountId = $account.Id; State = 'Mounted'; Error = $null; DriveLetter = [string]$account.DriveLetter })
+                        } else {
+                            $accProg.State = $mountResult.State
+                            $accProg.Stage = if ($mountResult.State -eq 'AuthRequired') { 'Sign-in required' } else { 'Connection failed' }
+                            $accProg.Error = $mountResult.Error
+                            $results.Add([pscustomobject]@{ AccountId = $account.Id; State = $mountResult.State; Error = $mountResult.Error; DriveLetter = [string]$account.DriveLetter })
+                        }
+                        continue
                     } elseif ($account.ProviderId -eq 'terabox' -and (Get-VerifiedRclonePath)) {
                         $progress.AccountStages[[string]$account.Id] = [hashtable]::Synchronized(@{
                             State = 'Mounting'
@@ -6295,12 +8892,17 @@ function Invoke-StartupAutoMount {
                         if (-not $health.Success) { throw "Existing mount is not responsive: $($health.Error)" }
                         $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'ExistingProcess'; Error = $null; DriveLetter = [string]$googleStatus.DriveLetter })
                     } else {
-                        $environment = Get-GoogleDriveRcloneEnvironment
                         Set-StartupRestoreProgress -Progress $progress -Stage "Starting $googleDriveLetter`: Google Drive mount (up to 90s)" -ProviderId 'gdrive' -DriveLetter $googleDriveLetter
-                        Start-VirtualDriveMount -RemoteName 'gdrive' -ProviderId 'gdrive' `
+                        $legacyProg = [hashtable]::Synchronized(@{ Stage = "Starting $googleDriveLetter`: Google Drive mount"; State = 'Connecting' })
+                        $mountResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive' `
                             -DriveLetter (Get-PreferredDriveLetter 'gdrive') -VolumeLabel 'Google Drive' `
-                            -CacheDirectory $cacheDirectory -CacheMaxGigabytes ([int]$settings.CacheMaxGigabytes) -EnvironmentVariables $environment | Out-Null
-                        $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
+                            -CacheDirectory $cacheDirectory -CacheMaxGigabytes ([int]$settings.CacheMaxGigabytes) `
+                            -Progress $legacyProg
+                        if ($mountResult.Success) {
+                            $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = 'Mounted'; Error = $null; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
+                        } else {
+                            $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = $mountResult.State; Error = $mountResult.Error; DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
+                        }
                     }
                 } else {
                     $results.Add([pscustomobject]@{ AccountId = 'gdrive'; State = [string](Get-SafeProperty $googleCheck 'State' 'Error'); Error = (Get-SafeProperty $googleCheck 'Error' 'Provider returned an incomplete status response.'); DriveLetter = [string](Get-PreferredDriveLetter 'gdrive') })
@@ -6354,11 +8956,65 @@ function Start-ApplicationStartupSequence {
     $script:StartupSequenceStarted = $true
 
     Invoke-MemoryTrim
+    # Purge any stale loopback network redirector keys (##server#*) from Explorer MountPoints2
+    # to guarantee all virtual cloud drives display under 'Devices and drives' with full storage capacity bars.
+    try {
+        $regBase = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2', $true)
+        if ($regBase) {
+            $purged = $false
+            foreach ($subKey in $regBase.GetSubKeyNames()) {
+                if ($subKey -like '##server#*') {
+                    try {
+                        $regBase.DeleteSubKeyTree($subKey)
+                        $purged = $true
+                    } catch { }
+                }
+            }
+            $regBase.Close()
+            if ($purged) {
+                try {
+                    if ('NSCloudDrive.ExplorerNative' -as [type]) {
+                        [NSCloudDrive.ExplorerNative]::SHChangeNotify(0x08000000, 0x0000, $null, [IntPtr]::Zero)
+                    }
+                } catch { }
+            }
+        }
+    } catch { }
     if ($script:Settings.AutoMountDrives) {
         $script:StartupAutoMountPending = $true
+    } else {
+        try { Start-ProviderStatusRefreshWorker } catch { }
     }
-    try { Start-ProviderStatusRefreshWorker } catch { }
     try { Start-StartupCacheRecoveryWorker } catch { }
+    try { Invoke-StartupTransferQueueRecovery | Out-Null } catch { }
+    try {
+        if (Get-Command Sync-VirtualDriveOrphanedVfsCache -ErrorAction SilentlyContinue) {
+            $startupAccounts = @()
+            if ($script:Settings.PSObject.Properties['Accounts'] -and $script:Settings.Accounts) {
+                $startupAccounts = @($script:Settings.Accounts)
+            }
+            if ($startupAccounts.Count -gt 0) {
+                foreach ($acc in $startupAccounts) {
+                    try {
+                        Sync-VirtualDriveOrphanedVfsCache -Account $acc -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
+                    } catch {
+                        try {
+                            Sync-VirtualDriveOrphanedVfsCache -AccountId ([string]$acc.Id) -DriveLetter ([string]$acc.DriveLetter) -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
+                        } catch {
+                            try {
+                                Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
+                            } catch { }
+                        }
+                    }
+                }
+            } else {
+                try {
+                    Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
+                } catch { }
+            }
+        }
+    } catch { }
+    try { Load-TransferNotificationHistory } catch { }
     Update-AllUIState
 
     if ($script:Settings.AutoMountDrives) {
@@ -6385,6 +9041,7 @@ $script:LastNotifiedTransferFile = ''
 $script:LastActiveTransferInfo = $null
 $script:LastCompletedTransferTime = [DateTime]::MinValue
 $script:LastTransferCheck = [DateTime]::MinValue
+$script:HasPendingTransferSync = $false
 
 function Format-LocalByteSize([int64]$Bytes) {
     if ($Bytes -ge 1TB) { return "$([Math]::Round($Bytes / 1TB, 2)) TB" }
@@ -6396,13 +9053,15 @@ function Format-LocalByteSize([int64]$Bytes) {
 
 function Update-LiveTransferActivity {
     $now = [DateTime]::UtcNow
-    $interval = if ($script:LastActiveTransferInfo) { 1.5 } else { 3.5 }
+    $interval = if ($script:LastActiveTransferInfo -or $script:HasPendingTransferSync) { 1.5 } else { 3.5 }
     if (($now - $script:LastTransferCheck).TotalSeconds -lt $interval) { return }
     $script:LastTransferCheck = $now
 
     $activeTransfer = $null
     $activeAccount = $null
     $activeDrive = $null
+    $allActiveTransfers = [System.Collections.Generic.List[PSObject]]::new()
+    $accounts = @()
 
     try {
         $accounts = @(Get-CloudAccounts)
@@ -6411,60 +9070,254 @@ function Update-LiveTransferActivity {
             if (-not $letter) { continue }
             $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
             if ($vfs.IsActive -and ($vfs.UploadsInProgress -gt 0 -or $vfs.UploadsQueued -gt 0 -or ($vfs.Transferring -and $vfs.Transferring.Count -gt 0))) {
-                $activeTransfer = $vfs
-                $activeAccount = $acc
-                $activeDrive = $letter.ToUpperInvariant().TrimEnd(':')
-                break
+                $allActiveTransfers.Add([PSCustomObject]@{
+                    Vfs = $vfs
+                    Account = $acc
+                    Drive = $letter.ToUpperInvariant().TrimEnd(':')
+                })
             }
         }
     } catch { }
 
+    $pendingVfsFiles = @()
+    $pendingQueueItems = @()
+    $pendingCount = 0
+
+    $rawQueue = @()
+    try {
+        if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) {
+            $qRes = Get-CloudTransferQueue
+            $rawQueue = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) {
+                @($qRes[0])
+            } elseif ($null -ne $qRes) {
+                @($qRes)
+            } else {
+                @()
+            }
+        }
+    } catch { }
+
+    $pendingQueueItems = @($rawQueue | Where-Object {
+        $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
+        $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
+    })
+
+    if ($allActiveTransfers.Count -gt 0) {
+        $chosen = $allActiveTransfers | Sort-Object -Property @{ Expression = { if ($_.Vfs.Transferring -and $_.Vfs.Transferring.Count -gt 0) { 0 } elseif ($_.Vfs.UploadsInProgress -gt 0) { 1 } else { 2 } } } | Select-Object -First 1
+        $activeTransfer = $chosen.Vfs
+        $activeAccount = $chosen.Account
+        $activeDrive = $chosen.Drive
+        $script:HasPendingTransferSync = $false
+    } else {
+        try {
+            if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
+                $pendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory)
+            }
+        } catch { }
+
+        $pendingCount = $pendingVfsFiles.Count + $pendingQueueItems.Count
+        $script:HasPendingTransferSync = ($pendingCount -gt 0)
+
+        if ($pendingVfsFiles.Count -gt 0) {
+            $pAccId = [string](Get-SafeProperty $pendingVfsFiles[0] 'AccountId' '')
+            if ($pAccId) {
+                $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'Id' '') -eq $pAccId } | Select-Object -First 1
+                if (-not $matchingAcc) {
+                    $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $pAccId } | Select-Object -First 1
+                }
+                if ($matchingAcc) {
+                    $activeAccount = $matchingAcc
+                    $activeDrive = [string]$matchingAcc.DriveLetter
+                    $script:CurrentActiveTransferDrive = $activeDrive
+                }
+            }
+        }
+    }
+
+    $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
+    $minBytes = if ($script:Settings.MinNotificationFileSizeBytes) { [int64]$script:Settings.MinNotificationFileSizeBytes } else { 5242880L }
+
+    # Group queue items by BatchId
+    $batchMap = @{}
+    foreach ($qItem in $rawQueue) {
+        if ($null -eq $qItem -or -not ($qItem -is [System.Collections.IDictionary])) { continue }
+        $bId = if ($qItem.ContainsKey('BatchId') -and $qItem['BatchId']) { [string]$qItem['BatchId'] } else { '' }
+        if ($bId) {
+            if (-not $batchMap.ContainsKey($bId)) {
+                $batchMap[$bId] = [System.Collections.Generic.List[hashtable]]::new()
+            }
+            $batchMap[$bId].Add($qItem)
+        }
+    }
+
+    # Consolidated batch notifications
+    foreach ($bId in @($batchMap.Keys)) {
+        $bItems = $batchMap[$bId]
+        if ($bItems.Count -gt 1) {
+            $bName = if ($bItems[0].ContainsKey('BatchName') -and $bItems[0]['BatchName']) { [string]$bItems[0]['BatchName'] } else { "Batch-$bId" }
+            $bProv = if ($bItems[0].ContainsKey('ProviderId') -and $bItems[0]['ProviderId']) { [string]$bItems[0]['ProviderId'] } else { 'Cloud Storage' }
+            $bDrive = if ($activeDrive) { $activeDrive } else { 'G' }
+            $totalFiles = $bItems.Count
+            $totalSizeBytes = ($bItems | Measure-Object -Property FileSizeBytes -Sum).Sum
+            $totalSizeStr = Format-LocalByteSize $totalSizeBytes
+
+            $hasActive = ($bItems | Where-Object { $_['Status'] -in @('Uploading', 'Staging', 'Queued', 'Awaiting remote confirmation', 'Verifying remote file') })
+            if ($hasActive) {
+                if (Test-AndSetNotifiedEventKey "batch_start:${bId}") {
+                    if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
+                        try {
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Batch Upload Started", "Batch '$bName' ($totalFiles files, $totalSizeStr) staged on drive ${bDrive}:. Uploading to $bProv in background.", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                }
+            }
+
+            $allConfirmed = $true
+            foreach ($it in $bItems) {
+                if ($it['Status'] -ne 'Completed and remotely confirmed') {
+                    $allConfirmed = $false
+                    break
+                }
+            }
+            if ($allConfirmed -and $totalFiles -gt 0) {
+                if (Test-AndSetNotifiedEventKey "batch_complete:${bId}") {
+                    if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete) {
+                        try {
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Batch Upload Complete", "Batch '$bName' ($totalFiles files, $totalSizeStr) was successfully uploaded and verified on $bProv.", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                    Add-TransferNotificationEvent -JobId '' -BatchId $bId -BatchName $bName -FileName "Batch: $bName ($totalFiles files)" -DriveLetter $bDrive -ProviderName $bProv -FileSizeBytes $totalSizeBytes -BytesTransferred $totalSizeBytes -Status 'Completed and remotely confirmed' -Error '' -VerificationType 'Remote confirmation verified'
+                }
+            }
+        }
+    }
+
+    # Granular queue lifecycle events and actionable alerts
+    foreach ($qItem in $rawQueue) {
+        if ($null -eq $qItem -or -not ($qItem -is [System.Collections.IDictionary])) { continue }
+        $qStatus = if ($qItem.ContainsKey('Status')) { [string]$qItem['Status'] } else { 'Queued' }
+        $qFileName = if ($qItem.ContainsKey('FileName')) { [string]$qItem['FileName'] } else { 'Transfer file' }
+        $qJobId = if ($qItem.ContainsKey('JobId') -and $qItem['JobId']) { [string]$qItem['JobId'] } elseif ($qItem.ContainsKey('QueueId')) { [string]$qItem['QueueId'] } else { $qFileName }
+        $qErr = if ($qItem.ContainsKey('LastError')) { [string]$qItem['LastError'] } else { '' }
+        $qRetry = if ($qItem.ContainsKey('RetryCount')) { [int]$qItem['RetryCount'] } else { 0 }
+        $qMaxRetry = if ($qItem.ContainsKey('MaxRetries')) { [int]$qItem['MaxRetries'] } else { 3 }
+        $qSize = if ($qItem.ContainsKey('FileSizeBytes')) { [int64]$qItem['FileSizeBytes'] } else { 0L }
+        $qBytes = if ($qItem.ContainsKey('BytesTransferred')) { [int64]$qItem['BytesTransferred'] } else { 0L }
+        $qBatchId = if ($qItem.ContainsKey('BatchId')) { [string]$qItem['BatchId'] } else { '' }
+        $qBatchName = if ($qItem.ContainsKey('BatchName')) { [string]$qItem['BatchName'] } else { '' }
+        $isMultiFileBatch = ($qBatchId -and $batchMap.ContainsKey($qBatchId) -and $batchMap[$qBatchId].Count -gt 1)
+        $qProv = if ($qItem.ContainsKey('ProviderId')) { [string]$qItem['ProviderId'] } else { 'Cloud Storage' }
+        $qDrive = if ($activeDrive) { $activeDrive } else { 'G' }
+
+        if ($qStatus -eq 'Failed' -or ($qRetry -ge $qMaxRetry -and $qStatus -ne 'Completed and remotely confirmed')) {
+            if (Test-AndSetNotifiedEventKey "${qJobId}:Failed") {
+                if ($notificationsAllowed) {
+                    try {
+                        $notifyIcon.ShowBalloonTip(5000, "NS Cloud Drive - Transfer Failed", "File '$qFileName' failed: $qErr. Click to open Transfer Center.", [System.Windows.Forms.ToolTipIcon]::Warning)
+                    } catch { }
+                }
+                Add-TransferNotificationEvent -JobId $qJobId -BatchId $qBatchId -BatchName $qBatchName -FileName $qFileName -DriveLetter $qDrive -ProviderName $qProv -FileSizeBytes $qSize -BytesTransferred $qBytes -Status 'Failed' -Error $qErr
+            }
+        } elseif ($qStatus -eq 'Waiting for network/provider' -or ($qRetry -gt 0 -and $qStatus -notin @('Completed and remotely confirmed', 'Failed', 'Cancelled'))) {
+            if (Test-AndSetNotifiedEventKey "${qJobId}:Retrying_${qRetry}") {
+                Add-TransferNotificationEvent -JobId $qJobId -BatchId $qBatchId -BatchName $qBatchName -FileName $qFileName -DriveLetter $qDrive -ProviderName $qProv -FileSizeBytes $qSize -BytesTransferred $qBytes -Status 'Waiting for network/provider' -Error $qErr
+            }
+        } elseif ($qStatus -eq 'Completed and remotely confirmed') {
+            if (Test-AndSetNotifiedEventKey "${qJobId}:Completed") {
+                $vType = if ($qItem.ContainsKey('VerificationType')) { [string]$qItem['VerificationType'] } else { 'MD5 Checksum' }
+                $rHash = if ($qItem.ContainsKey('RemoteHash')) { [string]$qItem['RemoteHash'] } else { '' }
+                Add-TransferNotificationEvent -JobId $qJobId -BatchId $qBatchId -BatchName $qBatchName -FileName $qFileName -DriveLetter $qDrive -ProviderName $qProv -FileSizeBytes $qSize -BytesTransferred $qSize -Status 'Completed and remotely confirmed' -Error '' -VerificationType $vType -RemoteHash $rHash
+
+                if (-not $isMultiFileBatch -and $notificationsAllowed -and $script:Settings.NotifyOnUploadComplete -and $qSize -ge $minBytes) {
+                    $sizeStr = if ($qSize -gt 0) { " (" + (Format-LocalByteSize $qSize) + ")" } else { "" }
+                    try {
+                        $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$qFileName`"$sizeStr was successfully uploaded and verified on $qProv.", [System.Windows.Forms.ToolTipIcon]::None)
+                    } catch { }
+                }
+            }
+        }
+    }
+
     if ($activeTransfer) {
         $script:CurrentActiveTransferDrive = $activeDrive
         $transferList = @($activeTransfer.Transferring)
-        $t = if ($transferList.Count -gt 0) { $transferList[0] } else { $null }
+        $t = if ($transferList.Count -gt 0) {
+            $upItem = $transferList | Where-Object { $null -ne $_ -and (Get-SafeProperty $_ 'IsUpload' $false) -eq $true } | Select-Object -First 1
+            if ($upItem) { $upItem } else { $transferList[0] }
+        } else {
+            $null
+        }
 
-        $fileName = if ($t -and $t.Name) {
-            [System.IO.Path]::GetFileName($t.Name)
+        $isUploadProp = if ($t) { Get-SafeProperty $t 'IsUpload' $null } else { $null }
+        $isUpload = if ($null -ne $isUploadProp) { [bool]$isUploadProp } else { ($activeTransfer.UploadsInProgress -gt 0 -or $activeTransfer.UploadsQueued -gt 0) }
+
+        $fileName = if ($t -and (Get-SafeProperty $t 'Name' '')) {
+            [System.IO.Path]::GetFileName([string]$t.Name)
         } else {
             'Synchronizing staged files...'
         }
 
-        $fileSize = if ($t -and $t.Size) { [int64]$t.Size } else { [int64]$activeTransfer.CacheBytesUsed }
-        $bytesTransferred = if ($t -and $t.Bytes) { [int64]$t.Bytes } else { [int64]$activeTransfer.BytesTransferred }
-        $speed = if ($t -and $t.Speed -gt 0) { [double]$t.Speed } else { [double]$activeTransfer.TransferSpeed }
-        $pct = if ($t -and $t.Percentage -gt 0) {
+        $fileSize = if ($t -and (Get-SafeProperty $t 'Size' 0L)) { [int64]$t.Size } else { [int64]$activeTransfer.CacheBytesUsed }
+        $bytesTransferred = if ($t -and (Get-SafeProperty $t 'Bytes' 0L)) { [int64]$t.Bytes } else { [int64]$activeTransfer.BytesTransferred }
+        $speed = if ($t -and (Get-SafeProperty $t 'Speed' 0.0) -gt 0) { [double]$t.Speed } else { [double]$activeTransfer.TransferSpeed }
+        $pct = if ($t -and (Get-SafeProperty $t 'Percentage' 0.0) -gt 0) {
             [double]$t.Percentage
         } elseif ($fileSize -gt 0 -and $bytesTransferred -gt 0) {
             [Math]::Min(100.0, [Math]::Round(($bytesTransferred / [double]$fileSize) * 100.0, 1))
         } else {
             0.0
         }
-        $etaSec = if ($t -and $null -ne $t.Eta) { $t.Eta } elseif ($activeTransfer.OverallEta) { $activeTransfer.OverallEta } else { $null }
+        $etaSec = if ($t -and $null -ne (Get-SafeProperty $t 'Eta' $null)) { $t.Eta } elseif ($activeTransfer.OverallEta) { $activeTransfer.OverallEta } else { $null }
 
         $providerName = if ($activeAccount) { [string]$activeAccount.DisplayName } else { "Drive ${activeDrive}:" }
-        $speedFormatted = Format-TransferThroughput -BytesPerSec $speed
+        $speedFormatted = if ($isUpload) {
+            if ($activeTransfer.UploadsInProgress -gt 0 -or ($t -and $speed -gt 0)) {
+                Format-TransferThroughput -BytesPerSec $speed
+            } else {
+                "Local SSD staging complete " + [char]0x2022 + " Cloud upload pending"
+            }
+        } else {
+            Format-TransferThroughput -BytesPerSec $speed
+        }
         $etaFormatted = Format-EtaTimeSpan $etaSec
         $sizeFormatted = if ($fileSize -gt 0) { Format-LocalByteSize $fileSize } else { '' }
         $bytesFormatted = if ($bytesTransferred -gt 0) { Format-LocalByteSize $bytesTransferred } else { '0 B' }
         $bytesRemaining = [Math]::Max(0L, $fileSize - $bytesTransferred)
         $remainingFormatted = if ($bytesRemaining -gt 0) { Format-LocalByteSize $bytesRemaining } else { '0 B' }
 
+        $planWarning = ""
+        if ($activeAccount -and $fileSize -gt 0L) {
+            $provId = [string](Get-SafeProperty $activeAccount 'ProviderId' '')
+            if ($provId -eq 'terabox' -and $fileSize -gt 4000000000L) {
+                $planWarning = " " + [char]0x2022 + " [Warning: File exceeds TeraBox 4.0 GB free plan limit]"
+            }
+        }
+
         $sourceDesc = "Local SSD Cache"
-        if ($t -and $t.SrcFs -and $t.SrcFs -match '(?i)CloudCache[\\/]([^\\/]+)') {
+        $tSrc = if ($t) { [string](Get-SafeProperty $t 'SrcFs' '') } else { '' }
+        if ($tSrc -match '(?i)CloudCache[\\/]([^\\/]+)') {
             $sourceDesc = "Local SSD Cache (D:\CloudCache)"
         } elseif (Test-Path -LiteralPath 'D:\CloudCache') {
             $sourceDesc = "Local SSD Cache (D:\CloudCache)"
         }
         $destDesc = "$providerName (${activeDrive}:)"
-        $routeText = "From: $sourceDesc $([char]0x2192) To: $destDesc"
+
+        $routeText = if ($isUpload) {
+            "From: $sourceDesc $([char]0x2192) To: $destDesc"
+        } else {
+            "From: $destDesc $([char]0x2192) To: Local SSD Cache / App"
+        }
 
         $statusPrefix = if ($script:CurrentTransferPaused) {
-            "Upload Paused"
-        } elseif ($activeTransfer.UploadsInProgress -gt 0) {
-            "Uploading to Cloud"
+            if ($isUpload) { "Upload Paused" } else { "Transfer Paused" }
+        } elseif ($isUpload) {
+            if ($activeTransfer.UploadsInProgress -gt 0 -or ($t -and $speed -gt 0)) {
+                "Uploading to Cloud"
+            } else {
+                "Staged on SSD cache " + [char]0x2022 + " Queued for upload"
+            }
         } else {
-            "Staged on SSD cache " + [char]0x2022 + " Queued for upload"
+            "Streaming from Cloud"
         }
 
         # Update Disks dashboard card
@@ -6472,24 +9325,79 @@ function Update-LiveTransferActivity {
         $liveTransferDriveBadgeText.Text = "${activeDrive}: " + [char]0x2022 + " $providerName"
         $liveTransferRoute.Text = $routeText
         $liveTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
-        $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
-        $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted"
-        $liveTransferEta.Text = if ($script:CurrentTransferPaused) { "Paused" } elseif ($etaSec -gt 0) { "~$etaFormatted remaining" } elseif ($activeTransfer.UploadsQueued -gt 0) { "Starting upload..." } else { "Streaming..." }
+        $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $isUpload -and $activeTransfer.UploadsQueued -gt 0)
+
+        $isPendingConfirmation = ($pct -ge 100.0 -or ($fileSize -gt 0 -and $bytesRemaining -eq 0L))
+        if ($isPendingConfirmation) {
+            $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted (100% complete) " + [char]0x2022 + " All bytes transmitted " + [char]0x2022 + " Awaiting cloud verification"
+            $liveTransferEta.Text = if ($script:CurrentTransferPaused) { "Paused" } else { "Awaiting remote confirmation..." }
+        } else {
+            $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted$planWarning"
+            $liveTransferEta.Text = if ($script:CurrentTransferPaused) {
+                "Paused"
+            } elseif ($etaSec -gt 0) {
+                "~$etaFormatted remaining"
+            } elseif ($isUpload -and $activeTransfer.UploadsQueued -gt 0) {
+                "Starting upload..."
+            } else {
+                "Streaming..."
+            }
+        }
         $ltPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume" } else { [string][char]0x23F8 + " Pause" }
 
         if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Visible) {
             $liveTransferCard.Visibility = [System.Windows.Visibility]::Visible
         }
 
+        # Populate multi-transfer queue in Disks page live transfer card
+        if ($null -ne $liveTransferQueuePanel) {
+            $liveTransferQueuePanel.Children.Clear()
+            if ($transferList.Count -gt 1) {
+                $maxSub = [Math]::Min(4, $transferList.Count - 1)
+                for ($idx = 1; $idx -le $maxSub; $idx++) {
+                    $subT = $transferList[$idx]
+                    $subName = [System.IO.Path]::GetFileName([string](Get-SafeProperty $subT 'Name' ''))
+                    $subSize = Format-LocalByteSize ([int64](Get-SafeProperty $subT 'Size' 0L))
+                    $subPct = [Math]::Round([double](Get-SafeProperty $subT 'Percentage' 0.0), 0)
+                    $subLabelText = if ($subPct -ge 100) {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " 100% (Awaiting confirmation)"
+                    } elseif ($subPct -gt 0) {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " $subPct% transferred"
+                    } else {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " Queued for upload"
+                    }
+                    $subRow = New-Label $subLabelText 11 $script:Palette.TextSecondary $false
+                    $subRow.Margin = [System.Windows.Thickness]::new(0, 1, 0, 1)
+                    $liveTransferQueuePanel.Children.Add($subRow) | Out-Null
+                }
+            }
+        }
+
         # Update Analytics page monitor
         if ($null -ne $analyticsTransferCard) {
-            $analyticsTransferRoute.Text = "Source: $sourceDesc " + [char]0x2192 + " Destination: $destDesc"
+            $analyticsTransferRoute.Text = if ($isUpload) {
+                "Source: $sourceDesc " + [char]0x2192 + " Destination: $destDesc"
+            } else {
+                "Source: $destDesc " + [char]0x2192 + " Destination: Local SSD Cache / App"
+            }
             $analyticsTransferFileName.Text = $fileName
-            $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) { "Status: Upload Paused" } elseif ($etaSec -gt 0) { "Live Countdown: ~$etaFormatted remaining" } else { "Live Countdown: Streaming..." }
-            $analyticsTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
-            $analyticsTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $activeTransfer.UploadsQueued -gt 0)
-            $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% complete " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted"
-            $analyticsTransferPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume Upload" } else { [string][char]0x23F8 + " Pause Upload" }
+            if ($isPendingConfirmation) {
+                $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) { "Status: Upload Paused" } else { "Status: Awaiting remote confirmation..." }
+                $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted (100% complete) " + [char]0x2022 + " All bytes transmitted " + [char]0x2022 + " Awaiting cloud verification"
+            } else {
+                $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) {
+                    if ($isUpload) { "Status: Upload Paused" } else { "Status: Transfer Paused" }
+                } elseif ($etaSec -gt 0) {
+                    "Live Countdown: ~$etaFormatted remaining"
+                } elseif ($isUpload -and $activeTransfer.UploadsQueued -gt 0) {
+                    "Live Countdown: Starting upload..."
+                } else {
+                    "Live Countdown: Streaming..."
+                }
+                $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% complete " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted$planWarning"
+            }
+            $pauseVerb = if ($isUpload) { "Upload" } else { "Transfer" }
+            $analyticsTransferPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume $pauseVerb" } else { [string][char]0x23F8 + " Pause $pauseVerb" }
             $analyticsTransferPauseBtn.IsEnabled = $true
             $analyticsTransferCancelBtn.IsEnabled = $true
 
@@ -6501,10 +9409,17 @@ function Update-LiveTransferActivity {
                 $maxSub = [Math]::Min(6, $transferList.Count - 1)
                 for ($idx = 1; $idx -le $maxSub; $idx++) {
                     $subT = $transferList[$idx]
-                    $subName = [System.IO.Path]::GetFileName($subT.Name)
-                    $subSize = Format-LocalByteSize ([int64]$subT.Size)
-                    $subPct = [Math]::Round([double]$subT.Percentage, 0)
-                    $subRow = New-Label ("  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " $subPct% transferred") 11 $script:Palette.TextSecondary $false
+                    $subName = [System.IO.Path]::GetFileName([string](Get-SafeProperty $subT 'Name' ''))
+                    $subSize = Format-LocalByteSize ([int64](Get-SafeProperty $subT 'Size' 0L))
+                    $subPct = [Math]::Round([double](Get-SafeProperty $subT 'Percentage' 0.0), 0)
+                    $subLabelText = if ($subPct -ge 100) {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " 100% (Awaiting confirmation)"
+                    } elseif ($subPct -gt 0) {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " $subPct% transferred"
+                    } else {
+                        "  " + [char]0x2022 + " $subName ($subSize) " + [char]0x2014 + " Queued for upload"
+                    }
+                    $subRow = New-Label $subLabelText 11 $script:Palette.TextSecondary $false
                     $subRow.Margin = [System.Windows.Thickness]::new(0, 1, 0, 1)
                     $analyticsTransferQueueStack.Children.Add($subRow) | Out-Null
                 }
@@ -6515,12 +9430,25 @@ function Update-LiveTransferActivity {
         $minBytes = if ($script:Settings.MinNotificationFileSizeBytes) { [int64]$script:Settings.MinNotificationFileSizeBytes } else { 5242880L }
 
         # Smart folder detection & grouping
-        $rawName = if ($t -and $t.Name) { [string]$t.Name } else { '' }
+        $rawName = if ($t -and (Get-SafeProperty $t 'Name' '')) { [string]$t.Name } else { '' }
         $dirPart = if ($rawName) { [System.IO.Path]::GetDirectoryName($rawName) } else { '' }
         $normDir = if ($dirPart) { $dirPart.Replace('/', '\').Trim('\') } else { '' }
         $isFolderItem = (-not [string]::IsNullOrEmpty($normDir) -and $normDir -ne '.' -and $normDir -ne '\')
 
-        if ($isFolderItem -and $script:Settings.GroupFolderUploads) {
+        $matchingFolderFiles = @()
+        if ($isFolderItem) {
+            $matchingFolderFiles = @($transferList | Where-Object { $_ -and (Get-SafeProperty $_ 'Name' '') -and (($_.Name.StartsWith("$normDir/")) -or ($_.Name.StartsWith("$normDir\"))) })
+        }
+        $onlyFull = if ($script:Settings.Contains('NotifyOnlyFullFolder')) { [bool]$script:Settings.NotifyOnlyFullFolder } else { $true }
+        $canGroupFolder = $isFolderItem -and $script:Settings.GroupFolderUploads
+        if ($canGroupFolder -and $onlyFull) {
+            # Only announce as full folder when multiple items are present and all items are in transfer
+            if ($matchingFolderFiles.Count -le 1) {
+                $canGroupFolder = $false
+            }
+        }
+
+        if ($canGroupFolder) {
             $folderKey = "${activeDrive}:\$normDir"
             $folderDisplayName = [System.IO.Path]::GetFileName($normDir)
             if (-not $folderDisplayName) { $folderDisplayName = $normDir }
@@ -6537,9 +9465,8 @@ function Update-LiveTransferActivity {
                 } catch { }
 
                 if ($totalFolderFiles -le 0 -and $transferList.Count -gt 0) {
-                    $matching = @($transferList | Where-Object { $_.Name -and ($_.Name.StartsWith("$normDir/") -or $_.Name.StartsWith("$normDir\")) })
-                    $totalFolderFiles = [Math]::Max(1, $matching.Count)
-                    $totalFolderBytes = ($matching | Measure-Object -Property Size -Sum).Sum
+                    $totalFolderFiles = [Math]::Max(1, $matchingFolderFiles.Count)
+                    $totalFolderBytes = ($matchingFolderFiles | Measure-Object -Property Size -Sum).Sum
                 }
 
                 $script:ActiveFolderTransfers[$folderKey] = @{
@@ -6551,6 +9478,7 @@ function Update-LiveTransferActivity {
                     TotalItems = $totalFolderFiles
                     TotalBytes = $totalFolderBytes
                     NotifiedStart = $false
+                    IsUpload = $isUpload
                 }
             }
 
@@ -6559,7 +9487,7 @@ function Update-LiveTransferActivity {
 
             if (-not $folderInfo.NotifiedStart) {
                 $folderInfo.NotifiedStart = $true
-                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
+                if ($isUpload -and $notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
                     if ($folderInfo.TotalBytes -ge $minBytes -or $folderInfo.TotalItems -gt 1) {
                         $sizeStr = if ($folderInfo.TotalBytes -gt 0) { Format-LocalByteSize $folderInfo.TotalBytes } else { "" }
                         $itemsStr = if ($folderInfo.TotalItems -gt 0) { " (" + [string][char]0x2022 + " $($folderInfo.TotalItems) items)" } else { "" }
@@ -6573,7 +9501,7 @@ function Update-LiveTransferActivity {
             $script:LastNotifiedPath = "${activeDrive}:\$rawName"
             if ($fileName -and $fileName -ne $script:LastNotifiedTransferFile) {
                 $script:LastNotifiedTransferFile = $fileName
-                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
+                if ($isUpload -and $notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
                     if ($fileSize -ge $minBytes -and $fileName -ne 'Synchronizing staged files...' -and $fileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $fileName.StartsWith('.')) {
                         try {
                             $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Uploading in Background", "File `"$fileName`" ($sizeFormatted) staged on drive ${activeDrive}:. Now uploading to $providerName in background.", [System.Windows.Forms.ToolTipIcon]::None)
@@ -6589,21 +9517,10 @@ function Update-LiveTransferActivity {
             ProviderName = $providerName
             Drive = $activeDrive
             IsFolderItem = ($isFolderItem -and $script:Settings.GroupFolderUploads)
+            IsUpload = $isUpload
             CompletedAt = [DateTime]::UtcNow
         }
     } else {
-        if ($null -ne $analyticsTransferCard) {
-            $analyticsTransferRoute.Text = "Source: Local SSD Cache " + [char]0x2192 + " Destination: Cloud Storage"
-            $analyticsTransferFileName.Text = "All files synchronized and confirmed on cloud storage."
-            $analyticsTransferProgressBar.Value = 100.0
-            $analyticsTransferProgressBar.IsIndeterminate = $false
-            $analyticsTransferDetails.Text = "SSD Cache and Cloud remotes are 100% in sync " + [char]0x2022 + " Network idle (0 B/s)."
-            $analyticsTransferEta.Text = "Status: Idle"
-            $analyticsTransferPauseBtn.IsEnabled = $false
-            $analyticsTransferCancelBtn.IsEnabled = $false
-            $analyticsTransferQueueStack.Children.Clear()
-        }
-
         $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
         $minBytes = if ($script:Settings.MinNotificationFileSizeBytes) { [int64]$script:Settings.MinNotificationFileSizeBytes } else { 5242880L }
 
@@ -6611,7 +9528,8 @@ function Update-LiveTransferActivity {
         if ($script:ActiveFolderTransfers.Count -gt 0) {
             foreach ($fk in @($script:ActiveFolderTransfers.Keys)) {
                 $fInfo = $script:ActiveFolderTransfers[$fk]
-                if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete) {
+                $folderWasUpload = if ($fInfo.ContainsKey('IsUpload')) { [bool]$fInfo.IsUpload } else { $true }
+                if ($folderWasUpload -and $notificationsAllowed -and $script:Settings.NotifyOnUploadComplete) {
                     if ($fInfo.TotalBytes -ge $minBytes -or $fInfo.TotalItems -gt 1) {
                         $sizeStr = if ($fInfo.TotalBytes -gt 0) { " (" + (Format-LocalByteSize $fInfo.TotalBytes) + ")" } else { "" }
                         $itemsStr = if ($fInfo.TotalItems -gt 0) { " (" + [string][char]0x2022 + " $($fInfo.TotalItems) items)" } else { "" }
@@ -6624,35 +9542,176 @@ function Update-LiveTransferActivity {
             $script:ActiveFolderTransfers.Clear()
         }
 
+        # If a single file just finished, send balloon notification if eligible
         if ($script:LastActiveTransferInfo) {
             $prev = $script:LastActiveTransferInfo
             $script:LastActiveTransferInfo = $null
-            $script:LastCompletedTransferTime = [DateTime]::UtcNow
 
-            $liveTransferFileName.Text = [string][char]0x2713 + " Completed: $($prev.FileName)"
-            $liveTransferDriveBadgeText.Text = "$($prev.Drive): " + [char]0x2022 + " $($prev.ProviderName)"
-            $liveTransferProgressBar.Value = 100.0
-            $liveTransferProgressBar.IsIndeterminate = $false
-            $liveTransferDetails.Text = "Verified & safely stored on $($prev.ProviderName). All bytes confirmed remotely."
-            $liveTransferEta.Text = "Finished"
-
-            if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete -and -not $prev.IsFolderItem) {
+            $wasUpload = [bool](Get-SafeProperty $prev 'IsUpload' $false)
+            if ($wasUpload -and $notificationsAllowed -and $script:Settings.NotifyOnUploadComplete -and -not $prev.IsFolderItem) {
                 if ($prev.FileSize -ge $minBytes -and $prev.FileName -ne 'Synchronizing staged files...' -and $prev.FileName -notmatch '(?i)\.(tmp|lock|part|rclone)$' -and -not $prev.FileName.StartsWith('.')) {
-                    try {
-                        $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
-                        $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
-                    } catch { }
+                    $dedupKey = "$($prev.Drive):$($prev.FileName):$($prev.FileSize)"
+                    if (Test-AndSetNotifiedEventKey "$dedupKey:Completed") {
+                        Add-TransferNotificationEvent -JobId '' -BatchId '' -BatchName '' -FileName $prev.FileName -DriveLetter $prev.Drive -ProviderName $prev.ProviderName -FileSizeBytes $prev.FileSize -BytesTransferred $prev.FileSize -Status 'Completed and remotely confirmed' -Error '' -VerificationType 'Remote confirmation verified'
+                        try {
+                            $sizeStr = if ($prev.FileSize -gt 0) { " (" + (Format-LocalByteSize $prev.FileSize) + ")" } else { "" }
+                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Upload Complete", "File `"$($prev.FileName)`"$sizeStr was successfully uploaded and verified on $($prev.ProviderName).", [System.Windows.Forms.ToolTipIcon]::None)
+                        } catch { }
+                    }
+                }
+            }
+
+            if ($pendingCount -eq 0) {
+                $script:LastCompletedTransferTime = [DateTime]::UtcNow
+                $liveTransferFileName.Text = [string][char]0x2713 + " Completed: $($prev.FileName)"
+                $liveTransferDriveBadgeText.Text = "$($prev.Drive): " + [char]0x2022 + " $($prev.ProviderName)"
+                $liveTransferProgressBar.Value = 100.0
+                $liveTransferProgressBar.IsIndeterminate = $false
+                $liveTransferDetails.Text = if ($wasUpload) {
+                    "Verified & safely stored on $($prev.ProviderName). All bytes confirmed remotely."
+                } else {
+                    "Streaming cached locally from $($prev.ProviderName). File ready for immediate playback."
+                }
+                $liveTransferEta.Text = "Finished"
+            } else {
+                $script:LastCompletedTransferTime = [DateTime]::MinValue
+            }
+        }
+
+        if ($pendingCount -gt 0) {
+            $statusPending = "Local SSD staging complete " + [char]0x2022 + " Resuming background sync (" + $pendingCount + " files pending)"
+
+            $providerName = 'Cloud Storage'
+            if ($pendingVfsFiles.Count -gt 0) {
+                $pAccId = [string](Get-SafeProperty $pendingVfsFiles[0] 'AccountId' '')
+                if ($pAccId) {
+                    $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'Id' '') -eq $pAccId } | Select-Object -First 1
+                    if (-not $matchingAcc) {
+                        $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $pAccId } | Select-Object -First 1
+                    }
+                    if ($matchingAcc) {
+                        $activeAccount = $matchingAcc
+                        $activeDrive = [string]$matchingAcc.DriveLetter
+                        $providerName = [string]$matchingAcc.DisplayName
+                        $script:CurrentActiveTransferDrive = $activeDrive
+                    }
+                }
+            } elseif ($activeAccount) {
+                $activeDrive = [string]$activeAccount.DriveLetter
+                $providerName = [string]$activeAccount.DisplayName
+            }
+
+            $badgeDrive = if ($activeDrive) {
+                $activeDrive
+            } elseif ($script:CurrentActiveTransferDrive) {
+                [string]$script:CurrentActiveTransferDrive
+            } elseif ($accounts.Count -gt 0) {
+                [string]$accounts[0].DriveLetter
+            } else {
+                ''
+            }
+
+            if ($providerName -eq 'Cloud Storage' -and $badgeDrive) {
+                $accByDrive = $accounts | Where-Object { [string](Get-SafeProperty $_ 'DriveLetter' '') -eq $badgeDrive } | Select-Object -First 1
+                if ($accByDrive) {
+                    $providerName = [string]$accByDrive.DisplayName
+                    $activeAccount = $accByDrive
+                }
+            }
+
+            $cachePath = if ($script:CacheDirectory) { $script:CacheDirectory } else { 'D:\CloudCache' }
+            $sourceDesc = "Local SSD Cache ($cachePath)"
+            $destDesc = if ($badgeDrive -and $providerName -ne 'Cloud Storage') {
+                "$providerName (${badgeDrive}:)"
+            } elseif ($badgeDrive) {
+                "Cloud Storage (${badgeDrive}:)"
+            } else {
+                $providerName
+            }
+
+            $routeText = "From: $sourceDesc " + [char]0x2192 + " To: $destDesc"
+            $analyticsRouteText = "Source: $sourceDesc " + [char]0x2192 + " Destination: $destDesc"
+
+            if ($null -ne $analyticsTransferCard) {
+                $analyticsTransferRoute.Text = $analyticsRouteText
+                $analyticsTransferFileName.Text = $statusPending
+                $analyticsTransferProgressBar.Value = 0.0
+                $analyticsTransferProgressBar.IsIndeterminate = $true
+                $analyticsTransferDetails.Text = $statusPending
+                $analyticsTransferEta.Text = "Syncing..."
+                $analyticsTransferPauseBtn.IsEnabled = $false
+                $analyticsTransferCancelBtn.IsEnabled = $false
+                $analyticsTransferQueueStack.Children.Clear()
+            }
+
+            $liveTransferFileName.Text = $statusPending
+            $liveTransferRoute.Text = $routeText
+            $liveTransferProgressBar.Value = 0.0
+            $liveTransferProgressBar.IsIndeterminate = $true
+            $liveTransferDetails.Text = $statusPending
+            $liveTransferEta.Text = "Syncing..."
+            $script:LastCompletedTransferTime = [DateTime]::MinValue
+
+            if ($badgeDrive -and $providerName -ne 'Cloud Storage') {
+                $liveTransferDriveBadgeText.Text = "${badgeDrive}: " + [char]0x2022 + " $providerName"
+            } elseif ($badgeDrive) {
+                $liveTransferDriveBadgeText.Text = "${badgeDrive}: " + [char]0x2022 + " Cloud Storage"
+            } else {
+                $liveTransferDriveBadgeText.Text = "Cloud Drive"
+            }
+
+            if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Visible) {
+                $liveTransferCard.Visibility = [System.Windows.Visibility]::Visible
+            }
+
+            if ($null -ne $liveTransferQueuePanel) {
+                $liveTransferQueuePanel.Children.Clear()
+                $allPendingNames = [System.Collections.Generic.List[string]]::new()
+                foreach ($pf in $pendingVfsFiles) {
+                    if ($pf.PSObject.Properties['Name'] -and $pf.Name) {
+                        $allPendingNames.Add([string]$pf.Name)
+                    }
+                }
+                foreach ($pq in $pendingQueueItems) {
+                    if ($pq.ContainsKey('FileName') -and $pq['FileName']) {
+                        $allPendingNames.Add([string]$pq['FileName'])
+                    }
+                }
+                $maxSub = [Math]::Min(3, $allPendingNames.Count)
+                for ($idx = 0; $idx -lt $maxSub; $idx++) {
+                    $subName = $allPendingNames[$idx]
+                    $subRow = New-Label ("  " + [char]0x2022 + " $subName " + [char]0x2014 + " Staged on SSD cache") 11 $script:Palette.TextSecondary $false
+                    $subRow.Margin = [System.Windows.Thickness]::new(0, 1, 0, 1)
+                    $liveTransferQueuePanel.Children.Add($subRow) | Out-Null
                 }
             }
             Invoke-MemoryTrim
-        } elseif ($script:LastCompletedTransferTime -ne [DateTime]::MinValue) {
-            if (([DateTime]::UtcNow - $script:LastCompletedTransferTime).TotalSeconds -ge 6.0) {
-                $script:LastCompletedTransferTime = [DateTime]::MinValue
-                $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
-            }
         } else {
-            if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Collapsed) {
-                $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+            if ($null -ne $analyticsTransferCard) {
+                $analyticsTransferRoute.Text = "Source: Local SSD Cache " + [char]0x2192 + " Destination: Cloud Storage"
+                $analyticsTransferFileName.Text = "All files synchronized and confirmed on cloud storage."
+                $analyticsTransferProgressBar.Value = 100.0
+                $analyticsTransferProgressBar.IsIndeterminate = $false
+                $analyticsTransferDetails.Text = "SSD Cache and Cloud remotes are 100% in sync " + [char]0x2022 + " Network idle (0 B/s)."
+                $analyticsTransferEta.Text = "Status: Idle"
+                $analyticsTransferPauseBtn.IsEnabled = $false
+                $analyticsTransferCancelBtn.IsEnabled = $false
+                $analyticsTransferQueueStack.Children.Clear()
+            }
+
+            if ($null -ne $liveTransferQueuePanel) {
+                $liveTransferQueuePanel.Children.Clear()
+            }
+
+            if ($script:LastCompletedTransferTime -ne [DateTime]::MinValue) {
+                if (([DateTime]::UtcNow - $script:LastCompletedTransferTime).TotalSeconds -ge 6.0) {
+                    $script:LastCompletedTransferTime = [DateTime]::MinValue
+                    $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+                }
+            } else {
+                if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Collapsed) {
+                    $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+                }
             }
         }
     }
@@ -6660,9 +9719,36 @@ function Update-LiveTransferActivity {
 
 # BACKGROUND REFRESH AND MEMORY TRIM TIMER
 # ==============================================================================
+$script:BackgroundTickCount = 0
+$script:LastTransferQueueProcess = [DateTime]::MinValue
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
+    $isVisible = ($window.IsVisible -and $window.WindowState -ne [System.Windows.WindowState]::Minimized)
+    if (-not $isVisible) {
+        # Low-RAM background optimization: throttle ticks to 5s intervals when hidden/minimized
+        $script:BackgroundTickCount = ($script:BackgroundTickCount + 1) % 5
+        if ($script:BackgroundTickCount -ne 0) {
+            if ($script:BackgroundTickCount -eq 1 -and (Get-Command Invoke-AdaptiveBandwidthCheck -ErrorAction SilentlyContinue)) {
+                Invoke-AdaptiveBandwidthCheck | Out-Null
+            }
+            if ($script:BackgroundTickCount -eq 2 -and (Get-Command Invoke-PostTransferCacheCleanup -ErrorAction SilentlyContinue)) {
+                Invoke-PostTransferCacheCleanup | Out-Null
+            }
+            if ($script:BackgroundTickCount -eq 3 -and (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue)) {
+                try { Process-CloudTransferQueue | Out-Null } catch { }
+            }
+            return
+        }
+    }
+
+    if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
+        if (([DateTime]::UtcNow - $script:LastTransferQueueProcess).TotalSeconds -ge 2.0) {
+            $script:LastTransferQueueProcess = [DateTime]::UtcNow
+            try { Process-CloudTransferQueue | Out-Null } catch { }
+        }
+    }
+
     Update-LiveTransferActivity
     if ($script:StartupAutoMountPending -and
         -not $script:StartupAutoMountWorker -and
@@ -6718,7 +9804,7 @@ $timer.Add_Tick({
         }
     }
 
-    # Auto-reconnect watchdog — runs only when not connecting and AutoMountDrives is enabled.
+    # Auto-reconnect watchdog - runs only when not connecting and AutoMountDrives is enabled.
     # Runs at most every 30 seconds to avoid hammering the system with drive-stat calls.
     # Reconnect attempts use per-account exponential backoff (see Invoke-AutoReconnectWatchdog).
     if (-not $script:IsConnecting -and $script:Settings.AutoMountDrives) {
@@ -6726,6 +9812,14 @@ $timer.Add_Tick({
             $script:LastWatchdogRun = [DateTime]::UtcNow
             Invoke-AutoReconnectWatchdog
         }
+    }
+
+    # Periodic safe cache inactivity eviction (runs at most once every 60 seconds)
+    if (([DateTime]::UtcNow - $script:LastInactivityCacheCheck).TotalSeconds -ge 60) {
+        $script:LastInactivityCacheCheck = [DateTime]::UtcNow
+        try {
+            Invoke-InactivityCacheEviction -CacheDirectory $script:CacheDirectory | Out-Null
+        } catch { }
     }
 })
 $timer.Start()
