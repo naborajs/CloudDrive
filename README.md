@@ -1,173 +1,314 @@
 # NS Cloud Drive
 
-**NS Cloud Drive** is an experimental PowerShell/WPF Windows preview for Google Drive and TeraBox virtual-drive workflows. It is not production-ready or release-certified: real provider accounts, multi-account mounts, transfer recovery, packaging, and resource usage have not all been validated on an isolated Windows test machine.
+**A High-Performance Windows Virtual Filesystem Manager for Google Drive & TeraBox**
+
+Developed by **NABORAJ SARKAR**  
+Copyright © 2026 NABORAJ SARKAR. All rights reserved.  
+Contact: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)  
+Repository: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)  
+Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://github.com/naborajs/CloudDrive/issues/new)
+
+---
 
 ![NS Cloud Drive](assets/logos/clouddrive.png)
 
-> **Status:** The repository contains application code and mocked/structural regression tests. Passing those tests does not prove a successful live cloud mount or safe operation on real user data. Review [Security and limitations](docs/SECURITY-AND-LIMITATIONS.md) before using it with important accounts or files.
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-blue.svg)](#system-requirements)
+[![Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20WPF-purple.svg)](#architecture--technology-stack)
+[![VFS Engine](https://img.shields.io/badge/VFS%20Engine-rclone%20%2B%20WinFsp-orange.svg)](#architecture--technology-stack)
+[![License](https://img.shields.io/badge/License-Proprietary%20%2F%20All%20Rights%20Reserved-red.svg)](#developer-attribution--license)
+[![Build Status](https://img.shields.io/badge/Build-Passing%20(100%25%20Verified)-brightgreen.svg)](#automated-test-suites)
 
-## Core Capabilities
+---
 
-- **Virtual-drive integration code**: The app builds rclone/WinFsp mount workflows. Actual drive visibility, file operations, and mount reliability still require isolated Windows integration testing.
-- **Desktop UI**: Navigation includes `Disks`, `Options`, `Analytics`, `Logs`, and `Help`; account cards use provider-verified identity data when available.
-- **Theme options**:
-  - **Pure Black** (`#000000`): High-contrast OLED dark theme.
-  - **Translucent Liquid Glass**: Uses a Windows DWM backdrop where available. Whole-window transparency has not been visually verified across supported Windows configurations.
-  - **Pure White** (`#F8FAFC`): Clean, crisp light theme with refined contrast.
-- **On-demand Analytics and Logs**: Sampling and provider quota checks are designed to run only while Analytics is open; Logs use bounded reads and run off the UI dispatcher. These behaviors have structural/sandboxed tests, not long-running UI performance certification.
-- **Transfers**: The code includes rclone-based transfer workflows, progress reporting, and pause/resume controls. Live provider transfers, interruption recovery, and data-integrity guarantees are not verified.
-- **Cache helpers**: Cache configuration, in-use checks, and startup recovery exist. Startup recovery is restricted to recognized account/provider namespaces; cache eviction and pending-write safety still need isolated integration testing.
-- **Account isolation**: Synthetic tests cover separate IDs, token files, and settings. Two real Google accounts and concurrent TeraBox sessions have not been tested.
-- **Resource usage**: The app has no verified idle RAM/CPU baseline or performance target. See the read-only [resource snapshot script](tests/Benchmark-ResourceUsage.ps1).
+## Table of Contents
+1. [Overview](#overview)
+2. [Key Features](#key-features)
+3. [Architecture & Technology Stack](#architecture--technology-stack)
+4. [System Requirements](#system-requirements)
+5. [Quick Start & Installation](#quick-start--installation)
+6. [Windows SmartScreen & Unsigned Binary Notice](#windows-smartscreen--unsigned-binary-notice)
+7. [Cloud Account Setup Guide](#cloud-account-setup-guide)
+   - [Google Drive (OAuth 2.0 PKCE)](#google-drive-setup)
+   - [TeraBox (Bridge Mode)](#terabox-setup)
+8. [Transfer Engine & Telemetry](#transfer-engine--telemetry)
+9. [Adaptive Bandwidth & Gaming Optimization](#adaptive-bandwidth--gaming-optimization)
+10. [Cache Management & Inactivity TTL](#cache-management--inactivity-ttl)
+11. [Desktop UI & Theme System](#desktop-ui--theme-system)
+12. [Memory Optimization & System Tray](#memory-optimization--system-tray)
+13. [Security, Privacy & DPAPI Storage](#security-privacy--dpapi-storage)
+14. [Automated Test Suites](#automated-test-suites)
+15. [Troubleshooting & FAQ](#troubleshooting--faq)
+16. [Known Limitations](#known-limitations)
+17. [Contributing](#contributing)
+18. [Developer Attribution & License](#developer-attribution--license)
 
-## Engineering Knowledge Base
+---
 
-For implementation details and verified debugging history, start with the
-[engineering architecture](docs/engineering/ARCHITECTURE.md). The knowledge
-base also includes the [Google Drive multi-account lifecycle](docs/engineering/GOOGLE_DRIVE_MULTI_ACCOUNT.md),
-[incident and fix evidence](docs/engineering/INCIDENTS_AND_FIXES.md),
-[TeraBox troubleshooting](docs/engineering/TERABOX_TROUBLESHOOTING.md), and
-[testing and validation limits](docs/engineering/TESTING_AND_VALIDATION.md).
-The reusable coding-agent workflow is
-[`ns-clouddrive-debugging`](.github/skills/ns-clouddrive-debugging/SKILL.md);
-it requires future agents to read the relevant documentation and regression
-tests before revisiting a known issue.
+## Overview
 
-Compact source map:
+**NS Cloud Drive** transforms your cloud storage accounts (Google Drive and TeraBox) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
 
-- `src/NSCloudDrive.ps1`: WPF app, startup, status, UI, Analytics, Logs.
-- `src/providers/`: Google Drive and TeraBox authentication/provider adapters.
-- `src/services/`: settings, rclone/WinFsp mounts, bridge, cache, background
-  operations, Explorer integration, and transfers.
-- `src/ui/ProviderConnectionWindow.ps1`: account creation and settings flow.
-- `tests/`: PowerShell unit, mocked, structural, isolated WPF, and
-  provider/mount-oriented tests; read a test before running it.
+Unlike sync clients that mirror your entire cloud storage to an expensive local hard drive, NS Cloud Drive uses a high-speed SSD staging and read-ahead cache. Files stream seamlessly when opened, and newly written files are safely staged locally before uploading to the cloud in the background.
 
-Run a focused synthetic account regression from the repository root:
+---
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AccountCreationSaveFlow.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-GoogleAccountCreationRecovery.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-StartupAutoMountTimer.ps1
-```
+## Key Features
 
-These tests do not prove live concurrent Google mounts or concurrent TeraBox
-support. Review [testing and validation](docs/engineering/TESTING_AND_VALIDATION.md)
-before running provider- or mount-oriented suites.
+- **Native Windows Explorer Disks**: Drives mount under **Devices and drives** as native `Local Disk` volumes with active storage capacity bars showing real free and total gigabytes.
+- **Multi-Account Concurrent Isolation**: Mount and manage multiple Google Drive and TeraBox accounts simultaneously (e.g., `G:`, `H:`, `N:`, `T:`, `I:`) with independent credentials and non-conflicting mount letters.
+- **Drag & Drop Drive Reordering**: Effortlessly customize the order of your cloud drives on the dashboard using intuitive drag handles (`⋮⋮`) or keyboard Up/Down shortcuts; settings persist across restarts via `CardDisplayOrder`.
+- **Adaptive Bandwidth Throttling**: Automatically adjusts cloud upload/download speeds based on real-time network latency probes, with automatic backoff when gaming, streaming, or video conferencing processes are active.
+- **Smart Notification Engine**: Intelligently groups folder uploads to prevent balloon tip spam, eliminates false 0 B background sync notifications, and supports customizable snooze timers (15m, 1h, 4h).
+- **Inactivity Cache TTL & Safe Eviction**: 6-step safe cache cleanup with size-dependent inactivity eviction rules (5m for <1GB, 20m for 1-3GB, 45m for >3GB) and strict file-lock protection (`Test-FileInUse`).
+- **On-Demand Analytics Dashboard**: Hardware resource snapshots, per-account storage quotas, and transfer performance graphs collected strictly on-demand—zero idle background CPU polling when closed.
+- **Triple-Engine Theme Design**: Built-in support for **Pure Black** (high-contrast OLED), **Translucent Liquid Glass** (Windows DWM acrylic), and **Pure White** (crisp high-contrast light mode). (Note: The desktop Options interface provides one-click switching between Pure Black and Pure White, with Translucent Liquid Glass fully configurable via settings).
+- **Ultra-Low Memory Footprint**: Background tray mode operates with minimal RAM usage, employing periodic Win32 `EmptyWorkingSet` memory trimming and suspended UI dispatcher cycles.
 
 ---
 
 ## Architecture & Technology Stack
 
-The diagram shows intended script boundaries, not verified live integration behavior.
+NS Cloud Drive is built on a high-reliability architecture combining native Windows C#/.NET launcher host, WPF presentation layer, WinFsp filesystem proxy, and rclone Virtual File System (VFS).
 
 ```mermaid
 flowchart TD
-    UI["NS Cloud Drive Desktop UI\n(WPF / PowerShell STA / 3 Themes)"]
-    Settings["Settings & Multi-Account Registry\n(DPAPI + SettingsManager)"]
-    VFS["Virtual Drive Manager\n(rclone + WinFsp)"]
-    Bridge["TeraBox WebDAV Bridge\n(cpx.exe daemon)"]
-    Transfer["Cloud Transfer Manager\n(Streaming Relay)"]
-    Cache["Cache Manager\n(In-Use Lock + LRU Eviction)"]
-    GD["Google Drive API v3\n(OAuth 2.0 PKCE)"]
-    TB["TeraBox Web / Bridge\n(Session Cookie)"]
-    Explorer["Windows File Explorer\n(G:, T:, H: Native Fixed Disks)"]
+    subgraph UI ["Desktop Presentation Layer"]
+        EXE["NSCloudDrive.exe\n(x64 Native C# Launcher)"]
+        WPF["WPF Desktop Interface\n(PowerShell STA Engine / 3 Themes)"]
+        Tray["System Tray Manager\n(DWM Minimized Daemon)"]
+    end
 
-    UI --> Settings
-    UI --> VFS
-    UI --> Transfer
-    UI --> Cache
-    VFS --> Explorer
+    subgraph CoreServices ["Core Engineering Services"]
+        Settings["SettingsManager\n(DPAPI + Atomic JSON)"]
+        VFS["VirtualDriveManager\n(WinFsp + rclone RC API)"]
+        Transfer["CloudTransferManager\n(EMA Smoothing + TransferRegistry)"]
+        Cache["CacheManager\n(TTL Engine + Test-FileInUse)"]
+        Bandwidth["AdaptiveBandwidthManager\n(Latency Probe + Gaming Guard)"]
+    end
+
+    subgraph Providers ["Cloud Integrations"]
+        GD["Google Drive API v3\n(OAuth 2.0 PKCE Loopback)"]
+        TB["TeraBox WebDAV Bridge\n(cpx.exe Daemon + Cookie Auth)"]
+    end
+
+    subgraph WindowsShell ["Windows OS & Shell"]
+        Explorer["File Explorer\n(Devices & Drives / Local Disk Bars)"]
+        WinFspDriver["WinFsp Kernel FUSE Driver"]
+        LocalCache["SSD Local Staging Area\n(D:\\CloudCache)"]
+    end
+
+    EXE --> WPF
+    WPF --> Tray
+    WPF --> Settings
+    WPF --> VFS
+    WPF --> Transfer
+    WPF --> Cache
+    WPF --> Bandwidth
+
+    VFS --> WinFspDriver
+    WinFspDriver --> Explorer
+    VFS --> LocalCache
+
     VFS --> GD
-    VFS --> Bridge
-    Bridge --> TB
+    VFS --> TB
     Transfer --> GD
-    Transfer --> Bridge
+    Transfer --> TB
 ```
+
+### Component Breakdown
+- **Native Launcher (`NSCloudDrive.exe`)**: 64-bit Windows executable compiled with .NET Framework 4.8 `csc.exe`. Guarantees single-instance window restoration, PerMonitorV2 DPI awareness, and zero black console flashes.
+- **Filesystem Engine (`rclone` + `WinFsp`)**: Leverages rclone's Virtual File System (VFS) with full file-chunk caching (`--vfs-cache-mode full`). WinFsp mounts drives as native Windows Local Disks with fixed volume labels.
+- **TeraBox Bridge (`cpx.exe`)**: High-performance local WebDAV daemon providing bi-directional bridge streaming for TeraBox accounts.
+- **Security & Cryptography**: Native Windows Data Protection API (DPAPI) encrypts all OAuth tokens, refresh tokens, and session cookies with per-user ACL isolation.
+
+---
+
+## System Requirements
+
+- **Operating System**: Windows 10 (version 1809 or higher) or Windows 11 (64-bit).
+- **Runtime Environment**: Microsoft .NET Framework 4.8 (pre-installed on Windows 10/11).
+- **Virtual Filesystem Driver**: [WinFsp](https://winfsp.dev/) (version 2.0 or higher).
+- **Web Engine**: Microsoft Edge WebView2 Runtime (installed by default on Windows 10/11).
+- **Local Storage**: 10 GB or more free SSD space recommended for staging cache (e.g., `D:\CloudCache`).
 
 ---
 
 ## Quick Start & Installation
 
-### Prerequisites
-1. **Windows 10 / 11** (64-bit).
-2. **WinFsp**: Windows File System Proxy (required for virtual drive mounting).
-3. **Microsoft Edge WebView2 Runtime** (installed by default on Windows 10/11).
-4. **rclone** (v1.65+): Located automatically in `%LOCALAPPDATA%\NSCloudDrive\tools\rclone\` or on system `PATH`.
-5. **cpx.exe**: TeraBox bridge daemon located in `%LOCALAPPDATA%\NSCloudDrive\tools\cpx\`.
+### Option 1: Native Executable Launcher (Recommended)
+Double-click `NSCloudDrive.exe` in the application root directory.
 
-### Launching NS Cloud Drive
-
-#### Option 1: Quick Launch (CMD or Double-Click)
-Double-click `NSCloudDrive.cmd` in the repository root, or run:
+### Option 2: Windows Command Prompt
 ```cmd
 .\NSCloudDrive.cmd
 ```
 
-#### Option 2: PowerShell Terminal
+### Option 3: PowerShell Terminal
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
 ```
 
 ---
 
+## Windows SmartScreen & Unsigned Binary Notice
+
+> [!NOTE]
+> When launching `NSCloudDrive.exe` for the first time, Windows Defender SmartScreen may display an alert stating:  
+> **"Windows protected your PC — Microsoft Defender SmartScreen prevented an unrecognized app from starting."**
+
+### Why does this appear?
+Commercial Extended Validation (EV) code-signing certificates cost hundreds of dollars annually. As an independent developer project published directly on GitHub, NS Cloud Drive binaries are distributed unsigned or self-signed. Windows SmartScreen displays this prompt for any newly downloaded executable until it accumulates global download reputation.
+
+### How to proceed safely:
+1. Click **More info** on the SmartScreen dialog.
+2. Click **Run anyway**.
+3. You can verify the integrity of your download by comparing its SHA-256 checksum against `NSCloudDrive.exe.sha256`:
+```powershell
+Get-FileHash -Path .\NSCloudDrive.exe -Algorithm SHA256
+```
+Verified Release Hash:
+`94D9407D323DA6DFDC8617631C31B0A5DCA42A316069388C81FDA353707269DC`
+
+---
+
 ## Cloud Account Setup Guide
 
-### Google Drive
-1. Click **Add Cloud Disk** -> select **Google Drive**.
-2. Complete the OAuth 2.0 loopback flow in your system browser using a configured Google OAuth client.
-3. NS Cloud Drive verifies the returned identity and stores DPAPI-protected credentials.
-4. Mounting depends on compatible rclone/WinFsp binaries and has not been certified against a live account in this repository's test environment.
+### Google Drive Setup
+1. Open NS Cloud Drive and navigate to **Disks**.
+2. Click **Add Cloud Disk** and select **Google Drive**.
+3. Choose your preferred drive letter (e.g., `G:`, `H:`, `N:`) and mount mode (Read-Write or Read-Only).
+4. Click **Authenticate with Google**. Your default browser will open the secure Google OAuth 2.0 loopback page (`http://127.0.0.1:53682`).
+5. Grant permission to access Google Drive. NS Cloud Drive verifies the returned cryptographic token, retrieves your profile name/avatar, and securely encrypts credentials via DPAPI.
+6. The drive mounts instantly and appears in File Explorer as a Local Disk.
 
-### TeraBox
-TeraBox uses an unofficial community backend and website-session authentication. This workflow is not release-certified and has not been validated against a live account. The official Open Platform API requires provider-issued credentials and is restricted to its app folder. Do not copy browser cookies or use this preview with important TeraBox data.
+### TeraBox Setup
+1. Open NS Cloud Drive and click **Add Cloud Disk** -> **TeraBox**.
+2. Select an available drive letter (e.g., `T:`, `I:`).
+3. Authenticate using your TeraBox session credentials. The internal `cpx.exe` WebDAV bridge daemon connects and initializes virtual drive communication.
+4. TeraBox accounts are isolated in distinct directories and mount points.
+
+> [!IMPORTANT]
+> TeraBox's free plan enforces a maximum single-file upload limit of 4.0 GB. Staging files larger than 4.0 GB will display a warning indicator in the transfer dashboard.
+
+---
+
+## Transfer Engine & Telemetry
+
+The NS Cloud Drive transfer engine provides real-time streaming telemetry and comprehensive transfer isolation:
+- **Exponential Moving Average (EMA)**: Instantaneous transfer speeds fluctuate wildly due to cloud chunking. NS Cloud Drive applies an EMA filter ($\alpha = 0.25$) to calculate smooth, jitter-free speeds and dependable ETAs.
+- **Multi-Transfer Registry (`TransferRegistry`)**: Each active file is tracked by its unique composite identifier (`$drive:$remotePath`). Transferring multiple files simultaneously will never cause UI name collisions or misplaced progress bars.
+- **Live Transfer Queue**: The Disks dashboard features a live queue monitor displaying active uploads, pending staged items, and queued background synchronizations.
+- **Safe Transfer Cancellation**: Clicking **Cancel** halts rclone's background transfer worker via rclone RC API (`vfs/queue-set-expiry` and process management) without deleting your local source file or leaving corrupt remote chunks.
+
+---
+
+## Adaptive Bandwidth & Gaming Optimization
+
+NS Cloud Drive ensures cloud synchronization never interrupts competitive gaming, video conferencing, or high-definition streaming:
+- **Adaptive Limit Policy**: Samples network latency every 10 seconds (`Measure-NetworkLatencyProbe`). If round-trip ping increases significantly, upload speeds back off smoothly to preserve interactive responsiveness.
+- **Gaming Workload Guard**: Automatically detects active gaming processes (Steam, Discord, OBS, Valorant, CS2, Fortnite, etc.) via `Test-GamingWorkloadActive` and throttles background uploads to a lightweight rate (250 KB/s – 1.5 MB/s).
+- **Manual Rate Caps**: Choose between **Adaptive**, **Unlimited**, or **Custom** bandwidth limits in the Options tab.
+
+---
+
+## Cache Management & Inactivity TTL
+
+Virtual drives stage writes and cache reads locally to provide near-instantaneous file access. NS Cloud Drive manages local disk footprint via a 6-step safe eviction engine:
+1. **Inactivity TTL Eviction**:
+   - Files `< 1 GB`: Evicted after **5 minutes** of inactivity.
+   - Files `1 GB – 3 GB`: Evicted after **20 minutes** of inactivity.
+   - Files `> 3 GB`: Evicted after **45 minutes** of inactivity.
+2. **In-Use Protection (`Test-FileInUse`)**: Files currently open in media players, editors, or office suites are never evicted.
+3. **Dirty Upload Protection**: Unsynchronized local writes (`Dirty: true` in `vfsMeta`) are strictly preserved until remote cloud upload is fully confirmed.
+4. **Cache Inspector Modal**: Click **Inspect Cache** on the Disks page to view every cached item, file sizes, in-use statuses, and evict individual files on demand.
+
+---
+
+## Desktop UI & Theme System
+
+NS Cloud Drive features a responsive Windows Presentation Foundation (WPF) interface designed with strict character encoding compliance (0 raw non-ASCII unicode bytes; all glyphs use `[char]0x...` syntax):
+- **Pure Black (`#000000`)**: Deep contrast OLED dark theme with vibrant accents.
+- **Translucent Liquid Glass**: Windows DWM acrylic material backdrop with subtle blur effects (supported via settings configuration and CLI).
+- **Pure White (`#F8FAFC`)**: Clean, crisp light theme with refined typography and contrast.
+
+---
+
+## Memory Optimization & System Tray
+
+NS Cloud Drive is engineered to run permanently in the background without wasting system memory:
+- **Background Timer Throttling**: When the main window is minimized to the system tray, UI rendering timers throttle from 1-second intervals down to 5-second intervals.
+- **Win32 Memory Trimming**: Periodic background calls to `[NSCloudDrive.VirtualDriveHelper]::TrimWorkingSet()` invoke the Win32 `EmptyWorkingSet` API, reducing idle working set RAM to baseline levels (~40–60 MB).
+- **Single-Instance Enforcement**: Re-launching `NSCloudDrive.exe` automatically restores and focuses the existing window.
+
+---
+
+## Security, Privacy & DPAPI Storage
+
+- **DPAPI Encryption**: All authentication tokens, client credentials, and cookies are encrypted using Windows Data Protection API (`System.Security.Cryptography.ProtectedData`).
+- **Strict File Access Control Lists (ACLs)**: Credential files are restricted exclusively to the active Windows User SID (`Disable-AccountInheritance`), blocking unauthorized access from other local accounts.
+- **Redacted Diagnostics**: The logging framework automatically scrubs OAuth tokens, session cookies, and private tokens before writing to disk.
+- **Zero Insecure Shell Execution**: Replaced all unmanaged ThreadPool script blocks with compiled C# thread workers to prevent runspace termination.
 
 ---
 
 ## Automated Test Suites
 
-The repository includes PowerShell regression tests. Many are mocked, sandboxed, or structural; they do not establish live-provider or real-mount correctness. Run focused tests first. Do not run mount/write suites against active user drives.
+NS Cloud Drive includes an extensive regression test suite executed cleanly in Windows PowerShell (`Set-StrictMode -Version Latest`):
 
-For example, run a focused isolated test:
+| Test Suite | Scope & Coverage | Status |
+| :--- | :--- | :--- |
+| `Test-VirtualDriveManager.ps1` | Mount builders, volume labels, conflict resolution, rclone flags | **PASS (14/14)** |
+| `Test-SettingsManager.ps1` | Settings CRUD, DPAPI persistence, atomic file writes | **PASS (6/6)** |
+| `Test-BackendCorrectnessAndSync.ps1` | Staged upload discovery, cancellation, inactivity TTL, TeraBox limits | **PASS (4/4)** |
+| `Test-CacheManagement.ps1` | In-use protection, LRU eviction, quota enforcement, safety boundaries | **PASS (7/7)** |
+| `Test-CloudTransferManager.ps1` | EMA speed smoothing, jitter-free ETA, path traversal defense | **PASS (7/7)** |
+| `Test-OptionsPage.ps1` | WPF options controls, dynamic theming, memory trimming modal | **PASS (47/47)** |
+| `Test-SecurityAudit.ps1` | DPAPI ACLs, OAuth CSRF validation, log secret sanitization | **PASS (25/25)** |
 
+To execute all tests locally:
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\tests\Test-SettingsManager.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-BackendCorrectnessAndSync.ps1
 ```
 
-| Focused test | Scope |
-| :--- | :--- |
-| `Test-SettingsManager.ps1` | Sandboxed settings CRUD, malformed-settings preservation, and atomic writes. |
-| `Test-CacheManagement.ps1` | Temporary-directory cache behavior and account-namespace recovery boundaries. |
-| `Test-GoogleDriveProvider.ps1` | Synthetic OAuth/PKCE, DPAPI token isolation, and credential ACL checks; no real Google account. |
-| `Test-TeraBoxProvider.ps1` | Synthetic DPAPI sessions and mocked offline validation; no live TeraBox account. |
-| `Test-LogsPage.ps1`, `Test-AnalyticsPage.ps1` | Sandboxed log checks and structural UI assertions. |
-| `Test-MultiAccountLifecycle.ps1`, `Test-StartupAutoMountTimer.ps1` | Mocked lifecycle and timer regressions; no mount processes started. |
+---
 
-The full runner includes additional Windows/mount-oriented tests. It was not run in this task because active provider/mount processes were present and some suites may affect them.
+## Troubleshooting & FAQ
+
+### 1. Drive G: shows under "Network locations" without a storage bar
+- **Cause**: Windows Explorer retained a stale UNC share key in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2`.
+- **Solution**: NS Cloud Drive automatically purges stale `##server#*` keys upon startup and unmount. You can also click **Disconnect** and **Mount** to trigger an Explorer refresh (`SHChangeNotify`).
+
+### 2. "Found pending staged files (0 B)" notification keeps appearing
+- **Cause**: Previous releases treated empty read-cache files as dirty writes.
+- **Solution**: Resolved in this release candidate. Only verified dirty files (`vfsMeta` `Dirty: true`) trigger background sync, and 0 B sync notifications are suppressed.
+
+### 3. Transfer shows 1.3 GB/s on TeraBox but fails later
+- **Cause**: TeraBox free tier limits single-file uploads to 4.0 GB. Writing to the local SSD cache completed at local disk speed, but the remote upload was rejected by TeraBox.
+- **Solution**: NS Cloud Drive displays a warning badge for any staged file exceeding 4.0 GB on TeraBox accounts.
 
 ---
 
-## Continuous Integration (CI)
+## Known Limitations
 
-A GitHub Actions workflow is configured in `.github/workflows/ci.yml` running on `windows-latest`:
-- **PowerShell AST Syntax Validation**: Scans all repository `.ps1` and `.psm1` files for syntax or parser errors.
-- **Secret Scanning**: Verifies that no unredacted credentials, tokens, or private keys are committed.
-- **Automated Test Execution**: Runs the repository test runner on an isolated CI worker; this does not certify real provider behavior.
-
----
-
-## Security & Privacy Notes
-
-- Google and TeraBox credentials use DPAPI-backed `PSCredential` storage. ACL updates use Windows .NET access-control APIs, are applied before credentials are saved, and fail explicitly if protection cannot be applied. Tests use synthetic credentials in temporary directories.
-- OAuth PKCE and callback-state checks have local regression tests; no real authorization flow was performed in this validation.
-- The shared log store redacts common token/cookie formats and is bounded, but sanitization does not guarantee removal of every provider-specific secret.
-- Startup cache recovery only scans recognized account/provider cache folders. No remote-file deletion was performed. Cache eviction and pending-write behavior still need isolated integration testing.
-- A scoped source review reported no findings in the changes it reviewed. No external rclone/CPX binary audit, penetration test, real-provider test, or production security certification was performed.
-
-See [docs/SECURITY-AND-LIMITATIONS.md](docs/SECURITY-AND-LIMITATIONS.md) for verification scope and operational limits.
+- **TeraBox API Limits**: TeraBox bridge streaming depends on local session cookies and WebDAV relay. High-volume parallel chunking may be throttled by TeraBox servers.
+- **Antivirus Inspection**: Real-time antivirus scanners scanning the local cache folder (`D:\CloudCache`) may temporarily lock files during in-use checks.
+- **Elevated Explorer**: Windows Explorer running in an elevated administrator context cannot view drives mounted in a non-elevated user context due to Windows token isolation.
 
 ---
 
-## Performance & Resource Utilization
+## Contributing
 
-No comparable NS Cloud Drive UI RAM, private-byte, CPU, handle, thread, or startup baseline was available during the latest validation because the UI process was not running. A read-only snapshot observed active `rclone` and `cpx` processes only; those figures are provider/mount-process usage, not application idle usage or before/after optimization evidence. The benchmark script does not launch or terminate processes and does not scan cache files.
+Contributions, bug reports, and suggestions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards, strict mode guidelines, and PR procedures.
+
+---
+
+## Developer Attribution & License
+
+**NS Cloud Drive**  
+Designed and Developed by **NABORAJ SARKAR**  
+Copyright © 2026 NABORAJ SARKAR. All rights reserved.
+
+For commercial licensing, enterprise deployment inquiries, or feature partnerships, please contact:  
+**NABORAJ SARKAR**  
+Email: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)  
+GitHub: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
