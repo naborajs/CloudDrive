@@ -1,0 +1,86 @@
+{
+  "taskId": "TASK-007",
+  "goal": "NS Cloud Drive — Fix Duplicate Pending Counts (501 -> 197) and Post-Restart VFS Cache Recovery",
+  "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
+  "branch": "main",
+  "acceptanceCriteria": [
+    "1. Investigate and diagnose why pending upload count showed 501 instead of 197: root-caused to rclone dynamic environment configuration hashing (gdrive{gN719}, gdrive{Ei1yL}, gdrive{48FKa}) across 3 runs, which summed to exactly 501 files.",
+    "2. VFS Relative Path Deduplication: Implement relative path deduplication in Get-VirtualDrivePendingUploads keyed by '$accId|$logicalRelPath', collapsing duplicate historical runs down to the true unique 197 files.",
+    "3. Automated VFS Orphan Reconciliation: Implement Sync-VirtualDriveOrphanedVfsCache in VirtualDriveManager.ps1, safely migrating stranded dirty staged files and vfsMeta from orphaned {hash} directories into the active rclone VFS folder.",
+    "4. Post-Restart Startup Integration: Wire Sync-VirtualDriveOrphanedVfsCache into Start-ApplicationStartupSequence in NSCloudDrive.ps1 so any un-uploaded staged files are immediately detected and uploaded on boot.",
+    "5. Accurate UI Route & Badge Attribution: Resolve actual destination account and drive letter (G: Google Drive) from pending files in Update-LiveTransferActivity rather than defaulting to T: TeraBox.",
+    "6. Idempotency & Quality: Regression tests pass with exit code 0; zero raw unicode in NSCloudDrive.ps1; Set-StrictMode -Version Latest compliant; zero data loss."
+  ],
+  "assignedAgents": [
+    "orchestra-boss",
+    "orchestra-coder-a",
+    "orchestra-coder-b",
+    "orchestra-reviewer",
+    "orchestra-tester"
+  ],
+  "status": "done",
+  "filesChanged": [
+    "src/services/VirtualDriveManager.ps1",
+    "src/NSCloudDrive.ps1",
+    "tests/Test-OrphanedVfsCacheReconciliation.ps1",
+    "tests/Run-AllTests.ps1",
+    "docs/engineering/INCIDENTS_AND_FIXES.md",
+    "task-ledger.json"
+  ],
+  "decisions": [
+    {
+      "date": "2026-10-26",
+      "decision": "Deduplicate pending VFS uploads by account ID and logical relative path.",
+      "rationale": "Prevents double/triple counting identical files staged across different rclone {hash} folders from previous runs before a restart."
+    },
+    {
+      "date": "2026-10-26",
+      "decision": "Implement Sync-VirtualDriveOrphanedVfsCache to merge orphaned {hash} directories into the active VFS cache on startup.",
+      "rationale": "When rclone restarts with a new configuration hash, previously staged files must be migrated into the active directory so rclone can detect and upload them to the cloud."
+    },
+    {
+      "date": "2026-10-26",
+      "decision": "Resolve drive badge and route from the first pending file's AccountId when rclone is idle.",
+      "rationale": "Prevents displaying 'T: Cloud Storage' when the pending files belong to Google Drive ('G:')."
+    }
+  ],
+  "reviewFindings": [],
+  "testResults": [
+    {
+      "suite": "Test-OrphanedVfsCacheReconciliation.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Run-AllTests.ps1",
+      "status": "passed",
+      "exitCode": 0,
+      "details": "36 Passed, 0 Failed"
+    }
+  ],
+  "securityFindings": [],
+  "commitRefs": [],
+  "blockers": [],
+  "completedTasks": [
+    {
+      "taskId": "TASK-004",
+      "goal": "NS Cloud Drive — Analytics Page Upgrade, Transfer Direction Isolation, Duplicate Notification Suppression & Card Drag-and-Drop Modernization",
+      "status": "done"
+    },
+    {
+      "taskId": "TASK-005",
+      "goal": "NS Cloud Drive — Fix Transfer Stalls, Eliminate Burst Throttling, and Implement User-Controlled Bandwidth Management",
+      "status": "done"
+    },
+    {
+      "taskId": "TASK-006",
+      "goal": "NS Cloud Drive — Google Drive Reliability & Token Sync, TeraBox On-Demand Streaming & Crash Prevention, Drive Card Drag-and-Drop Reordering, and Notification Center & Transfer History Upgrade",
+      "status": "done"
+    },
+    {
+      "taskId": "TASK-007",
+      "goal": "NS Cloud Drive — Fix Duplicate Pending Counts (501 -> 197) and Post-Restart VFS Cache Recovery",
+      "status": "done"
+    }
+  ]
+}
