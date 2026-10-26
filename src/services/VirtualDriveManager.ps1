@@ -11,6 +11,8 @@ $script:DefaultCacheDirectory = 'D:\CloudCache'
 $script:ActiveMountProcesses = @{}
 $script:ProviderDriveMapping = @{}
 $script:MountProcess = $null
+$script:VfsSmoothedSpeeds = @{}
+$script:VfsItemSmoothedSpeeds = @{}
 
 if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveHelper').Type) {
     try {
@@ -32,20 +34,113 @@ namespace NSCloudDrive
             {
                 try
                 {
-                    Thread.Sleep(300);
-                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + rcPort + "/vfs/refresh");
+                    Thread.Sleep(200);
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + rcPort + "/vfs/stats");
                     req.Method = "POST";
                     req.ContentType = "application/json";
-                    req.Timeout = 8000;
-                    byte[] bytes = Encoding.UTF8.GetBytes("{\"dir\":\"\"}");
-                    req.ContentLength = bytes.Length;
-                    using (Stream stream = req.GetRequestStream())
-                    {
-                        stream.Write(bytes, 0, bytes.Length);
-                    }
+                    req.Timeout = 4000;
                     using (WebResponse resp = req.GetResponse()) { }
                 }
                 catch { }
+            });
+        }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveKeepAliveHelper').Type) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+
+namespace NSCloudDrive
+{
+    public static class VirtualDriveKeepAliveHelper
+    {
+        public static bool PingRc(int rcPort, int timeoutMs = 2000)
+        {
+            if (rcPort <= 0) return false;
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + rcPort + "/vfs/stats");
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                byte[] body = Encoding.UTF8.GetBytes("{}");
+                req.ContentLength = body.Length;
+                using (Stream stream = req.GetRequestStream())
+                {
+                    stream.Write(body, 0, body.Length);
+                }
+                using (WebResponse resp = req.GetResponse()) { }
+                return true;
+            }
+            catch
+            {
+                try
+                {
+                    HttpWebRequest req2 = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + rcPort + "/core/version");
+                    req2.Method = "POST";
+                    req2.ContentType = "application/json";
+                    req2.Timeout = timeoutMs;
+                    req2.ReadWriteTimeout = timeoutMs;
+                    byte[] body2 = Encoding.UTF8.GetBytes("{}");
+                    req2.ContentLength = body2.Length;
+                    using (Stream stream2 = req2.GetRequestStream())
+                    {
+                        stream2.Write(body2, 0, body2.Length);
+                    }
+                    using (WebResponse resp2 = req2.GetResponse()) { }
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        public static void PingRcAsync(int rcPort, int timeoutMs = 2000)
+        {
+            if (rcPort <= 0) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                PingRc(rcPort, timeoutMs);
+            });
+        }
+
+        public static bool PingDriveRoot(string driveRoot)
+        {
+            if (string.IsNullOrEmpty(driveRoot)) return false;
+            try
+            {
+                DirectoryInfo di = new DirectoryInfo(driveRoot);
+                if (di.Exists)
+                {
+                    var attr = di.Attributes;
+                    return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static void PingDriveRootAsync(string driveRoot)
+        {
+            if (string.IsNullOrEmpty(driveRoot)) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                PingDriveRoot(driveRoot);
             });
         }
     }
@@ -150,7 +245,7 @@ function Get-VirtualDriveRcPort([string]$DriveLetter) {
     return 5580 + ([int]$letter[0] - [int][char]'A')
 }
 
-function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 10) {
+function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 5) {
     if ($DriveRoot -notmatch '^[A-Za-z]:\\$') { throw 'A valid drive root is required for the filesystem check.' }
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'Filesystem check timeout must be between 1 and 30 seconds.' }
 
@@ -211,15 +306,26 @@ function Clear-StaleDriveLetterMapping([string]$DriveLetter, [string]$VolumeLabe
 
         # Also purge any stale rclone/WinFsp network redirector keys (##server#*) that cause Explorer
         # to treat fixed disk mounts as "Network locations" with "\\server".
-        if (Test-Path -LiteralPath $mpKey) {
-            $serverKeys = Get-ChildItem -LiteralPath $mpKey -ErrorAction SilentlyContinue |
-                Where-Object { $_.PSChildName -like '##server#*' }
-            foreach ($sk in $serverKeys) {
-                if ([string]::IsNullOrEmpty($VolumeLabel) -or $sk.PSChildName -eq "##server#$VolumeLabel" -or $sk.PSChildName -like '##server#*') {
-                    Remove-Item -LiteralPath $sk.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            $regBase = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2', $true)
+            if ($regBase) {
+                $purged = $false
+                foreach ($subKey in $regBase.GetSubKeyNames()) {
+                    if ([string]::IsNullOrEmpty($VolumeLabel) -or $subKey -eq "##server#$VolumeLabel" -or $subKey -like '##server#*') {
+                        try {
+                            $regBase.DeleteSubKeyTree($subKey)
+                            $purged = $true
+                        } catch { }
+                    }
+                }
+                $regBase.Close()
+                if ($purged -and ('NSCloudDrive.ExplorerNative' -as [type])) {
+                    try {
+                        [NSCloudDrive.ExplorerNative]::SHChangeNotify(0x08000000, 0x0000, $null, [IntPtr]::Zero)
+                    } catch { }
                 }
             }
-        }
+        } catch { }
     } catch { }
 }
 
@@ -400,7 +506,8 @@ function Build-RcloneMountArguments(
     [int]$CacheMaxGigabytes = 20,
     [switch]$ReadOnly = $false,
     [switch]$FixedDisk = $false,
-    [int]$RcPort = 0
+    [int]$RcPort = 0,
+    [string]$InitialBwLimit = ''
 ) {
     if ($CacheMaxGigabytes -lt 1 -or $CacheMaxGigabytes -gt 1024) {
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
@@ -441,9 +548,13 @@ function Build-RcloneMountArguments(
         '--vfs-cache-mode', 'full',
         '--vfs-cache-max-size', "${CacheMaxGigabytes}G",
         '--vfs-cache-max-age', '72h',
-        '--vfs-cache-poll-interval', '15s',
-        '--vfs-write-back', '5s',
+        '--vfs-cache-poll-interval', '2s',
+        '--vfs-write-back', '1s',
         '--vfs-fast-fingerprint',
+        '--vfs-read-chunk-size', '4M',
+        '--vfs-read-chunk-size-limit', '32M',
+        '--vfs-read-ahead', '16M',
+        '--buffer-size', '16M',
         '--dir-cache-time', '72h',
         '--attr-timeout', '30s',
         '--links',
@@ -451,12 +562,31 @@ function Build-RcloneMountArguments(
         '--log-level', 'ERROR'
     )
 
-    # Google Drive operations can leave WinFsp request threads waiting on remote
-    # metadata or reads. Keep additional dispatcher capacity available so those
-    # waits do not also starve unrelated Explorer metadata requests. This is
-    # Google Drive-specific; TeraBox retains its current WinFsp defaults.
-    if ($RemoteName -match '(?i)(^|[^a-z0-9])(?:gdrive|google)(?:$|[^a-z0-9])') {
-        $args += @('--fuse-flag', '--ThreadCount=64')
+    # WinFsp request threads: 64 threads for ALL mounts (both Google Drive and TeraBox).
+    # Prevents concurrent metadata, thumbnail, EXIF, and streaming byte requests from starving
+    # WinFsp's default 4-thread pool during media inspection (e.g. Windows Photos / Explorer),
+    # eliminating RPC timeouts and application crashes.
+    $args += @('--fuse-flag', '--ThreadCount=64')
+
+    # Provider-tuned streaming chunk size and transfer concurrency
+    if ($cleanRemote -match '(?i)(?:gdrive|google)') {
+        $args += @(
+            '--drive-chunk-size', '32M',
+            '--drive-upload-cutoff', '32M',
+            '--transfers', '4'
+        )
+    } elseif ($cleanRemote -match '(?i)terabox') {
+        $args += @(
+            '--transfers', '2'
+        )
+    } else {
+        $args += @(
+            '--transfers', '4'
+        )
+    }
+
+    if (-not [string]::IsNullOrEmpty($InitialBwLimit) -and $InitialBwLimit -ne 'off') {
+        $args += @('--bwlimit', $InitialBwLimit)
     }
 
     if (-not [string]::IsNullOrEmpty($ConfigPath)) {
@@ -492,7 +622,9 @@ function Start-VirtualDriveMount(
     [hashtable]$EnvironmentVariables = @{},
     [switch]$ReadOnly = $false,
     [int]$CacheMaxGigabytes = 20,
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    [string]$InitialBwLimit = '',
+    [hashtable]$Progress = $null
 ) {
     if (-not (Test-WinFspInstalled)) {
         throw 'WinFsp is not installed or running. Cannot mount virtual drive.'
@@ -584,8 +716,15 @@ function Start-VirtualDriveMount(
             } catch { $mountConfigPath = '' }
         }
     }
+    if ([string]::IsNullOrEmpty($InitialBwLimit)) {
+        try {
+            if (Get-Command Get-EffectiveBandwidthLimitRate -ErrorAction SilentlyContinue) {
+                $InitialBwLimit = Get-EffectiveBandwidthLimitRate
+            }
+        } catch { }
+    }
     $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk -RcPort $rcPort
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk -RcPort $rcPort -InitialBwLimit $InitialBwLimit
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
@@ -622,18 +761,65 @@ function Start-VirtualDriveMount(
             throw "rclone mount exited prematurely (exit code $($proc.ExitCode)): $err"
         }
 
+        if ($rcPort -gt 0 -and $stopwatch.Elapsed.TotalSeconds -ge 4) {
+            $isRcAlive = $false
+            try {
+                $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/version" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+                $isRcAlive = $true
+            } catch { }
+            if ($isRcAlive -and $Progress -and $Progress.Stage -notmatch 'Waiting for provider readiness') {
+                $Progress.Stage = 'Waiting for provider readiness...'
+            }
+        }
+
         $isMounted = [System.IO.DriveInfo]::GetDrives().Name -contains $driveRoot
         if ($isMounted) {
-            $filesystemCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 10
+            if ($Progress) {
+                $Progress.Stage = "Verifying $letter`: mount"
+            }
+            # Bounded root probe (reduced from default 10s to 5s for fast Google Drive responsiveness)
+            # Legacy check signature: Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 10
+            $filesystemCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 5
+            $filesystemVerified = [bool]$filesystemCheck.Success
+
             if (-not $filesystemCheck.Success) {
                 if ($filesystemCheck.State -eq 'Timeout') {
-                    throw "Mount process $($proc.Id) remains running, but the filesystem root check timed out: $($filesystemCheck.Error)"
+                    # Mount process remains running; probe rclone RC port responsiveness
+                    $isProcAlive = ($null -ne $proc -and -not $proc.HasExited)
+                    $isRcAlive = $false
+                    if ($rcPort -gt 0) {
+                        try {
+                            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/stats" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+                            $isRcAlive = $true
+                        } catch {
+                            try {
+                                $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/version" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
+                                $isRcAlive = $true
+                            } catch { }
+                        }
+                    }
+
+                    if ($isProcAlive -and ($isRcAlive -or $rcPort -le 0)) {
+                        # Slow initial directory response; allow a bounded retry of 3 seconds
+                        $retryCheck = Test-VirtualDriveFilesystem -DriveRoot $driveRoot -TimeoutSeconds 3
+                        if ($retryCheck.Success) {
+                            $filesystemCheck = $retryCheck
+                            $filesystemVerified = $true
+                        } else {
+                            # Drive letter is present in Windows and rclone process is alive;
+                            # mark FilesystemUnverified rather than throwing an unrecoverable exception
+                            $filesystemVerified = $false
+                        }
+                    } else {
+                        throw "Mount process $($proc.Id) remains running, but the filesystem root check timed out and rclone RC is unresponsive: $($filesystemCheck.Error)"
+                    }
+                } else {
+                    $cleanup = Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
+                    if (-not $cleanup.Success -or -not $cleanup.Verified) {
+                        throw "Filesystem verification failed: $($filesystemCheck.Error) Cleanup could not be verified: $($cleanup.Message)"
+                    }
+                    throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
                 }
-                $cleanup = Stop-VirtualDriveMount -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $letter
-                if (-not $cleanup.Success -or -not $cleanup.Verified) {
-                    throw "Filesystem verification failed: $($filesystemCheck.Error) Cleanup could not be verified: $($cleanup.Message)"
-                }
-                throw "Mount process started, but filesystem verification failed: $($filesystemCheck.Error)"
             }
 
             # Asynchronously pre-warm the root directory cache using native CLR threadpool
@@ -646,6 +832,18 @@ function Start-VirtualDriveMount(
                 } catch { }
             }
 
+            # Reconcile any orphaned VFS cache directories from previous sessions/tokens
+            try {
+                Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $CacheDirectory -AccountId $AccountId -DriveLetter $letter
+            } catch {
+                if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                    try {
+                        Write-NSCloudLog -Severity 'Warning' -AccountId $AccountId -Operation 'vfs-reconciliation' `
+                            -Message "Non-blocking orphan cache sync failed: $($_.Exception.Message)"
+                    } catch { }
+                }
+            }
+
             return [ordered]@{
                 Success = $true
                 ProviderId = $resolvedProvider
@@ -655,7 +853,8 @@ function Start-VirtualDriveMount(
                 VolumeLabel = $volName
                 ProcessId = $proc.Id
                 LogPath = $logPath
-                FilesystemVerified = $true
+                FilesystemVerified = $filesystemVerified # FilesystemVerified = $true when verified
+                FilesystemUnverified = (-not $filesystemVerified)
                 RcPort = $rcPort
             }
         }
@@ -976,11 +1175,19 @@ function Get-VirtualDriveVfsStats {
             UploadsInProgress = 0
             UploadsQueued = 0
             BytesTransferred = 0L
+            TotalBytes = 0L
             TransferSpeed = 0.0
+            SmoothedSpeed = 0.0
+            OverallEta = $null
+            SmoothedEta = $null
             Errors = 0
             LastError = $null
             Transferring = @()
+            QueuedItems = @()
+            AllTransfers = @()
             CacheBytesUsed = 0L
+            DiskCachePath = ''
+            DiskCacheMetaPath = ''
             State = 'Remote state unknown'
         }
     }
@@ -994,11 +1201,15 @@ function Get-VirtualDriveVfsStats {
         $uploadsInProg = 0
         $uploadsQueued = 0
         $cacheBytes = 0L
+        $diskCachePath = ''
+        $diskCacheMetaPath = ''
         if ($vfsResp -and $vfsResp.PSObject.Properties['diskCache'] -and $vfsResp.diskCache) {
             $dc = $vfsResp.diskCache
             if ($dc.PSObject.Properties['uploadsInProgress']) { $uploadsInProg = [int]$dc.uploadsInProgress }
             if ($dc.PSObject.Properties['uploadsQueued']) { $uploadsQueued = [int]$dc.uploadsQueued }
             if ($dc.PSObject.Properties['bytesUsed']) { $cacheBytes = [int64]$dc.bytesUsed }
+            if ($dc.PSObject.Properties['path'] -and $dc.path) { $diskCachePath = [string]$dc.path }
+            if ($dc.PSObject.Properties['pathMeta'] -and $dc.pathMeta) { $diskCacheMetaPath = [string]$dc.pathMeta }
         }
 
         $bTrans = 0L
@@ -1018,18 +1229,118 @@ function Get-VirtualDriveVfsStats {
             if ($coreResp.PSObject.Properties['lastError'] -and $coreResp.lastError) { $lastErr = [string]$coreResp.lastError }
             if ($coreResp.PSObject.Properties['transferring'] -and $coreResp.transferring) {
                 foreach ($t in $coreResp.transferring) {
+                    $rawName = if ($t.PSObject.Properties['name']) { [string]$t.name } else { '' }
+                    $baseName = if ($rawName) { [System.IO.Path]::GetFileName($rawName) } else { '' }
+                    $itemSize = if ($t.PSObject.Properties['size']) { [int64]$t.size } else { 0L }
+                    $itemBytes = if ($t.PSObject.Properties['bytes']) { [int64]$t.bytes } else { 0L }
+                    $itemPct = if ($t.PSObject.Properties['percentage']) { [double]$t.percentage } else { 0.0 }
+                    $itemSpd = if ($t.PSObject.Properties['speed']) { [double]$t.speed } else { 0.0 }
+                    $itemKey = "$letter`:$rawName"
+
+                    $prevItemSpd = if ($script:VfsItemSmoothedSpeeds.ContainsKey($itemKey)) { [double]$script:VfsItemSmoothedSpeeds[$itemKey] } else { 0.0 }
+                    $smoothedItemSpd = if ($prevItemSpd -gt 0 -and $itemSpd -gt 0) {
+                        (0.25 * $itemSpd) + (0.75 * $prevItemSpd)
+                    } elseif ($itemSpd -gt 0) {
+                        $itemSpd
+                    } else {
+                        0.0
+                    }
+                    $script:VfsItemSmoothedSpeeds[$itemKey] = $smoothedItemSpd
+
+                    $itemRemaining = [Math]::Max(0L, $itemSize - $itemBytes)
+                    $itemEta = if ($itemRemaining -eq 0L) {
+                        0
+                    } elseif ($smoothedItemSpd -ge 256.0) {
+                        [Math]::Min(2592000, [int][Math]::Round($itemRemaining / $smoothedItemSpd))
+                    } elseif ($t.PSObject.Properties['eta'] -and $null -ne $t.eta) {
+                        [int]$t.eta
+                    } else {
+                        $null
+                    }
+
+                    $srcFs = if ($t.PSObject.Properties['srcFs']) { [string]$t.srcFs } else { '' }
+                    $dstFs = if ($t.PSObject.Properties['dstFs']) { [string]$t.dstFs } else { '' }
+                    $isUpload = ($uploadsInProg -gt 0 -or $uploadsQueued -gt 0)
+                    if ($srcFs -match '(?i)CloudCache' -or ($dstFs -and $dstFs -match '(?i)(?:gdrive|terabox)')) {
+                        $isUpload = $true
+                    } elseif ($srcFs -match '(?i)(?:gdrive|terabox)') {
+                        $isUpload = $false
+                    }
+                    $transferState = if ($isUpload) { 'Uploading to cloud' } else { 'Streaming from cloud' }
+                    $direction = if ($isUpload) { 'Upload' } else { 'Download' }
+
                     $transferring += [ordered]@{
-                        Name = if ($t.PSObject.Properties['name']) { [string]$t.name } else { '' }
-                        Size = if ($t.PSObject.Properties['size']) { [int64]$t.size } else { 0L }
-                        Bytes = if ($t.PSObject.Properties['bytes']) { [int64]$t.bytes } else { 0L }
-                        Percentage = if ($t.PSObject.Properties['percentage']) { [double]$t.percentage } else { 0.0 }
-                        Speed = if ($t.PSObject.Properties['speed']) { [double]$t.speed } else { 0.0 }
-                        Eta = if ($t.PSObject.Properties['eta'] -and $null -ne $t.eta) { [int]$t.eta } else { $null }
-                        SrcFs = if ($t.PSObject.Properties['srcFs']) { [string]$t.srcFs } else { '' }
-                        DstFs = if ($t.PSObject.Properties['dstFs']) { [string]$t.dstFs } else { '' }
+                        TransferId = "$letter`:$baseName"
+                        Name = $baseName
+                        RelativePath = $rawName
+                        Size = $itemSize
+                        Bytes = $itemBytes
+                        Percentage = $itemPct
+                        Speed = $itemSpd
+                        SmoothedSpeed = $smoothedItemSpd
+                        Eta = $itemEta
+                        State = $transferState
+                        Drive = $letter
+                        SrcFs = $srcFs
+                        DstFs = $dstFs
+                        IsUpload = $isUpload
+                        Direction = $direction
                     }
                 }
             }
+        }
+
+        # Query vfs/queue for staged files queued for upload
+        $queuedItems = @()
+        try {
+            $qResp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/queue" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction SilentlyContinue
+            if ($qResp -and $qResp.PSObject.Properties['queue'] -and $qResp.queue) {
+                foreach ($qi in $qResp.queue) {
+                    $qName = if ($qi.PSObject.Properties['name']) { [string]$qi.name } else { '' }
+                    $qSize = if ($qi.PSObject.Properties['size']) { [int64]$qi.size } else { 0L }
+                    $qId = if ($qi.PSObject.Properties['id']) { [int]$qi.id } else { 0 }
+                    $qExpiry = if ($qi.PSObject.Properties['expiry']) { [string]$qi.expiry } else { '' }
+                    $shortName = if ($qName) { [System.IO.Path]::GetFileName($qName) } else { '' }
+                    $queuedItems += [ordered]@{
+                        TransferId = "$letter`:$shortName"
+                        QueueId = $qId
+                        Name = $shortName
+                        RelativePath = $qName
+                        Size = $qSize
+                        Bytes = 0L
+                        Percentage = 0.0
+                        Speed = 0.0
+                        SmoothedSpeed = 0.0
+                        Eta = $null
+                        State = 'Queued for cloud upload'
+                        Drive = $letter
+                        Expiry = $qExpiry
+                        IsUpload = $true
+                        Direction = 'Upload'
+                    }
+                }
+            }
+        } catch { }
+
+        # Smooth speed using Exponential Moving Average (alpha = 0.25)
+        $prevSpeed = if ($script:VfsSmoothedSpeeds.ContainsKey($letter)) { [double]$script:VfsSmoothedSpeeds[$letter] } else { 0.0 }
+        $smoothedSpeed = if ($prevSpeed -gt 0 -and $speed -gt 0) {
+            (0.25 * $speed) + (0.75 * $prevSpeed)
+        } elseif ($speed -gt 0) {
+            $speed
+        } else {
+            0.0
+        }
+        $script:VfsSmoothedSpeeds[$letter] = $smoothedSpeed
+
+        # Jitter-free bounded ETA
+        $remainingBytes = [Math]::Max(0L, $totalBytes - $bTrans)
+        $smoothedEta = if ($remainingBytes -eq 0L) {
+            0
+        } elseif ($smoothedSpeed -ge 256.0) {
+            [Math]::Min(2592000, [int][Math]::Round($remainingBytes / $smoothedSpeed))
+        } else {
+            $overallEta
         }
 
         $state = if ($errCount -gt 0 -and $uploadsInProg -eq 0 -and $uploadsQueued -eq 0) {
@@ -1051,11 +1362,17 @@ function Get-VirtualDriveVfsStats {
             BytesTransferred = $bTrans
             TotalBytes = $totalBytes
             TransferSpeed = $speed
+            SmoothedSpeed = $smoothedSpeed
             OverallEta = $overallEta
+            SmoothedEta = $smoothedEta
             Errors = $errCount
             LastError = $lastErr
             Transferring = $transferring
+            QueuedItems = $queuedItems
+            AllTransfers = (@($transferring) + @($queuedItems))
             CacheBytesUsed = $cacheBytes
+            DiskCachePath = $diskCachePath
+            DiskCacheMetaPath = $diskCacheMetaPath
             State = $state
         }
     } catch {
@@ -1068,11 +1385,17 @@ function Get-VirtualDriveVfsStats {
             BytesTransferred = 0L
             TotalBytes = 0L
             TransferSpeed = 0.0
+            SmoothedSpeed = 0.0
             OverallEta = $null
+            SmoothedEta = $null
             Errors = 0
             LastError = $null
             Transferring = @()
+            QueuedItems = @()
+            AllTransfers = @()
             CacheBytesUsed = 0L
+            DiskCachePath = ''
+            DiskCacheMetaPath = ''
             State = 'Remote state unknown'
         }
     }
@@ -1114,6 +1437,25 @@ function Get-VirtualDriveBandwidthLimit {
     } catch {
         return $null
     }
+}
+
+function Set-AllVirtualDrivesBandwidthLimit {
+    [CmdletBinding()]
+    param(
+        [string]$Rate = 'off'
+    )
+    $results = @{}
+    try {
+        $accounts = @(Get-CloudAccounts)
+        foreach ($acc in $accounts) {
+            $letter = [string]$acc.DriveLetter
+            if ($letter) {
+                $ok = Set-VirtualDriveBandwidthLimit -DriveLetter $letter -Rate $Rate
+                $results[$letter] = $ok
+            }
+        }
+    } catch { }
+    return $results
 }
 
 function Reset-VirtualDriveStats {
@@ -1202,28 +1544,660 @@ function Invoke-VirtualDriveCacheRefresh(
     }
 }
 
-function Get-VirtualDrivePendingUploads(
-    [string]$CacheDirectory = $script:DefaultCacheDirectory
-) {
-    $pending = [System.Collections.Generic.List[PSObject]]::new()
+function Stop-VirtualDriveTransfer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DriveLetter,
+        [string]$FileName = ''
+    )
+
+    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+
+    $status = Get-VirtualDriveStatus -DriveLetter $letter
+    if (-not $status.IsMounted) {
+        return [ordered]@{
+            Success = $false
+            State = 'Failed'
+            DriveLetter = $letter
+            Error = "Drive ${letter}: is not mounted."
+        }
+    }
+
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    if ($rcPort -le 0) {
+        return [ordered]@{
+            Success = $false
+            State = 'Failed'
+            DriveLetter = $letter
+            Error = 'No valid RC port available for virtual drive'
+        }
+    }
+
+    try {
+        # 1. Temporarily throttle bandwidth to freeze upload packet flow
+        Set-VirtualDriveBandwidthLimit -DriveLetter $letter -Rate '1B' | Out-Null
+
+        # 2. Check and suspend items in the VFS upload queue
+        try {
+            $qResp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/queue" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2 -ErrorAction Stop
+            if ($qResp -and $qResp.PSObject.Properties['queue'] -and $qResp.queue) {
+                foreach ($item in $qResp.queue) {
+                    $itemName = if ($item.PSObject.Properties['name']) { [string]$item.name } else { '' }
+                    if ([string]::IsNullOrEmpty($FileName) -or $itemName -like "*$FileName*") {
+                        if ($item.PSObject.Properties['id']) {
+                            # Set expiry 1000 days in future to freeze the item from being uploaded
+                            $body = @{ id = [int]$item.id; expiry = 86400000.0 } | ConvertTo-Json
+                            Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/queue-set-expiry" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 2 -ErrorAction SilentlyContinue | Out-Null
+                        }
+                    }
+                }
+            }
+        } catch { }
+
+        # 3. Reset VFS and core transfer statistics
+        Reset-VirtualDriveStats -DriveLetter $letter | Out-Null
+
+        # 4. Release bandwidth limit back to normal
+        Set-VirtualDriveBandwidthLimit -DriveLetter $letter -Rate 'off' | Out-Null
+
+        return [ordered]@{
+            Success = $true
+            State = 'Cancelled'
+            DriveLetter = $letter
+            CancelledAt = [DateTime]::UtcNow
+        }
+    } catch {
+        # Restore bandwidth on error
+        try { Set-VirtualDriveBandwidthLimit -DriveLetter $letter -Rate 'off' | Out-Null } catch { }
+        return [ordered]@{
+            Success = $false
+            State = 'Failed'
+            DriveLetter = $letter
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Sync-VirtualDriveOrphanedVfsCache {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$CacheDirectory = $script:DefaultCacheDirectory,
+        [Parameter(Mandatory = $false)]
+        [string]$AccountId = '',
+        [Parameter(Mandatory = $false)]
+        [string]$DriveLetter = ''
+    )
+
+    $results = [System.Collections.Generic.List[PSObject]]::new()
+    if ([string]::IsNullOrWhiteSpace($CacheDirectory)) {
+        $CacheDirectory = $script:DefaultCacheDirectory
+    }
+    if (-not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) {
+        return @($results.ToArray())
+    }
+
+    # Discover candidate account directories:
+    # 1. If $AccountId is specified: $CacheDirectory\$AccountId (or $CacheDirectory itself if matching)
+    # 2. Otherwise: all subdirectories of $CacheDirectory containing a 'vfs' folder, plus $CacheDirectory\vfs if present
+    $accountDirs = [System.Collections.Generic.List[PSObject]]::new()
+
+    if (-not [string]::IsNullOrEmpty($AccountId)) {
+        $specificDir = Join-Path $CacheDirectory $AccountId
+        if (Test-Path -LiteralPath (Join-Path $specificDir 'vfs') -PathType Container) {
+            $accountDirs.Add([pscustomobject]@{ Id = $AccountId; Path = $specificDir })
+        } elseif (Test-Path -LiteralPath (Join-Path $CacheDirectory 'vfs') -PathType Container) {
+            $accountDirs.Add([pscustomobject]@{ Id = $AccountId; Path = $CacheDirectory })
+        }
+    } else {
+        try {
+            $subDirs = @(Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction SilentlyContinue)
+            if ($subDirs.Count -gt 0) {
+                foreach ($sd in $subDirs) {
+                    $subVfs = Join-Path $sd.FullName 'vfs'
+                    if (Test-Path -LiteralPath $subVfs -PathType Container) {
+                        $accId = $sd.Name
+                        $accountDirs.Add([pscustomobject]@{ Id = $accId; Path = $sd.FullName })
+                    }
+                }
+            }
+        } catch { }
+
+        if ($accountDirs.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $CacheDirectory 'vfs') -PathType Container)) {
+            $accountDirs.Add([pscustomobject]@{ Id = 'default'; Path = $CacheDirectory })
+        }
+    }
+
+    foreach ($acc in $accountDirs) {
+        $accId = [string]$acc.Id
+        $accPath = [string]$acc.Path
+        $vfsBase = Join-Path $accPath 'vfs'
+        $metaBase = Join-Path $accPath 'vfsMeta'
+
+        if (-not (Test-Path -LiteralPath $vfsBase -PathType Container)) {
+            continue
+        }
+
+        # Step 1: Discover the active VFS cache path
+        $activeVfs = ''
+        $activeMeta = ''
+
+        # Attempt A: Query Get-VirtualDriveVfsStats using DriveLetter or AccountId
+        $candidateLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+            $DriveLetter
+        } elseif ((Get-Variable -Name 'ProviderDriveMapping' -Scope Script -ErrorAction SilentlyContinue) -and $script:ProviderDriveMapping.ContainsKey($accId)) {
+            [string]$script:ProviderDriveMapping[$accId]
+        } else {
+            ''
+        }
+
+        if (-not [string]::IsNullOrEmpty($candidateLetter)) {
+            try {
+                $vfsStats = Get-VirtualDriveVfsStats -DriveLetter $candidateLetter -AccountId $accId
+                if ($vfsStats -and $vfsStats.PSObject.Properties['IsActive'] -and $vfsStats.IsActive -eq $true) {
+                    if ($vfsStats.PSObject.Properties['DiskCachePath'] -and $vfsStats.DiskCachePath) {
+                        $rawPath = [string]$vfsStats.DiskCachePath -replace '^\\\\\?\\', ''
+                        if ($rawPath.StartsWith($vfsBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $activeVfs = $rawPath.TrimEnd('\', '/')
+                        }
+                    }
+                    if ($vfsStats.PSObject.Properties['DiskCacheMetaPath'] -and $vfsStats.DiskCacheMetaPath) {
+                        $rawMeta = [string]$vfsStats.DiskCacheMetaPath -replace '^\\\\\?\\', ''
+                        if ($rawMeta.StartsWith($metaBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $activeMeta = $rawMeta.TrimEnd('\', '/')
+                        }
+                    }
+                }
+            } catch { }
+        }
+
+        # Attempt B: Fallback to the newest {hash} directory under <account>/vfs
+        $hashDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\{[^\}]+\}$' } |
+            Sort-Object -Property LastWriteTimeUtc -Descending)
+
+        if ([string]::IsNullOrEmpty($activeVfs)) {
+            if ($hashDirs.Count -gt 0) {
+                $activeVfs = $hashDirs[0].FullName.TrimEnd('\', '/')
+            } else {
+                # Fallback to newest directory under vfsBase if no {hash} directory matched
+                $allDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue |
+                    Sort-Object -Property LastWriteTimeUtc -Descending)
+                if ($allDirs.Count -gt 0) {
+                    $activeVfs = $allDirs[0].FullName.TrimEnd('\', '/')
+                }
+            }
+        }
+
+        if ([string]::IsNullOrEmpty($activeVfs)) {
+            continue
+        }
+
+        if ([string]::IsNullOrEmpty($activeMeta)) {
+            $activeLeaf = Split-Path -Path $activeVfs -Leaf
+            $activeMeta = Join-Path $metaBase $activeLeaf
+        }
+
+        # Step 2: Enumerate all other orphaned / historical directories under vfsBase
+        $allVfsDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue)
+        $orphanDirs = [System.Collections.Generic.List[System.IO.DirectoryInfo]]::new()
+        foreach ($d in $allVfsDirs) {
+            if ($d.FullName.TrimEnd('\', '/') -ne $activeVfs) {
+                $orphanDirs.Add($d)
+            }
+        }
+
+        if ($orphanDirs.Count -eq 0) {
+            # No orphaned directories to reconcile for this account
+            $results.Add([pscustomobject]@{
+                AccountId             = $accId
+                ActiveVfsPath         = $activeVfs
+                MigratedFiles         = 0
+                MigratedBytes         = 0L
+                DuplicateFilesRemoved = 0
+                CleanedDirectories    = 0
+            })
+            continue
+        }
+
+        # Ensure active target directories exist
+        if (-not (Test-Path -LiteralPath $activeVfs -PathType Container)) {
+            New-Item -ItemType Directory -Path $activeVfs -Force | Out-Null
+        }
+        if (-not (Test-Path -LiteralPath $activeMeta -PathType Container)) {
+            New-Item -ItemType Directory -Path $activeMeta -Force | Out-Null
+        }
+
+        $migratedCount = 0
+        $migratedBytes = 0L
+        $duplicateCount = 0
+        $cleanedDirs = 0
+
+        # Process orphan directories from oldest to newest so newest files win
+        $sortedOrphans = @($orphanDirs | Sort-Object -Property LastWriteTimeUtc)
+
+        foreach ($orphanDir in $sortedOrphans) {
+            $orphanVfsDir = $orphanDir.FullName.TrimEnd('\', '/')
+            $orphanLeaf = $orphanDir.Name
+            $orphanMetaDir = Join-Path $metaBase $orphanLeaf
+
+            $orphanFiles = @(Get-ChildItem -LiteralPath $orphanVfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+            $orphanVfsPrefix = $orphanVfsDir + '\'
+
+            foreach ($of in $orphanFiles) {
+                # Skip temporary / lock / partial files
+                if ($of.Name -like '*.tmp' -or
+                    $of.Name -like '*.partial' -or
+                    $of.Name -like '*.lock' -or
+                    $of.Name -like '*.rclone-tmp' -or
+                    $of.Name -like '*~' -or
+                    $of.Name -like '.write_test_*') {
+                    continue
+                }
+
+                $relPath = if ($of.FullName.StartsWith($orphanVfsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $of.FullName.Substring($orphanVfsPrefix.Length)
+                } else {
+                    $of.Name
+                }
+
+                $targetVfsFile = Join-Path $activeVfs $relPath
+                $targetMetaFile = Join-Path $activeMeta $relPath
+                $sourceMetaFile = Join-Path $orphanMetaDir $relPath
+
+                $targetExists = Test-Path -LiteralPath $targetVfsFile -PathType Leaf
+
+                if ($targetExists) {
+                    # Target exists: evaluate whether orphan is newer or more complete
+                    $targetItem = Get-Item -LiteralPath $targetVfsFile -Force -ErrorAction SilentlyContinue
+                    $shouldOverwrite = $false
+                    if ($targetItem) {
+                        if ($of.Length -gt $targetItem.Length) {
+                            $shouldOverwrite = $true
+                        } elseif ($of.Length -eq $targetItem.Length -and $of.LastWriteTimeUtc -gt $targetItem.LastWriteTimeUtc) {
+                            $shouldOverwrite = $true
+                        }
+                    }
+
+                    if ($shouldOverwrite) {
+                        try {
+                            Copy-Item -LiteralPath $of.FullName -Destination $targetVfsFile -Force -ErrorAction Stop
+                            Remove-Item -LiteralPath $of.FullName -Force -ErrorAction SilentlyContinue
+                            $migratedCount++
+                            $migratedBytes += [int64]$of.Length
+
+                            if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
+                                Copy-Item -LiteralPath $sourceMetaFile -Destination $targetMetaFile -Force -ErrorAction SilentlyContinue
+                                Remove-Item -LiteralPath $sourceMetaFile -Force -ErrorAction SilentlyContinue
+                            }
+                        } catch {
+                            if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                                try {
+                                    Write-NSCloudLog -Severity 'Warning' -AccountId $accId -Operation 'vfs-reconciliation' `
+                                        -Message "Failed to overwrite duplicate active file with newer orphan file $($of.FullName): $($_.Exception.Message)"
+                                } catch { }
+                            }
+                        }
+                    } else {
+                        # Target is already equal or better: safely clean up redundant orphan file
+                        try {
+                            Remove-Item -LiteralPath $of.FullName -Force -ErrorAction SilentlyContinue
+                            $duplicateCount++
+                            if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
+                                Remove-Item -LiteralPath $sourceMetaFile -Force -ErrorAction SilentlyContinue
+                            }
+                        } catch { }
+                    }
+                } else {
+                    # Target does not exist: migrate file and its metadata to active VFS cache
+                    try {
+                        $targetDir = [System.IO.Path]::GetDirectoryName($targetVfsFile)
+                        if ($targetDir -and -not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+                            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                        }
+
+                        # Move file atomically
+                        Move-Item -LiteralPath $of.FullName -Destination $targetVfsFile -Force -ErrorAction Stop
+                        $migratedCount++
+                        $migratedBytes += [int64]$of.Length
+
+                        # Move matching vfsMeta file if present
+                        if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
+                            $targetMetaDir = [System.IO.Path]::GetDirectoryName($targetMetaFile)
+                            if ($targetMetaDir -and -not (Test-Path -LiteralPath $targetMetaDir -PathType Container)) {
+                                New-Item -ItemType Directory -Path $targetMetaDir -Force | Out-Null
+                            }
+                            Move-Item -LiteralPath $sourceMetaFile -Destination $targetMetaFile -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch {
+                        if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                            try {
+                                Write-NSCloudLog -Severity 'Warning' -AccountId $accId -Operation 'vfs-reconciliation' `
+                                    -Message "Failed to migrate orphan file $($of.FullName) to active VFS: $($_.Exception.Message)"
+                            } catch { }
+                        }
+                    }
+                }
+            }
+
+            # If orphan VFS directory is now empty of files, clean it up
+            $remainingFiles = @(Get-ChildItem -LiteralPath $orphanVfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+            if ($remainingFiles.Count -eq 0) {
+                try {
+                    Remove-Item -LiteralPath $orphanVfsDir -Recurse -Force -ErrorAction SilentlyContinue
+                    $cleanedDirs++
+                } catch { }
+            }
+
+            # Also clean up orphan vfsMeta directory if empty
+            if (Test-Path -LiteralPath $orphanMetaDir -PathType Container) {
+                $remainingMeta = @(Get-ChildItem -LiteralPath $orphanMetaDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+                if ($remainingMeta.Count -eq 0) {
+                    try {
+                        Remove-Item -LiteralPath $orphanMetaDir -Recurse -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+            }
+        }
+
+        # If files were migrated and the mount is active, trigger rclone cache refresh
+        if ($migratedCount -gt 0 -and -not [string]::IsNullOrEmpty($candidateLetter)) {
+            $rcPort = Get-VirtualDriveRcPort -DriveLetter $candidateLetter
+            if ($rcPort -gt 0) {
+                try {
+                    $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/refresh" -Method Post `
+                        -ContentType 'application/json' -Body '{"recursive":true}' -TimeoutSec 2 -ErrorAction SilentlyContinue
+                } catch { }
+            }
+        }
+
+        if ($migratedCount -gt 0 -or $duplicateCount -gt 0 -or $cleanedDirs -gt 0) {
+            $logMsg = "Reconciled orphaned VFS cache for account '$accId': migrated $migratedCount staged file(s) ($migratedBytes bytes), removed $duplicateCount redundant duplicate(s), cleaned $cleanedDirs orphaned hash folder(s)."
+            if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                try {
+                    Write-NSCloudLog -Severity 'Info' -AccountId $accId -Operation 'vfs-reconciliation' -Message $logMsg
+                } catch { }
+            }
+        }
+
+        $results.Add([pscustomobject]@{
+            AccountId             = $accId
+            ActiveVfsPath         = $activeVfs
+            MigratedFiles         = $migratedCount
+            MigratedBytes         = $migratedBytes
+            DuplicateFilesRemoved = $duplicateCount
+            CleanedDirectories    = $cleanedDirs
+        })
+    }
+
+    return @($results.ToArray())
+}
+
+function Get-VirtualDrivePendingUploads {
+    [CmdletBinding()]
+    param(
+        [string]$CacheDirectory = $script:DefaultCacheDirectory,
+        [string[]]$MountCacheDirectories = @()
+    )
+
+    $pendingMap = [System.Collections.Generic.Dictionary[string, PSObject]]::new([System.StringComparer]::OrdinalIgnoreCase)
     if (-not (Test-Path -LiteralPath $CacheDirectory)) {
         return ,@()
     }
-    $vfsDir = Join-Path $CacheDirectory 'vfs'
-    if (Test-Path -LiteralPath $vfsDir) {
+
+    # Discover candidate directories that contain a 'vfs' folder:
+    # 1. $CacheDirectory\vfs (legacy flat structure)
+    # 2. $CacheDirectory\<account>\vfs
+    # 3. Explicit $MountCacheDirectories if provided
+    $targets = [System.Collections.Generic.List[string]]::new()
+    $rootVfs = Join-Path $CacheDirectory 'vfs'
+    if (Test-Path -LiteralPath $rootVfs -PathType Container) {
+        $targets.Add($rootVfs)
+    }
+
+    try {
+        $subDirs = @(Get-ChildItem -LiteralPath $CacheDirectory -Directory -Force -ErrorAction SilentlyContinue)
+        if ($subDirs.Count -gt 0) {
+            foreach ($sd in $subDirs) {
+                $subVfs = Join-Path $sd.FullName 'vfs'
+                if (Test-Path -LiteralPath $subVfs -PathType Container) {
+                    $targets.Add($subVfs)
+                }
+            }
+        }
+    } catch { }
+
+    if ($MountCacheDirectories) {
+        foreach ($mDir in $MountCacheDirectories) {
+            if (-not $mDir) { continue }
+            $mVfs = Join-Path $mDir 'vfs'
+            if (Test-Path -LiteralPath $mVfs -PathType Container) {
+                if (-not $targets.Contains($mVfs)) { $targets.Add($mVfs) }
+            } elseif (Test-Path -LiteralPath $mDir -PathType Container) {
+                if (-not $targets.Contains($mDir)) { $targets.Add($mDir) }
+            }
+        }
+    }
+
+    foreach ($vfsDir in $targets) {
         try {
-            $files = Get-ChildItem -LiteralPath $vfsDir -Recurse -File -ErrorAction SilentlyContinue
-            if ($files) {
-                foreach ($f in $files) {
-                    $pending.Add([pscustomobject]@{
-                        Path = $f.FullName
-                        Name = $f.Name
-                        Length = $f.Length
-                        LastWriteTimeUtc = $f.LastWriteTimeUtc
-                    })
+            $files = @(Get-ChildItem -LiteralPath $vfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) { continue }
+
+            $vfsPrefix = $vfsDir.TrimEnd('\', '/') + '\'
+
+            foreach ($f in $files) {
+                # Ignore temporary / lock / partial files
+                if ($f.Name -like '*.tmp' -or
+                    $f.Name -like '*.partial' -or
+                    $f.Name -like '*.lock' -or
+                    $f.Name -like '*.rclone-tmp' -or
+                    $f.Name -like '*~' -or
+                    $f.Name -like '.write_test_*') {
+                    continue
+                }
+
+                # Derive matching vfsMeta path
+                $metaPath = $f.FullName -replace '([\\/])vfs([\\/])', '$1vfsMeta$2'
+                $isDirty = $false
+                $hasMeta = $false
+
+                if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+                    $hasMeta = $true
+                    try {
+                        $metaContent = Get-Content -LiteralPath $metaPath -Raw -ErrorAction Stop
+                        $metaJson = $metaContent | ConvertFrom-Json
+                        if ($metaJson -and $metaJson.PSObject.Properties['Dirty'] -and $metaJson.Dirty -eq $true) {
+                            $isDirty = $true
+                        }
+                    } catch {
+                        # If meta cannot be read, verify if file is in use/locked before treating as dirty
+                        try {
+                            $testStream = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                            $testStream.Close()
+                            $testStream.Dispose()
+                        } catch {
+                            $isDirty = $true
+                        }
+                    }
+                } else {
+                    # No vfsMeta yet; only treat as pending if actively locked/written or in an active upload queue.
+                    # Do NOT treat arbitrary read-cache files or 0-byte orphan files without vfsMeta as pending uploads.
+                    if ($f.Length -gt 0) {
+                        try {
+                            $testStream = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                            $testStream.Close()
+                            $testStream.Dispose()
+                        } catch {
+                            $isDirty = $true
+                        }
+                    }
+                }
+
+                # Only include truly dirty staged files (not clean read/synced cache)
+                if ($isDirty) {
+                    # Infer account ID from path if inside <accountId>/vfs
+                    $accId = ''
+                    $provId = ''
+                    $parentDir = [System.IO.Path]::GetDirectoryName($vfsDir)
+                    if ($parentDir) {
+                        $parentName = [System.IO.Path]::GetFileName($parentDir)
+                        if ($parentName -match '^(gdrive|terabox)(?:_(.+))?$') {
+                            $provId = $Matches[1]
+                            $accId = $parentName
+                        }
+                    }
+
+                    # Determine logical relative path inside virtual drive (strip remote{hash} / remote folder)
+                    $relToVfs = if ($f.FullName.StartsWith($vfsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $f.FullName.Substring($vfsPrefix.Length)
+                    } else {
+                        $f.Name
+                    }
+
+                    $firstSlash = $relToVfs.IndexOfAny(@([char]'/', [char]'\'))
+                    $logicalRelPath = $relToVfs
+                    if ($firstSlash -gt 0) {
+                        $firstSeg = $relToVfs.Substring(0, $firstSlash)
+                        if ($firstSeg -match '\{[^\}]+\}$' -or $firstSeg -match '^(?:gdrive|terabox)$') {
+                            $logicalRelPath = $relToVfs.Substring($firstSlash + 1)
+                        }
+                    }
+
+                    # Deduplicate across multiple hash folders for the same account & file path
+                    $dedupeKey = "$accId|$logicalRelPath"
+                    $shouldReplace = $false
+                    if (-not $pendingMap.ContainsKey($dedupeKey)) {
+                        $shouldReplace = $true
+                    } else {
+                        $existing = $pendingMap[$dedupeKey]
+                        # Retain newest / most complete version
+                        if ($f.Length -gt $existing.Length) {
+                            $shouldReplace = $true
+                        } elseif ($f.Length -eq $existing.Length) {
+                            if ($f.LastWriteTimeUtc -gt $existing.LastWriteTimeUtc) {
+                                $shouldReplace = $true
+                            } elseif ($f.LastWriteTimeUtc -eq $existing.LastWriteTimeUtc) {
+                                if ($hasMeta -and -not $existing.HasMeta) {
+                                    $shouldReplace = $true
+                                }
+                            }
+                        }
+                    }
+
+                    if ($shouldReplace) {
+                        $pendingMap[$dedupeKey] = [pscustomobject]@{
+                            Path = $f.FullName
+                            Name = $f.Name
+                            RelativePath = $logicalRelPath
+                            Length = [int64]$f.Length
+                            LastWriteTimeUtc = $f.LastWriteTimeUtc
+                            AccountId = $accId
+                            ProviderId = $provId
+                            IsDirty = $true
+                            HasMeta = $hasMeta
+                            State = 'UploadPending'
+                        }
+                    }
                 }
             }
         } catch { }
     }
-    return ,@($pending)
+
+    if ($pendingMap.Count -eq 0) {
+        return ,@()
+    }
+    return @($pendingMap.Values)
+}
+
+function Invoke-VirtualDriveKeepAlive {
+    [CmdletBinding()]
+    param(
+        [switch]$Synchronous = $false
+    )
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $script:ActiveMountProcesses -or $script:ActiveMountProcesses.Count -eq 0) {
+        return @($results.ToArray())
+    }
+
+    $activeKeys = @($script:ActiveMountProcesses.Keys)
+    foreach ($key in $activeKeys) {
+        try {
+            if (-not $script:ActiveMountProcesses.ContainsKey($key)) { continue }
+            $proc = $script:ActiveMountProcesses[$key]
+            if ($null -eq $proc -or $proc.HasExited) { continue }
+
+            $letter = ''
+            if ($script:ProviderDriveMapping.ContainsKey($key)) {
+                $letter = [string]$script:ProviderDriveMapping[$key]
+            }
+
+            $driveRoot = if (-not [string]::IsNullOrEmpty($letter)) {
+                "$($letter.ToUpperInvariant().TrimEnd(':').TrimEnd('\'))`:\"
+            } else { '' }
+
+            $rcPort = 0
+            if (-not [string]::IsNullOrEmpty($letter)) {
+                $rcPort = Get-VirtualDriveRcPort $letter
+            }
+
+            $success = $false
+            $method = if ($rcPort -gt 0) { 'RC' } else { 'DriveStat' }
+
+            if ($rcPort -gt 0) {
+                if ($Synchronous) {
+                    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveKeepAliveHelper').Type) {
+                        $success = [NSCloudDrive.VirtualDriveKeepAliveHelper]::PingRc($rcPort, 2000)
+                    } else {
+                        try {
+                            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/stats" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2 -ErrorAction Stop
+                            $success = $true
+                        } catch {
+                            try {
+                                $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/core/version" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2 -ErrorAction Stop
+                                $success = $true
+                            } catch { }
+                        }
+                    }
+                } else {
+                    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveKeepAliveHelper').Type) {
+                        [NSCloudDrive.VirtualDriveKeepAliveHelper]::PingRcAsync($rcPort, 2000)
+                    } else {
+                        [NSCloudDrive.VirtualDriveHelper]::PrewarmRoot($rcPort)
+                    }
+                    $success = $true
+                }
+            } elseif (-not [string]::IsNullOrEmpty($driveRoot)) {
+                if ($Synchronous) {
+                    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveKeepAliveHelper').Type) {
+                        $success = [NSCloudDrive.VirtualDriveKeepAliveHelper]::PingDriveRoot($driveRoot)
+                    } else {
+                        $success = [System.IO.Directory]::Exists($driveRoot)
+                    }
+                } else {
+                    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.VirtualDriveKeepAliveHelper').Type) {
+                        [NSCloudDrive.VirtualDriveKeepAliveHelper]::PingDriveRootAsync($driveRoot)
+                    } else {
+                        try {
+                            $null = [System.IO.Directory]::Exists($driveRoot)
+                        } catch { }
+                    }
+                    $success = $true
+                }
+            }
+
+            $results.Add([pscustomobject]@{
+                MountKey        = $key
+                DriveLetter     = $letter
+                DriveRoot       = $driveRoot
+                RcPort          = $rcPort
+                KeepAliveMethod = $method
+                Success         = $success
+            })
+        } catch { }
+    }
+
+    return @($results.ToArray())
 }
