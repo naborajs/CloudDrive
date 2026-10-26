@@ -35,17 +35,17 @@ if (-not $timedOut -or $timeoutClock.Elapsed.TotalSeconds -gt 5) {
 }
 Write-Output '  [PASS] Rclone helper stdout/stderr draining and bounded timeout verified'
 
-# Google Drive alone receives extra WinFsp dispatcher capacity. TeraBox keeps its
-# provider-specific mount arguments unchanged.
+# All providers receive WinFsp ThreadCount=64 dispatcher capacity to prevent
+# Explorer and Windows Photos RPC timeouts and crashes.
 $googleMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive_personal' -DriveLetter 'G' -ConfigPath ''
 $teraBoxMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath ''
 if ($googleMountArgs -notcontains '--fuse-flag' -or $googleMountArgs -notcontains '--ThreadCount=64') {
     throw 'Google Drive mount arguments must pass the WinFsp ThreadCount flag.'
 }
-if ($teraBoxMountArgs -contains '--ThreadCount=64') {
-    throw 'TeraBox mount arguments must not inherit the Google Drive dispatcher setting.'
+if ($teraBoxMountArgs -notcontains '--fuse-flag' -or $teraBoxMountArgs -notcontains '--ThreadCount=64') {
+    throw 'TeraBox mount arguments must also pass the WinFsp ThreadCount flag to prevent crash.'
 }
-Write-Output '  [PASS] Google Drive-only WinFsp dispatcher setting verified'
+Write-Output '  [PASS] Mount WinFsp ThreadCount=64 dispatcher setting verified for all providers'
 
 # Sandbox LOCALAPPDATA to prevent touching real user credentials
 $origGlobalLocalAppData = $env:LOCALAPPDATA
@@ -334,6 +334,93 @@ try {
     if ($detailsRateLimit.Reason -notmatch 'rateLimitExceeded') { throw 'Reason mismatch' }
 
     Write-Output '  [PASS] Google API structured error detail parsing and classification verified'
+
+    # 10. Test Sync-GoogleDriveTokensFromRcloneConfig and Save-GoogleDriveStoredTokens
+    $mockConfigPath = Join-Path $globalSandboxDir 'mock-rclone.conf'
+    $mockFutureExp = [DateTime]::UtcNow.AddHours(1).ToString('o')
+    $mockRcloneTokenJson = (@{
+        access_token  = 'ya29.synced_from_rclone_conf'
+        token_type    = 'Bearer'
+        refresh_token = '1//synced_refresh_token_abc'
+        expiry        = $mockFutureExp
+    } | ConvertTo-Json -Compress)
+
+    $mockConfContent = @"
+[gdrive_sync_test]
+token = $mockRcloneTokenJson
+
+[gdrive_other_account]
+token = {"access_token":"ya29.other","expiry":"$mockFutureExp"}
+"@
+    [System.IO.File]::WriteAllText($mockConfigPath, $mockConfContent, [System.Text.Encoding]::ASCII)
+
+    $syncedResult = Sync-GoogleDriveTokensFromRcloneConfig -AccountId 'gdrive_sync_test' -ConfigPath $mockConfigPath -Force
+    if (-not $syncedResult -or $syncedResult.access_token -ne 'ya29.synced_from_rclone_conf') {
+        throw 'Sync-GoogleDriveTokensFromRcloneConfig failed to sync fresh token from rclone config'
+    }
+    $storedAfterSync = Get-GoogleDriveStoredTokens -AccountId 'gdrive_sync_test'
+    if (-not $storedAfterSync -or $storedAfterSync.access_token -ne 'ya29.synced_from_rclone_conf') {
+        throw 'Synced token was not saved to LocalAppData DPAPI storage'
+    }
+    Remove-GoogleDriveSession -AccountId 'gdrive_sync_test'
+
+    # Verify Save-GoogleDriveStoredTokens alias accepts object and hashtable
+    $aliasTokens = @{ access_token = 'ya29.alias_test'; token_type = 'Bearer'; refresh_token = '1//alias' }
+    Save-GoogleDriveStoredTokens -Tokens $aliasTokens -AccountId 'gdrive_alias_test'
+    $loadedAlias = Get-GoogleDriveStoredTokens -AccountId 'gdrive_alias_test'
+    if (-not $loadedAlias -or $loadedAlias.access_token -ne 'ya29.alias_test') {
+        throw 'Save-GoogleDriveStoredTokens alias failed to save tokens'
+    }
+    Remove-GoogleDriveSession -AccountId 'gdrive_alias_test'
+    Write-Output '  [PASS] Rclone config token synchronization and storage update verified'
+
+    # 11. Test Invoke-GoogleDriveMountWithRetry error classification and bounded retry policy
+    # Test AuthRequired classification for invalid_grant / revoked token
+    $mockAuthProgress = [hashtable]::Synchronized(@{ Stage = ''; Error = $null })
+    # Mock Start-VirtualDriveMount to simulate invalid_grant error
+    function Mock-VirtualDriveMountAuthFail {
+        param($RemoteName, $ProviderId, $AccountId, $DriveLetter, $VolumeLabel, $CacheDirectory, $CacheMaxGigabytes, $EnvironmentVariables, $ReadOnly, $Progress)
+        throw 'oauth2: "invalid_grant" token has been expired or revoked.'
+    }
+    New-Item -Path 'Function:\Start-VirtualDriveMount' -Value (Get-Item 'Function:\Mock-VirtualDriveMountAuthFail').ScriptBlock -Force | Out-Null
+    $authMountResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive_test' -AccountId 'test_acc' -DriveLetter 'G' -Progress $mockAuthProgress -MaxAttempts 3
+    if ($authMountResult.State -ne 'AuthRequired') {
+        throw "Expected State to be AuthRequired on invalid_grant, got $($authMountResult.State)"
+    }
+    if ($mockAuthProgress.Stage -ne 'Sign-in required') {
+        throw "Expected Progress.Stage to be 'Sign-in required', got $($mockAuthProgress.Stage)"
+    }
+    if ($authMountResult.Error -notmatch 'expired or revoked') {
+        throw "Expected actionable error message for revoked auth: $($authMountResult.Error)"
+    }
+
+    # Test bounded retry exhaustion on persistent rate limit / network error
+    $mockRetryProgress = [hashtable]::Synchronized(@{ Stage = ''; Error = $null })
+    $testAccTokens = @{ access_token = 'ya29.test_rate_limit'; token_type = 'Bearer'; refresh_token = '1//test'; expiry = [DateTime]::UtcNow.AddHours(1).ToString('o') }
+    Save-GoogleDriveTokens -TokenData $testAccTokens -AccountId 'test_acc'
+
+    $script:MockAttemptsCount = 0
+    function Mock-VirtualDriveMountRateLimitFail {
+        param($RemoteName, $ProviderId, $AccountId, $DriveLetter, $VolumeLabel, $CacheDirectory, $CacheMaxGigabytes, $EnvironmentVariables, $ReadOnly, $Progress)
+        $script:MockAttemptsCount++
+        throw 'Google Drive rate limit exceeded: 403 RATE_LIMIT_EXCEEDED'
+    }
+    New-Item -Path 'Function:\Start-VirtualDriveMount' -Value (Get-Item 'Function:\Mock-VirtualDriveMountRateLimitFail').ScriptBlock -Force | Out-Null
+    $rateLimitResult = Invoke-GoogleDriveMountWithRetry -RemoteName 'gdrive_test' -AccountId 'test_acc' -DriveLetter 'G' -Progress $mockRetryProgress -MaxAttempts 2
+    Remove-GoogleDriveSession -AccountId 'test_acc'
+    if ($rateLimitResult.State -ne 'Error') {
+        throw "Expected State to be Error after retry budget exhausted, got $($rateLimitResult.State)"
+    }
+    if ($rateLimitResult.Error -notmatch 'could not connect after several attempts') {
+        throw "Expected exhausted retry error message, got $($rateLimitResult.Error)"
+    }
+    if ($mockRetryProgress.Stage -ne 'Connection failed') {
+        throw "Expected Progress.Stage to be 'Connection failed', got $($mockRetryProgress.Stage)"
+    }
+    if ($script:MockAttemptsCount -ne 2) {
+        throw "Expected exactly 2 attempts, got $($script:MockAttemptsCount)"
+    }
+    Write-Output '  [PASS] Bounded intelligent retry policy, error classification, and progress stages verified'
 
 } finally {
     $env:LOCALAPPDATA = $origGlobalLocalAppData
