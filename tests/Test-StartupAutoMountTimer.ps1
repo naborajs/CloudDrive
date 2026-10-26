@@ -141,8 +141,8 @@ Update-AllUIState
 `$accountCards = @(`$accountsStack.Children | Where-Object { `$_ -is [System.Windows.Controls.Border] })
 `$renderedAccountCards = @(
     foreach (`$card in `$accountCards) {
-        `$infoStack = `$card.Child.Children[1]
-        `$iconContainer = `$card.Child.Children[0]
+        `$iconContainer = @(`$card.Child.Children | Where-Object { `$_ -is [System.Windows.Controls.Grid] } | Select-Object -First 1)[0]
+        `$infoStack = @(`$card.Child.Children | Where-Object { `$_ -is [System.Windows.Controls.StackPanel] } | Select-Object -First 1)[0]
         `$badge = @(`$iconContainer.Children | Where-Object { `$_ -is [System.Windows.Controls.Border] } | Select-Object -First 1)[0]
         [pscustomobject]@{
             Provider = [string]`$infoStack.Children[0].Text
