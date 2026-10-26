@@ -50,10 +50,30 @@ function Get-DefaultSettings {
         EnableNotifications = $true
         NotifyOnUploadStart = $true
         NotifyOnUploadComplete = $true
+        NotifyOnBackgroundSync = $true
         GroupFolderUploads = $true
+        NotifyOnlyFullFolder = $true
         MinNotificationFileSizeBytes = 5242880 # 5 MB default threshold
         NotificationSnoozeUntilUtc = ''
         Accounts = @()
+
+        # Bandwidth & Network Management
+        BandwidthPolicy = 'Unlimited' # 'Unlimited', 'Limited', 'MinimalBackground', 'Adaptive', 'Custom'
+        BandwidthLimitPreset = '5 MB/s' # '256 KB/s', '512 KB/s', '1 MB/s', '2 MB/s', '5 MB/s', '10 MB/s', 'Custom'
+        CustomUploadLimitValue = 5
+        CustomUploadLimitUnit = 'MB/s' # 'MB/s', 'KB/s'
+        AdaptiveSensitivity = 'Balanced' # 'Conservative', 'Balanced', 'Aggressive'
+        DetectGamingTraffic = $false
+        ContinueUploadingWhileMinimized = $true
+        RespectLimitsInTray = $true
+        KeepTransfersAliveInTray = $true
+
+        # Post-Transfer Cache Cleanup
+        PostTransferCachePolicy = 'KeepCache' # 'KeepCache', 'RemoveAfterVerifiedUpload', 'CustomRetention'
+        PostTransferRetentionMinutes = 60
+
+        # UI Presentation Order
+        CardDisplayOrder = @()
     }
 }
 
@@ -116,10 +136,30 @@ function Get-NSCloudDriveSettings {
             EnableNotifications = if ($json.PSObject.Properties['EnableNotifications'] -and $null -ne $json.EnableNotifications) { [bool]$json.EnableNotifications } else { $defaults.EnableNotifications }
             NotifyOnUploadStart = if ($json.PSObject.Properties['NotifyOnUploadStart'] -and $null -ne $json.NotifyOnUploadStart) { [bool]$json.NotifyOnUploadStart } else { $defaults.NotifyOnUploadStart }
             NotifyOnUploadComplete = if ($json.PSObject.Properties['NotifyOnUploadComplete'] -and $null -ne $json.NotifyOnUploadComplete) { [bool]$json.NotifyOnUploadComplete } else { $defaults.NotifyOnUploadComplete }
+            NotifyOnBackgroundSync = if ($json.PSObject.Properties['NotifyOnBackgroundSync'] -and $null -ne $json.NotifyOnBackgroundSync) { [bool]$json.NotifyOnBackgroundSync } else { $defaults.NotifyOnBackgroundSync }
             GroupFolderUploads = if ($json.PSObject.Properties['GroupFolderUploads'] -and $null -ne $json.GroupFolderUploads) { [bool]$json.GroupFolderUploads } else { $defaults.GroupFolderUploads }
+            NotifyOnlyFullFolder = if ($json.PSObject.Properties['NotifyOnlyFullFolder'] -and $null -ne $json.NotifyOnlyFullFolder) { [bool]$json.NotifyOnlyFullFolder } else { $defaults.NotifyOnlyFullFolder }
             MinNotificationFileSizeBytes = if ($json.PSObject.Properties['MinNotificationFileSizeBytes'] -and $null -ne $json.MinNotificationFileSizeBytes) { [int64]$json.MinNotificationFileSizeBytes } else { $defaults.MinNotificationFileSizeBytes }
             NotificationSnoozeUntilUtc = if ($json.PSObject.Properties['NotificationSnoozeUntilUtc'] -and -not [string]::IsNullOrEmpty($json.NotificationSnoozeUntilUtc)) { [string]$json.NotificationSnoozeUntilUtc } else { $defaults.NotificationSnoozeUntilUtc }
             Accounts = $accountsList
+
+            # Bandwidth & Network Management
+            BandwidthPolicy = if ($json.PSObject.Properties['BandwidthPolicy'] -and -not [string]::IsNullOrEmpty($json.BandwidthPolicy)) { [string]$json.BandwidthPolicy } else { $defaults.BandwidthPolicy }
+            BandwidthLimitPreset = if ($json.PSObject.Properties['BandwidthLimitPreset'] -and -not [string]::IsNullOrEmpty($json.BandwidthLimitPreset)) { [string]$json.BandwidthLimitPreset } else { $defaults.BandwidthLimitPreset }
+            CustomUploadLimitValue = if ($json.PSObject.Properties['CustomUploadLimitValue'] -and $null -ne $json.CustomUploadLimitValue) { [int]$json.CustomUploadLimitValue } else { $defaults.CustomUploadLimitValue }
+            CustomUploadLimitUnit = if ($json.PSObject.Properties['CustomUploadLimitUnit'] -and -not [string]::IsNullOrEmpty($json.CustomUploadLimitUnit)) { [string]$json.CustomUploadLimitUnit } else { $defaults.CustomUploadLimitUnit }
+            AdaptiveSensitivity = if ($json.PSObject.Properties['AdaptiveSensitivity'] -and -not [string]::IsNullOrEmpty($json.AdaptiveSensitivity)) { [string]$json.AdaptiveSensitivity } else { $defaults.AdaptiveSensitivity }
+            DetectGamingTraffic = if ($json.PSObject.Properties['DetectGamingTraffic'] -and $null -ne $json.DetectGamingTraffic) { [bool]$json.DetectGamingTraffic } else { $defaults.DetectGamingTraffic }
+            ContinueUploadingWhileMinimized = if ($json.PSObject.Properties['ContinueUploadingWhileMinimized'] -and $null -ne $json.ContinueUploadingWhileMinimized) { [bool]$json.ContinueUploadingWhileMinimized } else { $defaults.ContinueUploadingWhileMinimized }
+            RespectLimitsInTray = if ($json.PSObject.Properties['RespectLimitsInTray'] -and $null -ne $json.RespectLimitsInTray) { [bool]$json.RespectLimitsInTray } else { $defaults.RespectLimitsInTray }
+            KeepTransfersAliveInTray = if ($json.PSObject.Properties['KeepTransfersAliveInTray'] -and $null -ne $json.KeepTransfersAliveInTray) { [bool]$json.KeepTransfersAliveInTray } else { $defaults.KeepTransfersAliveInTray }
+
+            # Post-Transfer Cache Cleanup
+            PostTransferCachePolicy = if ($json.PSObject.Properties['PostTransferCachePolicy'] -and -not [string]::IsNullOrEmpty($json.PostTransferCachePolicy)) { [string]$json.PostTransferCachePolicy } else { $defaults.PostTransferCachePolicy }
+            PostTransferRetentionMinutes = if ($json.PSObject.Properties['PostTransferRetentionMinutes'] -and $null -ne $json.PostTransferRetentionMinutes) { [int]$json.PostTransferRetentionMinutes } else { $defaults.PostTransferRetentionMinutes }
+
+            # UI Presentation Order
+            CardDisplayOrder = if ($json.PSObject.Properties['CardDisplayOrder'] -and $json.CardDisplayOrder) { @($json.CardDisplayOrder | ForEach-Object { [string]$_ }) } else { @() }
         }
         return $settings
     } catch {
@@ -539,4 +579,49 @@ function Set-NotificationSnooze([int]$Minutes, [hashtable]$Settings = $null) {
     }
     Set-NSCloudDriveSettings $Settings
     return $Settings
+}
+
+function Get-EffectiveBandwidthLimitRate([hashtable]$Settings = $null) {
+    if (-not $Settings) { $Settings = Get-NSCloudDriveSettings }
+    $policy = if ($Settings.BandwidthPolicy) { [string]$Settings.BandwidthPolicy } else { 'Unlimited' }
+
+    if ($policy -eq 'Unlimited') {
+        return 'off'
+    }
+    if ($policy -eq 'MinimalBackground') {
+        return '256k'
+    }
+
+    $formatCustom = {
+        $val = if ($Settings.CustomUploadLimitValue) { [int]$Settings.CustomUploadLimitValue } else { 5 }
+        if ($val -le 0) { $val = 1 }
+        $unit = if ($Settings.CustomUploadLimitUnit) { [string]$Settings.CustomUploadLimitUnit } else { 'MB/s' }
+        if ($unit -eq 'KB/s' -or $unit -eq 'k') {
+            return "${val}k"
+        }
+        return "${val}M"
+    }
+
+    if ($policy -eq 'Limited') {
+        $preset = if ($Settings.Contains('BandwidthLimitPreset') -and $Settings.BandwidthLimitPreset) { [string]$Settings.BandwidthLimitPreset } else { '5 MB/s' }
+        switch ($preset) {
+            '256 KB/s' { return '256k' }
+            '512 KB/s' { return '512k' }
+            '1 MB/s'   { return '1M' }
+            '2 MB/s'   { return '2M' }
+            '5 MB/s'   { return '5M' }
+            '10 MB/s'  { return '10M' }
+            'Custom'   { return (& $formatCustom) }
+            default    {
+                if ($preset -match '^(\d+)\s*KB/s$') { return "$($Matches[1])k" }
+                if ($preset -match '^(\d+)\s*MB/s$') { return "$($Matches[1])M" }
+                return '5M'
+            }
+        }
+    }
+    if ($policy -eq 'Custom') {
+        return (& $formatCustom)
+    }
+    # Adaptive mode default initial rate
+    return 'off'
 }
