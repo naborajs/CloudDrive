@@ -698,24 +698,75 @@ function Start-VirtualDriveMount(
 
     # Isolated cache and config namespace per mountKey
     $providerCache = Join-Path $CacheDirectory $mountKey
-    $mountConfigPath = ''
-    if (-not [string]::IsNullOrEmpty($AccountId)) {
-        # Account mounts must not inherit settings from the user's global
-        # rclone.conf: rclone can merge same-named remotes from that file
-        # with the environment variables this application sets, so a global
-        # "gdrive:" or "terabox:" remote could bleed unrelated keys (shared
-        # drive flags, export formats, root folders) into a per-account
-        # remote. An empty, app-owned config file guarantees each account's
-        # remote is defined only by its own environment variables.
-        $mountConfigPath = Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config') 'account-mount-isolated.conf'
-        if (-not (Test-Path -LiteralPath $mountConfigPath)) {
-            try {
-                $cfgDir = Split-Path -Parent $mountConfigPath
-                if (-not (Test-Path -LiteralPath $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-                [System.IO.File]::WriteAllText($mountConfigPath, '', [System.Text.Encoding]::ASCII)
-            } catch { $mountConfigPath = '' }
+
+    # Non-secret static options are isolated per mount. Authentication overrides remain
+    # in the child process environment; the actual VFS cache root is resolved after mount.
+    $configDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    if (-not (Test-Path -LiteralPath $configDir -PathType Container)) {
+        try {
+            New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+        } catch { }
+    }
+    $mountConfigPath = Join-Path $configDir "mount-$mountKey.conf"
+
+    $safeRemote = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
+    $safeProvider = [regex]::Replace($resolvedProvider.ToUpperInvariant(), '[^A-Z0-9_]', '_')
+    $remotePrefix = "RCLONE_CONFIG_${safeRemote}_"
+    $providerPrefix = "RCLONE_CONFIG_${safeProvider}_"
+
+    $configKeysToRemove = [System.Collections.Generic.List[string]]::new()
+    $iniProperties = [ordered]@{}
+
+    foreach ($k in @($EnvironmentVariables.Keys)) {
+        $strKey = [string]$k
+        $upperKey = $strKey.ToUpperInvariant()
+        $matched = $false
+        $propName = ''
+
+        if ($upperKey.StartsWith($remotePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $propName = $strKey.Substring($remotePrefix.Length).ToLowerInvariant()
+            $matched = $true
+        } elseif ($upperKey.StartsWith($providerPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $propName = $strKey.Substring($providerPrefix.Length).ToLowerInvariant()
+            $matched = $true
+        } elseif ($upperKey -match '^RCLONE_CONFIG_(TYPE|SCOPE|TOKEN|CLIENT_ID|CLIENT_SECRET|ROOT_FOLDER_ID|URL|VENDOR|USER|PASS|COOKIE)$') {
+            $propName = $Matches[1].ToLowerInvariant()
+            $matched = $true
+        }
+
+        if ($matched -and -not [string]::IsNullOrEmpty($propName)) {
+            # Keep authentication material in the process environment. Persisting a
+            # generated rclone config would write account secrets back to disk as plaintext.
+            if ($propName -match '(?i)(token|secret|password|pass|cookie|ndus|ndut|authorization|credential)') {
+                continue
+            }
+            $iniProperties[$propName] = [string]$EnvironmentVariables[$k]
+            $configKeysToRemove.Add($strKey)
         }
     }
+
+    try {
+        if ($iniProperties.Count -gt 0) {
+            $iniLines = [System.Collections.Generic.List[string]]::new()
+            $iniLines.Add("[$RemoteName]")
+            foreach ($propKey in $iniProperties.Keys) {
+                $iniLines.Add("$propKey = $($iniProperties[$propKey])")
+            }
+            $iniContent = ($iniLines -join "`r`n") + "`r`n"
+            [System.IO.File]::WriteAllText($mountConfigPath, $iniContent, [System.Text.Encoding]::ASCII)
+        } elseif (-not (Test-Path -LiteralPath $mountConfigPath -PathType Leaf)) {
+            [System.IO.File]::WriteAllText($mountConfigPath, '', [System.Text.Encoding]::ASCII)
+        }
+    } catch {
+        if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+            try {
+                Write-NSCloudLog -Severity 'Warning' -AccountId $mountKey -Operation 'mount-config-generation' `
+                    -Message "Failed to write static mount config: $($_.Exception.Message)"
+            } catch { }
+        }
+        throw "Mount configuration could not be written; refusing to start rclone with incomplete authentication settings."
+    }
+
     if ([string]::IsNullOrEmpty($InitialBwLimit)) {
         try {
             if (Get-Command Get-EffectiveBandwidthLimitRate -ErrorAction SilentlyContinue) {
@@ -737,8 +788,18 @@ function Start-VirtualDriveMount(
     # Direct rclone output to log file rather than unconsumed pipe to prevent buffer deadlocks and broken pipe crashes
     $psi.RedirectStandardError = $false
 
+    # Pass non-remote environment variables while stripping remote config so rclone does not hash remote name
     foreach ($key in $EnvironmentVariables.Keys) {
-        $psi.EnvironmentVariables[$key] = [string]$EnvironmentVariables[$key]
+        $strKey = [string]$key
+        if (-not $configKeysToRemove.Contains($strKey)) {
+            $psi.EnvironmentVariables[$strKey] = [string]$EnvironmentVariables[$key]
+        }
+    }
+
+    foreach ($rk in $configKeysToRemove) {
+        if ($psi.EnvironmentVariables.ContainsKey($rk)) {
+            $psi.EnvironmentVariables.Remove($rk)
+        }
     }
 
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -832,13 +893,24 @@ function Start-VirtualDriveMount(
                 } catch { }
             }
 
-            # Reconcile any orphaned VFS cache directories from previous sessions/tokens
+            # Reconcile into the cache root reported by this rclone process; token
+            # refreshes can change the {hash} directory name. RC health alone does not
+            # prove remote authentication, so remote completion remains separately tracked.
             try {
-                Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $CacheDirectory -AccountId $AccountId -DriveLetter $letter
+                $mountedVfsStats = Get-VirtualDriveVfsStats -DriveLetter $letter -AccountId $mountKey -ProviderId $resolvedProvider
+                $actualVfsPath = if ($mountedVfsStats -and $mountedVfsStats.DiskCachePath) { [string]$mountedVfsStats.DiskCachePath } else { '' }
+                $actualMetaPath = if ($mountedVfsStats -and $mountedVfsStats.DiskCacheMetaPath) { [string]$mountedVfsStats.DiskCacheMetaPath } else { '' }
+                if ($actualVfsPath -and $actualMetaPath) {
+                    Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $CacheDirectory -AccountId $mountKey -DriveLetter $letter `
+                        -TargetVfsPath $actualVfsPath -TargetVfsMetaPath $actualMetaPath
+                } elseif (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                    Write-NSCloudLog -Severity 'Warning' -AccountId $mountKey -Operation 'vfs-reconciliation' `
+                        -Message 'The mounted VFS cache root could not be verified; historical staged files were preserved without copying.'
+                }
             } catch {
                 if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
                     try {
-                        Write-NSCloudLog -Severity 'Warning' -AccountId $AccountId -Operation 'vfs-reconciliation' `
+                        Write-NSCloudLog -Severity 'Warning' -AccountId $mountKey -Operation 'vfs-reconciliation' `
                             -Message "Non-blocking orphan cache sync failed: $($_.Exception.Message)"
                     } catch { }
                 }
@@ -1260,14 +1332,43 @@ function Get-VirtualDriveVfsStats {
 
                     $srcFs = if ($t.PSObject.Properties['srcFs']) { [string]$t.srcFs } else { '' }
                     $dstFs = if ($t.PSObject.Properties['dstFs']) { [string]$t.dstFs } else { '' }
-                    $isUpload = ($uploadsInProg -gt 0 -or $uploadsQueued -gt 0)
-                    if ($srcFs -match '(?i)CloudCache' -or ($dstFs -and $dstFs -match '(?i)(?:gdrive|terabox)')) {
+                    # Direction is a property of this specific rclone transfer, never of
+                    # the mount-wide upload counters. Read-through cache hydration is a
+                    # cloud-to-local read; it is not an upload and it is not a user
+                    # download either, so it gets its own label.
+                    $srcIsCloudFs = $srcFs -match '(?i)(?:gdrive|terabox)'
+                    $dstIsCloudFs = $dstFs -match '(?i)(?:gdrive|terabox)'
+                    $srcIsLocalFs = $srcFs -and -not $srcIsCloudFs
+                    $dstIsLocalFs = $dstFs -and -not $dstIsCloudFs
+
+                    $direction = 'Unknown'
+                    $isUpload = $false
+                    $isHydration = $false
+                    if ($dstIsCloudFs -and -not $srcIsCloudFs) {
+                        $direction = 'Upload'
                         $isUpload = $true
-                    } elseif ($srcFs -match '(?i)(?:gdrive|terabox)') {
-                        $isUpload = $false
+                    } elseif ($srcIsCloudFs -and -not $dstIsCloudFs) {
+                        $direction = 'VfsCacheHydration'
+                        $isHydration = $true
+                    } elseif ($srcIsCloudFs -and $dstIsCloudFs) {
+                        $direction = 'CloudToCloud'
+                    } elseif ($srcIsLocalFs -and $dstIsLocalFs) {
+                        $direction = 'Local'
+                    } elseif ($uploadsInProg -gt 0 -or $uploadsQueued -gt 0) {
+                        $direction = 'Upload'
+                        $isUpload = $true
+                    } else {
+                        $direction = 'VfsCacheHydration'
+                        $isHydration = $true
                     }
-                    $transferState = if ($isUpload) { 'Uploading to cloud' } else { 'Streaming from cloud' }
-                    $direction = if ($isUpload) { 'Upload' } else { 'Download' }
+
+                    $transferState = switch ($direction) {
+                        'Upload' { 'Uploading to cloud' }
+                        'VfsCacheHydration' { 'Hydrating VFS read cache' }
+                        'CloudToCloud' { 'Cloud-to-cloud transfer' }
+                        'Local' { 'Local file activity' }
+                        default { 'VFS activity (direction unknown)' }
+                    }
 
                     $transferring += [ordered]@{
                         TransferId = "$letter`:$baseName"
@@ -1284,7 +1385,13 @@ function Get-VirtualDriveVfsStats {
                         SrcFs = $srcFs
                         DstFs = $dstFs
                         IsUpload = $isUpload
+                        IsHydration = $isHydration
                         Direction = $direction
+                        # No per-file cancel or pause API exists in rclone. Hydration and
+                        # unknown activity must never expose controls that only throttle
+                        # or stall the whole mount.
+                        CanCancel = $false
+                        CanPause = $false
                     }
                 }
             }
@@ -1519,23 +1626,14 @@ function Invoke-VirtualDriveCacheRefresh(
 ) {
     if ($RcPort -le 0) { return $false }
     try {
-        $body = @{}
+        $recursiveValue = if ($Recursive) { 'true' } else { 'false' }
+        $refreshUri = "http://127.0.0.1:$RcPort/vfs/refresh?recursive=$recursiveValue&_async=true"
         if (-not [string]::IsNullOrEmpty($Dir)) {
-            $body['dir'] = $Dir
+            $refreshUri += '&dir=' + [Uri]::EscapeDataString($Dir)
         }
-        if ($Recursive) {
-            $body['recursive'] = $true
-        }
-        $jsonBody = $body | ConvertTo-Json -Compress
-        $req = [System.Net.WebRequest]::Create("http://127.0.0.1:$RcPort/vfs/refresh")
+        $req = [System.Net.WebRequest]::Create($refreshUri)
         $req.Method = 'POST'
-        $req.ContentType = 'application/json'
         $req.Timeout = 6000
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
-        $req.ContentLength = $bytes.Length
-        $stream = $req.GetRequestStream()
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Close()
         $resp = $req.GetResponse()
         $resp.Close()
         return $true
@@ -1619,6 +1717,41 @@ function Stop-VirtualDriveTransfer {
     }
 }
 
+function ConvertFrom-ExtendedLengthPath {
+    [CmdletBinding()]
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $value = $Path.Trim()
+    # rclone reports its cache roots as Win32 extended-length paths (\\?\D:\...).
+    # .NET Framework path APIs throw "Illegal characters in path" for that prefix.
+    if ($value.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $value = '\\' + $value.Substring(8)
+    } elseif ($value.StartsWith('\\?\', [System.StringComparison]::Ordinal)) {
+        $value = $value.Substring(4)
+    } elseif ($value.StartsWith('//?/UNC/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $value = '//' + $value.Substring(8)
+    } elseif ($value.StartsWith('//?/', [System.StringComparison]::Ordinal)) {
+        $value = $value.Substring(4)
+    }
+    return $value
+}
+
+function ConvertTo-NormalizedFullPath {
+    [CmdletBinding()]
+    param([AllowNull()][string]$Path)
+
+    $clean = ConvertFrom-ExtendedLengthPath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($clean)) { return '' }
+    try {
+        return ([System.IO.Path]::GetFullPath($clean)).TrimEnd('\', '/')
+    } catch {
+        # A single malformed path must never abort cache reconciliation; fall back
+        # to the already-normalized value so containment checks stay conservative.
+        return $clean.TrimEnd('\', '/')
+    }
+}
+
 function Sync-VirtualDriveOrphanedVfsCache {
     [CmdletBinding()]
     param(
@@ -1627,7 +1760,19 @@ function Sync-VirtualDriveOrphanedVfsCache {
         [Parameter(Mandatory = $false)]
         [string]$AccountId = '',
         [Parameter(Mandatory = $false)]
-        [string]$DriveLetter = ''
+        [string]$DriveLetter = '',
+        [Parameter(Mandatory = $false)]
+        [string]$TargetVfsName = '',
+        [Parameter(Mandatory = $false)]
+        [string]$TargetVfsPath = '',
+        [Parameter(Mandatory = $false)]
+        [string]$TargetVfsMetaPath = '',
+        # rclone builds its VFS upload queue once at mount startup, so copying a file
+        # into the live cache root afterwards is never uploaded by the running process.
+        # The durable transfer queue adopts orphan-root staged files instead; keep this
+        # off unless a caller explicitly needs a byte-for-byte copy into the live root.
+        [Parameter(Mandatory = $false)]
+        [switch]$CopyIntoActiveCache
     )
 
     $results = [System.Collections.Generic.List[PSObject]]::new()
@@ -1683,41 +1828,59 @@ function Sync-VirtualDriveOrphanedVfsCache {
         $activeVfs = ''
         $activeMeta = ''
 
-        # Attempt A: Query Get-VirtualDriveVfsStats using DriveLetter or AccountId
-        $candidateLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
-            $DriveLetter
-        } elseif ((Get-Variable -Name 'ProviderDriveMapping' -Scope Script -ErrorAction SilentlyContinue) -and $script:ProviderDriveMapping.ContainsKey($accId)) {
-            [string]$script:ProviderDriveMapping[$accId]
-        } else {
-            ''
+        if (-not [string]::IsNullOrWhiteSpace($TargetVfsPath)) {
+            $candidateVfsPath = ConvertTo-NormalizedFullPath -Path $TargetVfsPath
+            $candidateMetaPath = if ($TargetVfsMetaPath) { ConvertTo-NormalizedFullPath -Path $TargetVfsMetaPath } else { '' }
+            $vfsRootPrefix = (ConvertTo-NormalizedFullPath -Path $vfsBase) + [System.IO.Path]::DirectorySeparatorChar
+            $metaRootPrefix = (ConvertTo-NormalizedFullPath -Path $metaBase) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $candidateVfsPath.StartsWith($vfsRootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                -not $candidateMetaPath.StartsWith($metaRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'The runtime-reported VFS paths are outside the selected account cache roots; refusing to copy staged data.'
+            }
+            $activeVfs = $candidateVfsPath
+            $activeMeta = $candidateMetaPath
+        } elseif (-not [string]::IsNullOrWhiteSpace($TargetVfsName)) {
+            $activeVfs = (Join-Path $vfsBase $TargetVfsName).TrimEnd('\', '/')
+            $activeMeta = (Join-Path $metaBase $TargetVfsName).TrimEnd('\', '/')
         }
 
-        if (-not [string]::IsNullOrEmpty($candidateLetter)) {
-            try {
-                $vfsStats = Get-VirtualDriveVfsStats -DriveLetter $candidateLetter -AccountId $accId
-                if ($vfsStats -and $vfsStats.PSObject.Properties['IsActive'] -and $vfsStats.IsActive -eq $true) {
-                    if ($vfsStats.PSObject.Properties['DiskCachePath'] -and $vfsStats.DiskCachePath) {
-                        $rawPath = [string]$vfsStats.DiskCachePath -replace '^\\\\\?\\', ''
-                        if ($rawPath.StartsWith($vfsBase, [System.StringComparison]::OrdinalIgnoreCase)) {
-                            $activeVfs = $rawPath.TrimEnd('\', '/')
+        # Attempt A: Query Get-VirtualDriveVfsStats using DriveLetter or AccountId
+        if ([string]::IsNullOrEmpty($activeVfs)) {
+            $candidateLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+                $DriveLetter
+            } elseif ((Get-Variable -Name 'ProviderDriveMapping' -Scope Script -ErrorAction SilentlyContinue) -and $script:ProviderDriveMapping.ContainsKey($accId)) {
+                [string]$script:ProviderDriveMapping[$accId]
+            } else {
+                ''
+            }
+
+            if (-not [string]::IsNullOrEmpty($candidateLetter)) {
+                try {
+                    $vfsStats = Get-VirtualDriveVfsStats -DriveLetter $candidateLetter -AccountId $accId
+                    if ($vfsStats -and $vfsStats.PSObject.Properties['IsActive'] -and $vfsStats.IsActive -eq $true) {
+                        if ($vfsStats.PSObject.Properties['DiskCachePath'] -and $vfsStats.DiskCachePath) {
+                            $rawPath = ConvertFrom-ExtendedLengthPath -Path ([string]$vfsStats.DiskCachePath)
+                            if ($rawPath.StartsWith($vfsBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $activeVfs = $rawPath.TrimEnd('\', '/')
+                            }
+                        }
+                        if ($vfsStats.PSObject.Properties['DiskCacheMetaPath'] -and $vfsStats.DiskCacheMetaPath) {
+                            $rawMeta = ConvertFrom-ExtendedLengthPath -Path ([string]$vfsStats.DiskCacheMetaPath)
+                            if ($rawMeta.StartsWith($metaBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $activeMeta = $rawMeta.TrimEnd('\', '/')
+                            }
                         }
                     }
-                    if ($vfsStats.PSObject.Properties['DiskCacheMetaPath'] -and $vfsStats.DiskCacheMetaPath) {
-                        $rawMeta = [string]$vfsStats.DiskCacheMetaPath -replace '^\\\\\?\\', ''
-                        if ($rawMeta.StartsWith($metaBase, [System.StringComparison]::OrdinalIgnoreCase)) {
-                            $activeMeta = $rawMeta.TrimEnd('\', '/')
-                        }
-                    }
-                }
-            } catch { }
+                } catch { }
+            }
         }
 
         # Attempt B: Fallback to the newest {hash} directory under <account>/vfs
-        $hashDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '\{[^\}]+\}$' } |
-            Sort-Object -Property LastWriteTimeUtc -Descending)
-
         if ([string]::IsNullOrEmpty($activeVfs)) {
+            $hashDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '\{[^\}]+\}$' } |
+                Sort-Object -Property LastWriteTimeUtc -Descending)
+
             if ($hashDirs.Count -gt 0) {
                 $activeVfs = $hashDirs[0].FullName.TrimEnd('\', '/')
             } else {
@@ -1742,8 +1905,11 @@ function Sync-VirtualDriveOrphanedVfsCache {
         # Step 2: Enumerate all other orphaned / historical directories under vfsBase
         $allVfsDirs = @(Get-ChildItem -LiteralPath $vfsBase -Directory -Force -ErrorAction SilentlyContinue)
         $orphanDirs = [System.Collections.Generic.List[System.IO.DirectoryInfo]]::new()
+        $normActiveVfs = ConvertTo-NormalizedFullPath -Path $activeVfs
+
         foreach ($d in $allVfsDirs) {
-            if ($d.FullName.TrimEnd('\', '/') -ne $activeVfs) {
+            $normDir = ConvertTo-NormalizedFullPath -Path $d.FullName
+            if (-not $normDir.Equals($normActiveVfs, [System.StringComparison]::OrdinalIgnoreCase)) {
                 $orphanDirs.Add($d)
             }
         }
@@ -1755,6 +1921,7 @@ function Sync-VirtualDriveOrphanedVfsCache {
                 ActiveVfsPath         = $activeVfs
                 MigratedFiles         = 0
                 MigratedBytes         = 0L
+                PreservedFiles        = 0
                 DuplicateFilesRemoved = 0
                 CleanedDirectories    = 0
             })
@@ -1772,10 +1939,27 @@ function Sync-VirtualDriveOrphanedVfsCache {
         $migratedCount = 0
         $migratedBytes = 0L
         $duplicateCount = 0
+        $preservedCount = 0
         $cleanedDirs = 0
 
         # Process orphan directories from oldest to newest so newest files win
         $sortedOrphans = @($orphanDirs | Sort-Object -Property LastWriteTimeUtc)
+
+        # Pre-scan paths before copying. Any path with multiple historical copies or
+        # an existing active copy is ambiguous and must stay outside the mounted root.
+        $orphanPathCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($scanOrphan in $sortedOrphans) {
+            $scanPrefix = $scanOrphan.FullName.TrimEnd([char]92, '/') + [char]92
+            foreach ($scanFile in @(Get-ChildItem -LiteralPath $scanOrphan.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($scanFile.Name -like '*.tmp' -or $scanFile.Name -like '*.partial' -or $scanFile.Name -like '*.lock' -or
+                    $scanFile.Name -like '*.rclone-tmp' -or $scanFile.Name -like '*~' -or $scanFile.Name -like '.write_test_*') { continue }
+                $scanRelPath = if ($scanFile.FullName.StartsWith($scanPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $scanFile.FullName.Substring($scanPrefix.Length)
+                } else { $scanFile.Name }
+                if ($orphanPathCounts.ContainsKey($scanRelPath)) { $orphanPathCounts[$scanRelPath]++ }
+                else { $orphanPathCounts[$scanRelPath] = 1 }
+            }
+        }
 
         foreach ($orphanDir in $sortedOrphans) {
             $orphanVfsDir = $orphanDir.FullName.TrimEnd('\', '/')
@@ -1807,68 +1991,75 @@ function Sync-VirtualDriveOrphanedVfsCache {
                 $sourceMetaFile = Join-Path $orphanMetaDir $relPath
 
                 $targetExists = Test-Path -LiteralPath $targetVfsFile -PathType Leaf
+                $hasMultipleOrphanCopies = ($orphanPathCounts.ContainsKey($relPath) -and $orphanPathCounts[$relPath] -gt 1)
 
-                if ($targetExists) {
-                    # Target exists: evaluate whether orphan is newer or more complete
-                    $targetItem = Get-Item -LiteralPath $targetVfsFile -Force -ErrorAction SilentlyContinue
-                    $shouldOverwrite = $false
-                    if ($targetItem) {
-                        if ($of.Length -gt $targetItem.Length) {
-                            $shouldOverwrite = $true
-                        } elseif ($of.Length -eq $targetItem.Length -and $of.LastWriteTimeUtc -gt $targetItem.LastWriteTimeUtc) {
-                            $shouldOverwrite = $true
+                if ($targetExists -and -not (Test-Path -LiteralPath $targetMetaFile -PathType Leaf) -and
+                    -not $hasMultipleOrphanCopies -and (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf)) {
+                    # Recover a previous interruption between atomic data placement and
+                    # metadata placement only when the active bytes still match the source.
+                    try {
+                        $sourceHash = (Get-FileHash -LiteralPath $of.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                        $targetHash = (Get-FileHash -LiteralPath $targetVfsFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if ([int64](Get-Item -LiteralPath $of.FullName).Length -eq [int64](Get-Item -LiteralPath $targetVfsFile).Length -and $sourceHash -eq $targetHash) {
+                            $metaTemp = Join-Path $accPath ('.nscd-meta-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+                            Copy-Item -LiteralPath $sourceMetaFile -Destination $metaTemp -ErrorAction Stop
+                            $sourceMetaHash = (Get-FileHash -LiteralPath $sourceMetaFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                            $tempMetaHash = (Get-FileHash -LiteralPath $metaTemp -Algorithm SHA256 -ErrorAction Stop).Hash
+                            if ($sourceMetaHash -ne $tempMetaHash) { throw 'Metadata copy integrity check failed.' }
+                            [System.IO.File]::Move($metaTemp, $targetMetaFile)
+                        }
+                    } catch {
+                        if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                            try { Write-NSCloudLog -Severity 'Warning' -AccountId $accId -Operation 'vfs-reconciliation' -Message "Unable to safely repair interrupted metadata copy for $relPath." } catch { }
                         }
                     }
+                }
 
-                    if ($shouldOverwrite) {
-                        try {
-                            Copy-Item -LiteralPath $of.FullName -Destination $targetVfsFile -Force -ErrorAction Stop
-                            Remove-Item -LiteralPath $of.FullName -Force -ErrorAction SilentlyContinue
-                            $migratedCount++
-                            $migratedBytes += [int64]$of.Length
-
-                            if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
-                                Copy-Item -LiteralPath $sourceMetaFile -Destination $targetMetaFile -Force -ErrorAction SilentlyContinue
-                                Remove-Item -LiteralPath $sourceMetaFile -Force -ErrorAction SilentlyContinue
-                            }
-                        } catch {
-                            if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
-                                try {
-                                    Write-NSCloudLog -Severity 'Warning' -AccountId $accId -Operation 'vfs-reconciliation' `
-                                        -Message "Failed to overwrite duplicate active file with newer orphan file $($of.FullName): $($_.Exception.Message)"
-                                } catch { }
-                            }
-                        }
-                    } else {
-                        # Target is already equal or better: safely clean up redundant orphan file
-                        try {
-                            Remove-Item -LiteralPath $of.FullName -Force -ErrorAction SilentlyContinue
-                            $duplicateCount++
-                            if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
-                                Remove-Item -LiteralPath $sourceMetaFile -Force -ErrorAction SilentlyContinue
-                            }
-                        } catch { }
-                    }
+                if ($targetExists -or $hasMultipleOrphanCopies) {
+                    # A same-path cache entry is not proof of identical content. Never
+                    # select one version for automatic upload; retain every copy for review.
+                    $duplicateCount++
+                } elseif (-not $CopyIntoActiveCache) {
+                    # Default path: rclone resolves its upload queue once at mount
+                    # startup, so a file placed in the live cache root now would never
+                    # be transmitted by this mount. Preserve the staged bytes untouched
+                    # and let the durable transfer queue own the upload instead.
+                    $preservedCount++
                 } else {
-                    # Target does not exist: migrate file and its metadata to active VFS cache
+                    # Copy into the active cache but retain the source until remote completion
+                    # is confirmed. Startup recovery must never delete staged user data.
                     try {
                         $targetDir = [System.IO.Path]::GetDirectoryName($targetVfsFile)
                         if ($targetDir -and -not (Test-Path -LiteralPath $targetDir -PathType Container)) {
                             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
                         }
 
-                        # Move file atomically
-                        Move-Item -LiteralPath $of.FullName -Destination $targetVfsFile -Force -ErrorAction Stop
+                        $dataTemp = Join-Path $accPath ('.nscd-data-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+                        Copy-Item -LiteralPath $of.FullName -Destination $dataTemp -ErrorAction Stop
+                        if ([int64](Get-Item -LiteralPath $dataTemp).Length -ne [int64]$of.Length) {
+                            throw 'Staged file copy size verification failed.'
+                        }
+                        $sourceHash = (Get-FileHash -LiteralPath $of.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                        $tempHash = (Get-FileHash -LiteralPath $dataTemp -Algorithm SHA256 -ErrorAction Stop).Hash
+                        if ($sourceHash -ne $tempHash) { throw 'Staged file copy content verification failed.' }
+                        [System.IO.File]::Move($dataTemp, $targetVfsFile)
                         $migratedCount++
                         $migratedBytes += [int64]$of.Length
 
-                        # Move matching vfsMeta file if present
+                        # Copy metadata only when the target has none; never overwrite evidence.
                         if (Test-Path -LiteralPath $sourceMetaFile -PathType Leaf) {
                             $targetMetaDir = [System.IO.Path]::GetDirectoryName($targetMetaFile)
                             if ($targetMetaDir -and -not (Test-Path -LiteralPath $targetMetaDir -PathType Container)) {
                                 New-Item -ItemType Directory -Path $targetMetaDir -Force | Out-Null
                             }
-                            Move-Item -LiteralPath $sourceMetaFile -Destination $targetMetaFile -Force -ErrorAction SilentlyContinue
+                            if (-not (Test-Path -LiteralPath $targetMetaFile -PathType Leaf)) {
+                                $metaTemp = Join-Path $accPath ('.nscd-meta-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+                                Copy-Item -LiteralPath $sourceMetaFile -Destination $metaTemp -ErrorAction Stop
+                                $sourceMetaHash = (Get-FileHash -LiteralPath $sourceMetaFile -Algorithm SHA256 -ErrorAction Stop).Hash
+                                $tempMetaHash = (Get-FileHash -LiteralPath $metaTemp -Algorithm SHA256 -ErrorAction Stop).Hash
+                                if ($sourceMetaHash -ne $tempMetaHash) { throw 'Metadata copy integrity check failed.' }
+                                [System.IO.File]::Move($metaTemp, $targetMetaFile)
+                            }
                         }
                     } catch {
                         if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
@@ -1881,39 +2072,30 @@ function Sync-VirtualDriveOrphanedVfsCache {
                 }
             }
 
-            # If orphan VFS directory is now empty of files, clean it up
-            $remainingFiles = @(Get-ChildItem -LiteralPath $orphanVfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
-            if ($remainingFiles.Count -eq 0) {
-                try {
-                    Remove-Item -LiteralPath $orphanVfsDir -Recurse -Force -ErrorAction SilentlyContinue
-                    $cleanedDirs++
-                } catch { }
-            }
-
-            # Also clean up orphan vfsMeta directory if empty
-            if (Test-Path -LiteralPath $orphanMetaDir -PathType Container) {
-                $remainingMeta = @(Get-ChildItem -LiteralPath $orphanMetaDir -Recurse -File -Force -ErrorAction SilentlyContinue)
-                if ($remainingMeta.Count -eq 0) {
-                    try {
-                        Remove-Item -LiteralPath $orphanMetaDir -Recurse -Force -ErrorAction SilentlyContinue
-                    } catch { }
-                }
-            }
+            # Keep the historical VFS and metadata directories as recovery copies.
         }
 
         # If files were migrated and the mount is active, trigger rclone cache refresh
-        if ($migratedCount -gt 0 -and -not [string]::IsNullOrEmpty($candidateLetter)) {
-            $rcPort = Get-VirtualDriveRcPort -DriveLetter $candidateLetter
+        $activeLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+            $DriveLetter
+        } elseif ((Get-Variable -Name 'ProviderDriveMapping' -Scope Script -ErrorAction SilentlyContinue) -and $script:ProviderDriveMapping.ContainsKey($accId)) {
+            [string]$script:ProviderDriveMapping[$accId]
+        } else {
+            ''
+        }
+
+        if ($migratedCount -gt 0 -and -not [string]::IsNullOrEmpty($activeLetter)) {
+            $rcPort = Get-VirtualDriveRcPort -DriveLetter $activeLetter
             if ($rcPort -gt 0) {
                 try {
-                    $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/refresh" -Method Post `
-                        -ContentType 'application/json' -Body '{"recursive":true}' -TimeoutSec 2 -ErrorAction SilentlyContinue
+                    $null = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/refresh?recursive=true&_async=true" -Method Post `
+                        -TimeoutSec 2 -ErrorAction SilentlyContinue
                 } catch { }
             }
         }
 
-        if ($migratedCount -gt 0 -or $duplicateCount -gt 0 -or $cleanedDirs -gt 0) {
-            $logMsg = "Reconciled orphaned VFS cache for account '$accId': migrated $migratedCount staged file(s) ($migratedBytes bytes), removed $duplicateCount redundant duplicate(s), cleaned $cleanedDirs orphaned hash folder(s)."
+        if ($migratedCount -gt 0 -or $duplicateCount -gt 0 -or $preservedCount -gt 0) {
+            $logMsg = "Scanned orphaned VFS cache for account '$accId': copied $migratedCount staged file(s) ($migratedBytes bytes), preserved $preservedCount staged file(s) for durable-queue adoption, retained $duplicateCount same-path copy/copies, and left all historical cache folders in place."
             if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
                 try {
                     Write-NSCloudLog -Severity 'Info' -AccountId $accId -Operation 'vfs-reconciliation' -Message $logMsg
@@ -1926,7 +2108,9 @@ function Sync-VirtualDriveOrphanedVfsCache {
             ActiveVfsPath         = $activeVfs
             MigratedFiles         = $migratedCount
             MigratedBytes         = $migratedBytes
-            DuplicateFilesRemoved = $duplicateCount
+            PreservedFiles        = $preservedCount
+            DuplicateFilesRemoved = 0
+            DuplicatePathsRetained = $duplicateCount
             CleanedDirectories    = $cleanedDirs
         })
     }
@@ -1938,7 +2122,8 @@ function Get-VirtualDrivePendingUploads {
     [CmdletBinding()]
     param(
         [string]$CacheDirectory = $script:DefaultCacheDirectory,
-        [string[]]$MountCacheDirectories = @()
+        [string[]]$MountCacheDirectories = @(),
+        [string[]]$ActiveCachePaths = @()
     )
 
     $pendingMap = [System.Collections.Generic.Dictionary[string, PSObject]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -2046,6 +2231,10 @@ function Get-VirtualDrivePendingUploads {
                         if ($parentName -match '^(gdrive|terabox)(?:_(.+))?$') {
                             $provId = $Matches[1]
                             $accId = $parentName
+                        } else {
+                            $accId = $parentName
+                            if ($parentName -match 'gdrive') { $provId = 'gdrive' }
+                            elseif ($parentName -match 'terabox') { $provId = 'terabox' }
                         }
                     }
 
@@ -2060,9 +2249,28 @@ function Get-VirtualDrivePendingUploads {
                     $logicalRelPath = $relToVfs
                     if ($firstSlash -gt 0) {
                         $firstSeg = $relToVfs.Substring(0, $firstSlash)
-                        if ($firstSeg -match '\{[^\}]+\}$' -or $firstSeg -match '^(?:gdrive|terabox)$') {
+                        $isRemoteCacheRoot = ($provId -and $firstSeg -eq $provId) -or
+                            ($firstSeg -match '^(?:gdrive|terabox)\{[^\}]+\}$')
+                        if ($isRemoteCacheRoot) {
                             $logicalRelPath = $relToVfs.Substring($firstSlash + 1)
                         }
+                    }
+                    $logicalRelPath = $logicalRelPath.Replace('\', '/')
+
+                    $outsideActiveCache = $false
+                    if ($ActiveCachePaths -and $ActiveCachePaths.Count -gt 0) {
+                        $fileIsInActiveRoot = $false
+                        foreach ($activeCachePath in $ActiveCachePaths) {
+                            if (-not $activeCachePath) { continue }
+                            $normalizedActiveRoot = ConvertTo-NormalizedFullPath -Path $activeCachePath
+                            if (-not $normalizedActiveRoot) { continue }
+                            $normalizedActivePath = $normalizedActiveRoot + [System.IO.Path]::DirectorySeparatorChar
+                            if ((ConvertTo-NormalizedFullPath -Path $f.FullName).StartsWith($normalizedActivePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                $fileIsInActiveRoot = $true
+                                break
+                            }
+                        }
+                        $outsideActiveCache = -not $fileIsInActiveRoot
                     }
 
                     # Deduplicate across multiple hash folders for the same account & file path
@@ -2072,6 +2280,9 @@ function Get-VirtualDrivePendingUploads {
                         $shouldReplace = $true
                     } else {
                         $existing = $pendingMap[$dedupeKey]
+                        $existing.DuplicateCopies = [int]$existing.DuplicateCopies + 1
+                        $existing.HasStagedPathConflict = $true
+                        $existing.State = 'Needs review: multiple dirty staged copies share this path'
                         # Retain newest / most complete version
                         if ($f.Length -gt $existing.Length) {
                             $shouldReplace = $true
@@ -2080,6 +2291,9 @@ function Get-VirtualDrivePendingUploads {
                                 $shouldReplace = $true
                             } elseif ($f.LastWriteTimeUtc -eq $existing.LastWriteTimeUtc) {
                                 if ($hasMeta -and -not $existing.HasMeta) {
+                                    $shouldReplace = $true
+                                } elseif ($existing.Path -match '\{[^\}]+\}' -and $f.FullName -notmatch '\{[^\}]+\}') {
+                                    # Prefer static canonical path over lingering hash directory
                                     $shouldReplace = $true
                                 }
                             }
@@ -2097,7 +2311,10 @@ function Get-VirtualDrivePendingUploads {
                             ProviderId = $provId
                             IsDirty = $true
                             HasMeta = $hasMeta
-                            State = 'UploadPending'
+                            HasStagedPathConflict = [bool]$pendingMap.ContainsKey($dedupeKey)
+                            IsOutsideActiveCache = $outsideActiveCache
+                            State = if ($pendingMap.ContainsKey($dedupeKey)) { 'Needs review: multiple dirty staged copies share this path' } elseif ($outsideActiveCache) { 'Needs review: staged file is outside the active rclone cache root' } else { 'UploadPending' }
+                            DuplicateCopies = if ($pendingMap.ContainsKey($dedupeKey)) { [int]$pendingMap[$dedupeKey].DuplicateCopies } else { 1 }
                         }
                     }
                 }
