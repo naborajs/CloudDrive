@@ -276,7 +276,7 @@ try {
         throw 'Startup restore no longer maps missing per-account credentials to the sign-in-required state.'
     }
 
-    $vdIsolatedConfig = Select-String -Path $vdSourcePath -Pattern 'account-mount-isolated\.conf'
+    $vdIsolatedConfig = Select-String -Path $vdSourcePath -Pattern '(?:mount-\$mountKey|account-mount-isolated)\.conf'
     if (-not $vdIsolatedConfig) {
         throw 'Account mounts no longer use an isolated rclone config file.'
     }
