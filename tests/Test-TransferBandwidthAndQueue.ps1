@@ -14,6 +14,12 @@ Write-Host "=== NS Cloud Drive Transfer Bandwidth & Resilient Queue Test Suite =
 . (Join-Path $PSScriptRoot '..\src\services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $PSScriptRoot '..\src\services\CloudTransferManager.ps1')
 
+# Isolate durable queue state. Without this, enqueueing the 120 synthetic files below
+# persists into the live %LOCALAPPDATA% queue and litters its atomic backups.
+$sandboxDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ns_transfer_queue_test_" + [Guid]::NewGuid().ToString('N'))
+$null = [System.IO.Directory]::CreateDirectory($sandboxDir)
+Set-TransferQueueFilePath -Path (Join-Path $sandboxDir 'transfer-jobs.json')
+
 # ==============================================================================
 # 1. SETTINGS & EFFECTIVE BANDWIDTH LIMITS
 # ==============================================================================
@@ -236,4 +242,9 @@ if ($uiContent -notmatch '100% \(Awaiting confirmation\)') {
 Write-Host "  [PASS] Honest cloud confirmation lifecycle state labels verified." -ForegroundColor Green
 
 Write-Host "`nAll Transfer Bandwidth & Resilient Queue Tests Passed Successfully (exit code 0)." -ForegroundColor Cyan
+
+# Remove this suite's isolated queue state; never touch the live transfer queue.
+if (Test-Path -LiteralPath $sandboxDir) {
+    Remove-Item -LiteralPath $sandboxDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 exit 0
