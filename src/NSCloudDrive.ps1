@@ -13,6 +13,63 @@ Add-Type -AssemblyName System.Drawing
 
 Add-Type -MemberDefinition '[DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hwProc); [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam); [DllImport("shell32.dll", SetLastError = true)] public static extern void SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);' -Name 'Win32' -Namespace 'NSCloudDrive' -ErrorAction SilentlyContinue
 
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.VfsLivenessHelper').Type) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Threading;
+
+namespace NSCloudDrive
+{
+    public static class VfsLivenessHelper
+    {
+        public static void TouchDirectoryAsync(string dirPath)
+        {
+            if (string.IsNullOrEmpty(dirPath)) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    if (Directory.Exists(dirPath))
+                    {
+                        Directory.GetFileSystemEntries(dirPath);
+                    }
+                }
+                catch { }
+            });
+        }
+
+        public static void RefreshVfsAsync(int rcPort, string dir = "")
+        {
+            if (rcPort <= 0) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    StringBuilder query = new StringBuilder("http://127.0.0.1:");
+                    query.Append(rcPort).Append("/vfs/refresh?recursive=true&_async=true");
+                    if (!string.IsNullOrEmpty(dir))
+                    {
+                        query.Append("&dir=").Append(Uri.EscapeDataString(dir));
+                    }
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(query.ToString());
+                    req.Method = "POST";
+                    req.Timeout = 3000;
+                    req.ReadWriteTimeout = 3000;
+                    using (WebResponse resp = req.GetResponse()) { }
+                }
+                catch { }
+            });
+        }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 try {
     [NSCloudDrive.Win32]::SetCurrentProcessExplicitAppUserModelID('NSCloud.NSCloudDrive')
     $aumidKey = 'HKCU:\Software\Classes\AppUserModelId\NSCloud.NSCloudDrive'
@@ -56,6 +113,7 @@ $script:GDriveLetter = Get-PreferredDriveLetter 'gdrive'
 $script:TeraBoxLetter = Get-PreferredDriveLetter 'terabox'
 $script:ActiveFolderTransfers = @{}
 $script:NotifiedCompletedUploads = @{}
+$script:TransferQueueStateUnavailable = $false
 $script:TransferEventHistory = [System.Collections.Generic.List[hashtable]]::new()
 $script:NotifiedEventKeys = [hashtable]::Synchronized(@{})
 $script:LastNotifiedPath = ''
@@ -194,22 +252,46 @@ function Test-AndSetNotifiedEventKey([string]$Key, [double]$WindowMinutes = 15.0
 function Resume-CloudTransferQueueItem([string]$QueueOrJobId) {
     if ([string]::IsNullOrWhiteSpace($QueueOrJobId)) { return $false }
     $found = $false
+    $blocked = $false
     if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) {
         if ($null -ne $script:CloudTransferQueue) {
             foreach ($item in @($script:CloudTransferQueue)) {
                 if ($item -is [System.Collections.IDictionary]) {
                     if (($item.ContainsKey('QueueId') -and $item['QueueId'] -eq $QueueOrJobId) -or ($item.ContainsKey('JobId') -and $item['JobId'] -eq $QueueOrJobId)) {
+                        $status = if ($item.ContainsKey('Status')) { [string]$item['Status'] } else { '' }
+                        # A verified completion is terminal. Resuming it would re-upload
+                        # bytes that are already confirmed on the provider.
+                        if ($status -in @('Completed and remotely confirmed', 'Completed')) {
+                            $blocked = $true
+                            continue
+                        }
+                        $jobOperation = Get-CloudTransferJobOperation -Job $item
+                        if (-not $jobOperation.IsValid) {
+                            $item['StatusBeforeReconciliation'] = $status
+                            $item['Status'] = 'Needs reconciliation: operation unresolved'
+                            $item['ReconciliationStatus'] = 'Required'
+                            $item['LastError'] = [string]$jobOperation.Reason
+                            $item['WorkerPid'] = 0
+                            $item['JobId'] = ''
+                            $blocked = $true
+                            $found = $true
+                            continue
+                        }
                         $item['Status'] = 'Queued'
+                        $item['ReconciliationStatus'] = 'None'
+                        $item['StatusBeforeReconciliation'] = ''
                         $item['RetryCount'] = 0
+                        $item['VerificationRetryCount'] = 0
                         $item['NextRetryUtc'] = $null
                         $item['LastError'] = ''
                         $item['WorkerPid'] = 0
+                        $item['WorkerLeaseUtc'] = $null
                         $item['JobId'] = ''
                         $found = $true
                     }
                 }
             }
-            if ($found -and (Get-Command Save-DurableTransferQueue -ErrorAction SilentlyContinue)) {
+            if (($found -or $blocked) -and (Get-Command Save-DurableTransferQueue -ErrorAction SilentlyContinue)) {
                 Save-DurableTransferQueue | Out-Null
             }
         }
@@ -224,11 +306,32 @@ function Resume-CloudTransferQueueItem([string]$QueueOrJobId) {
                             $jId = if ($job.PSObject.Properties['JobId']) { [string]$job.JobId } else { '' }
                             $qId = if ($job.PSObject.Properties['QueueId']) { [string]$job.QueueId } else { '' }
                             if ($jId -eq $QueueOrJobId -or $qId -eq $QueueOrJobId) {
+                                $rawStatus = if ($job.PSObject.Properties['Status'] -and $job.Status) { [string]$job.Status } else { '' }
+                                if ($rawStatus -in @('Completed and remotely confirmed', 'Completed')) {
+                                    $blocked = $true
+                                    continue
+                                }
+                                $rawOperation = Get-CloudTransferJobOperation -Job $job
+                                if (-not $rawOperation.IsValid) {
+                                    $job.StatusBeforeReconciliation = $rawStatus
+                                    $job.Status = 'Needs reconciliation: operation unresolved'
+                                    $job.ReconciliationStatus = 'Required'
+                                    $job.LastError = [string]$rawOperation.Reason
+                                    $job.WorkerPid = 0
+                                    $job.JobId = ''
+                                    $blocked = $true
+                                    $modified = $true
+                                    continue
+                                }
                                 $job.Status = 'Queued'
+                                $job.ReconciliationStatus = 'None'
+                                $job.StatusBeforeReconciliation = ''
                                 $job.RetryCount = 0
+                                $job.VerificationRetryCount = 0
                                 $job.NextRetryUtc = $null
                                 $job.LastError = ''
                                 $job.WorkerPid = 0
+                                $job.WorkerLeaseUtc = $null
                                 $job.JobId = ''
                                 $modified = $true
                             }
@@ -252,7 +355,13 @@ function Resume-CloudTransferQueueItem([string]$QueueOrJobId) {
             }
         }
     }
-    return $found
+    if ($blocked -and (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue)) {
+        try {
+            Write-NSCloudLog -Severity 'Info' -Operation 'transfer-resume-blocked' `
+                -Message "Resume was refused for '$QueueOrJobId': the job is already verified or its operation cannot be resolved without guessing."
+        } catch { }
+    }
+    return ($found -and -not $blocked)
 }
 $script:IsExiting = $false
 $script:AppMutex = $null
@@ -996,11 +1105,17 @@ $content.Children.Add($drivesSummaryBanner) | Out-Null
 # ==============================================================================
 $script:CurrentActiveTransferDrive = ''
 $script:CurrentTransferPaused = $false
+$script:CurrentTransferDirection = 'Unknown'
+$script:LastVfsHydrationLogUtc = [DateTime]::MinValue
+$script:LastVfsHydrationLogKey = ''
 $script:ActiveTransferJobId = $null
 $script:LastActiveTransferInfo = $null
 
 function Toggle-ActiveTransferPause {
     if (-not $script:CurrentActiveTransferDrive) { return }
+    # There is no per-file pause in rclone. Pausing a read-through hydration would
+    # throttle the entire mount, so refuse instead of pretending to pause one file.
+    if ($script:CurrentTransferDirection -in @('VfsCacheHydration', 'Unknown')) { return }
     if ($script:CurrentTransferPaused) {
         Set-VirtualDriveBandwidthLimit -DriveLetter $script:CurrentActiveTransferDrive -Rate 'off' | Out-Null
         $script:CurrentTransferPaused = $false
@@ -1013,6 +1128,23 @@ function Toggle-ActiveTransferPause {
 
 function Stop-ActiveTransfer {
     if (-not $script:CurrentActiveTransferDrive) { return }
+    # Only a real upload job can be cancelled. VFS hydration and unresolved activity
+    # have no per-file cancel API; the only lever is a mount-wide throttle, which is
+    # not a cancellation and must never be applied on the user's behalf.
+    if ($script:CurrentTransferDirection -ne 'Upload') {
+        # Background VFS read-cache hydration is not a queued transfer job.
+        # Dismiss the live card display and reset the active transfer tracker so it does not persist on screen.
+        $script:LastActiveTransferInfo = $null
+        $script:CurrentActiveTransferDrive = ''
+        $script:CurrentTransferDirection = 'Unknown'
+        if ($null -ne $liveTransferCard) {
+            $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+        if ($null -ne $analyticsTransferCard) {
+            $analyticsTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+        return
+    }
     $drive = $script:CurrentActiveTransferDrive
     Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate '1B' | Out-Null
     $script:CurrentTransferPaused = $true
@@ -1033,9 +1165,13 @@ function Stop-ActiveTransfer {
             $script:ActiveTransferJobId = $null
         }
 
+        # 3. Remove the temporary throttle applied for the cancellation prompt. Leaving
+        # it at 1 B/s silently cripples every later read and upload on this mount.
+        Set-VirtualDriveBandwidthLimit -DriveLetter $drive -Rate 'off' | Out-Null
         $script:CurrentTransferPaused = $false
         $script:LastActiveTransferInfo = $null
-        $script:CurrentActiveTransferDrive = $null
+        $script:CurrentActiveTransferDrive = ''
+        $script:CurrentTransferDirection = 'Unknown'
 
         if ($null -ne $liveTransferCard) {
             $liveTransferCard.Visibility = [System.Windows.Visibility]::Collapsed
@@ -4899,9 +5035,9 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $item = $_
             $matchesMode = switch ($script:CurrentTransferModalFilter) {
                 'All' { $true }
-                'Active' { $item.Status -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation') }
+                'Active' { $item.Status -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation') -or $item.ReconciliationStatus -eq 'Required' -or $item.Status -match '^Needs attention' }
                 'Completed' { $item.Status -in @('Completed and remotely confirmed', 'Completed') }
-                'Failed' { $item.Status -in @('Failed', 'Cancelled') }
+                'Failed' { $item.Status -in @('Failed', 'Cancelled') -or $item.ReconciliationStatus -eq 'Required' -or $item.Status -match '^Needs attention' }
                 default { $true }
             }
             if (-not $matchesMode) { return $false }
@@ -4959,16 +5095,52 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $fNameLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
             $fInfoSp.Children.Add($fNameLabel) | Out-Null
 
-            $routeInfo = "Route: Local SSD Cache " + [char]0x2192 + " $($item.ProviderName)"
+            $routeDirection = if ($item.Direction) { [string]$item.Direction } else { 'Unknown' }
+            $srcProvider = if ($item.SourceProvider) { [string]$item.SourceProvider } else { 'unknown source' }
+            $dstProvider = if ($item.DestinationProvider) { [string]$item.DestinationProvider } else { 'unknown destination' }
+            $routeInfo = switch ($routeDirection) {
+                'Upload' { "Upload: $srcProvider " + [char]0x2192 + " $dstProvider" }
+                'Download' { "Download: $srcProvider " + [char]0x2192 + " local disk" }
+                'CloudToCloud' { "Cloud copy: $srcProvider " + [char]0x2192 + " $dstProvider" }
+                default { if ($item.Origin -eq 'Legacy') { 'Direction not recorded (legacy history)' } else { 'Direction unresolved ' + [char]0x2014 + ' needs reconciliation' } }
+            }
             if ($item.DriveLetter) { $routeInfo += " ($($item.DriveLetter):)" }
+            if ($item.Origin -and $item.Origin -ne 'UserRequest' -and $item.Origin -ne 'Legacy') { $routeInfo += " " + [char]0x2022 + " $($item.Origin)" }
             if ($item.BatchName) { $routeInfo += " " + [char]0x2022 + " Batch: $($item.BatchName)" }
 
             $fRouteLabel = New-Label $routeInfo 10 $p.TextSecondary $false
             $fRouteLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
             $fInfoSp.Children.Add($fRouteLabel) | Out-Null
 
+            # Explicit endpoints let the user audit direction and account without
+            # guessing from a drive letter or a file extension.
+            $endpointText = ''
+            if ($routeDirection -eq 'Download') {
+                $endpointText = "From: $($item.SourcePath) " + [char]0x2192 + " To: $($item.DestinationPath)"
+            } elseif ($routeDirection -in @('Upload', 'CloudCopy')) {
+                $endpointText = "From: $($item.SourcePath) " + [char]0x2192 + " To: $($item.DestinationPath)"
+            }
+            if ($item.SourceAccountId -or $item.DestinationAccountId) {
+                $endpointText += " " + [char]0x2022 + " Account: " + $(if ($item.DestinationAccountId) { $item.DestinationAccountId } else { $item.SourceAccountId })
+            }
+            if ($endpointText) {
+                $endpointLabel = New-Label $endpointText 10 $p.TextMuted $false
+                $endpointLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+                $fInfoSp.Children.Add($endpointLabel) | Out-Null
+            }
+
             $st = [string]$item.Status
-            if ($st -in @('Completed and remotely confirmed', 'Completed')) {
+            if ($item.ReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
+                $reconText = if ($item.Error) { [string]$item.Error } else { 'Transfer direction could not be established from persisted endpoints.' }
+                $detailLabel = New-Label ([string][char]0x26A0 + " Needs reconciliation: $reconText") 10 '#F59E0B' $false
+                $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            } elseif ($st -match '^Needs attention') {
+                $errText = if ($item.Error) { [string]$item.Error } else { $st }
+                $detailLabel = New-Label ([string][char]0x26A0 + " $errText") 10 '#F59E0B' $false
+                $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+                $fInfoSp.Children.Add($detailLabel) | Out-Null
+            } elseif ($st -in @('Completed and remotely confirmed', 'Completed')) {
                 $verText = if ($item.VerificationType) { [string]$item.VerificationType } else { 'Remote confirmation verified' }
                 $detailLabel = New-Label ([string][char]0x2713 + " $verText") 10 '#10B981' $false
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
@@ -5011,7 +5183,17 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $statusBadge.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
             $statusBadge.VerticalAlignment = 'Center'
 
-            if ($st -in @('Completed and remotely confirmed', 'Completed')) {
+            if ($item.ReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x26A0 + ' Needs review') 10 '#FDE68A' $true
+            } elseif ($st -match '^Needs attention') {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label ([string][char]0x26A0 + ' Attention') 10 '#FDE68A' $true
+            } elseif ($st -in @('Completed and remotely confirmed', 'Completed')) {
                 $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#064E3B')
                 $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#059669')
                 $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
@@ -5021,6 +5203,11 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                 $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#DC2626')
                 $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
                 $sbText = New-Label ([string][char]0x2717 + ' Failed') 10 '#FCA5A5' $true
+            } elseif ($st -in @('Cancelled', 'Superseded')) {
+                $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#334155')
+                $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#475569')
+                $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
+                $sbText = New-Label $st 10 '#CBD5E1' $true
             } elseif ($st -eq 'Waiting for network/provider') {
                 $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
                 $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
@@ -5046,7 +5233,7 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $actSp.Orientation = 'Horizontal'
             $actSp.VerticalAlignment = 'Center'
 
-            $canRetry = ($st -eq 'Failed' -or $st -eq 'Waiting for network/provider')
+            $canRetry = ($st -eq 'Failed' -or $st -eq 'Waiting for network/provider' -or $st -eq 'Cancelled' -or $st -eq 'Needs attention: remote verification unavailable')
             if ($canRetry) {
                 $retryBtn = [System.Windows.Controls.Button]::new()
                 $retryBtn.Content = [string][char]0x21BB + ' Retry'
@@ -5100,6 +5287,12 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                         $pName = if ($q.ContainsKey('ProviderId')) { [string]$q['ProviderId'] } else { 'Cloud Storage' }
                         $vType = if ($q.ContainsKey('VerificationType')) { [string]$q['VerificationType'] } else { '' }
                         $rHash = if ($q.ContainsKey('RemoteHash')) { [string]$q['RemoteHash'] } else { '' }
+                        $qDirection = if ($q.ContainsKey('Direction')) { [string]$q['Direction'] } else { 'Unknown' }
+                        $qOperation = if ($q.ContainsKey('OperationType')) { [string]$q['OperationType'] } else { 'Unknown' }
+                        $qSourcePath = if ($q.ContainsKey('SourcePath')) { [string]$q['SourcePath'] } else { '' }
+                        $qDestinationPath = if ($q.ContainsKey('DestinationFilePath')) { [string]$q['DestinationFilePath'] } else { '' }
+                        $qSourceAccountId = if ($q.ContainsKey('SourceAccountId')) { [string]$q['SourceAccountId'] } else { '' }
+                        $qDestinationAccountId = if ($q.ContainsKey('DestinationAccountId')) { [string]$q['DestinationAccountId'] } else { '' }
                         $unifiedList.Add([PSCustomObject]@{
                             JobId = if ($jId) { $jId } else { $qId }
                             BatchId = if ($q.ContainsKey('BatchId')) { [string]$q['BatchId'] } else { '' }
@@ -5107,6 +5300,16 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                             FileName = $fName
                             DriveLetter = ''
                             ProviderName = $pName
+                            OperationType = $qOperation
+                            Direction = $qDirection
+                            SourceProvider = if ($q.ContainsKey('SourceProvider')) { [string]$q['SourceProvider'] } else { '' }
+                            DestinationProvider = if ($q.ContainsKey('DestinationProvider')) { [string]$q['DestinationProvider'] } else { '' }
+                            SourceAccountId = $qSourceAccountId
+                            DestinationAccountId = $qDestinationAccountId
+                            SourcePath = $qSourcePath
+                            DestinationPath = $qDestinationPath
+                            Origin = if ($q.ContainsKey('Origin')) { [string]$q['Origin'] } else { 'Legacy' }
+                            ReconciliationStatus = if ($q.ContainsKey('ReconciliationStatus')) { [string]$q['ReconciliationStatus'] } else { 'None' }
                             FileSizeBytes = if ($q.ContainsKey('FileSizeBytes')) { [int64]$q['FileSizeBytes'] } else { 0L }
                             BytesTransferred = if ($q.ContainsKey('BytesTransferred')) { [int64]$q['BytesTransferred'] } else { 0L }
                             Status = if ($q.ContainsKey('Status')) { [string]$q['Status'] } else { 'Queued' }
@@ -5134,6 +5337,16 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                         FileName = $fName
                         DriveLetter = if ($h.ContainsKey('DriveLetter')) { [string]$h['DriveLetter'] } else { '' }
                         ProviderName = if ($h.ContainsKey('ProviderName')) { [string]$h['ProviderName'] } else { 'Cloud Storage' }
+                        OperationType = 'Unknown'
+                        Direction = 'Unknown'
+                        SourceProvider = ''
+                        DestinationProvider = if ($h.ContainsKey('ProviderName')) { [string]$h['ProviderName'] } else { '' }
+                        SourceAccountId = ''
+                        DestinationAccountId = ''
+                        SourcePath = ''
+                        DestinationPath = ''
+                        Origin = 'Legacy'
+                        ReconciliationStatus = 'None'
                         FileSizeBytes = if ($h.ContainsKey('FileSizeBytes')) { [int64]$h['FileSizeBytes'] } else { 0L }
                         BytesTransferred = if ($h.ContainsKey('BytesTransferred')) { [int64]$h['BytesTransferred'] } else { 0L }
                         Status = $st
@@ -8986,34 +9199,19 @@ function Start-ApplicationStartupSequence {
         try { Start-ProviderStatusRefreshWorker } catch { }
     }
     try { Start-StartupCacheRecoveryWorker } catch { }
-    try { Invoke-StartupTransferQueueRecovery | Out-Null } catch { }
     try {
-        if (Get-Command Sync-VirtualDriveOrphanedVfsCache -ErrorAction SilentlyContinue) {
-            $startupAccounts = @()
-            if ($script:Settings.PSObject.Properties['Accounts'] -and $script:Settings.Accounts) {
-                $startupAccounts = @($script:Settings.Accounts)
-            }
-            if ($startupAccounts.Count -gt 0) {
-                foreach ($acc in $startupAccounts) {
-                    try {
-                        Sync-VirtualDriveOrphanedVfsCache -Account $acc -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
-                    } catch {
-                        try {
-                            Sync-VirtualDriveOrphanedVfsCache -AccountId ([string]$acc.Id) -DriveLetter ([string]$acc.DriveLetter) -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
-                        } catch {
-                            try {
-                                Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
-                            } catch { }
-                        }
-                    }
-                }
-            } else {
-                try {
-                    Sync-VirtualDriveOrphanedVfsCache -CacheDirectory $script:CacheDirectory -ErrorAction SilentlyContinue | Out-Null
-                } catch { }
-            }
-        }
-    } catch { }
+        Invoke-StartupTransferQueueRecovery | Out-Null
+        $script:TransferQueueStateUnavailable = $false
+    } catch {
+        $script:TransferQueueStateUnavailable = $true
+        try {
+            Write-NSCloudLog -Severity 'Error' -Operation 'transfer-state-recovery' `
+                -Message 'Durable transfer state could not be loaded; automatic scheduling is paused and the count is unknown.'
+        } catch { }
+    }
+    # VFS orphan copies are reconciled by Start-VirtualDriveMount only after rclone
+    # reports the running mount's actual disk cache root. Until then the scanner
+    # keeps every historical staged file visible without guessing a hash-root target.
     try { Load-TransferNotificationHistory } catch { }
     Update-AllUIState
 
@@ -9042,6 +9240,72 @@ $script:LastActiveTransferInfo = $null
 $script:LastCompletedTransferTime = [DateTime]::MinValue
 $script:LastTransferCheck = [DateTime]::MinValue
 $script:HasPendingTransferSync = $false
+$script:QueueStallPollCycles = 0
+$script:LastQueueStallRecovery = [DateTime]::MinValue
+$script:LastStagedQueueAdoptionUtc = [DateTime]::MinValue
+
+function Resolve-PendingTransferAccount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $PendingFile,
+        [Parameter(Mandatory = $false)]
+        $PendingQueueItem,
+        [Parameter(Mandatory = $false)]
+        [array]$Accounts = @()
+    )
+
+    if (-not $Accounts -or $Accounts.Count -eq 0) {
+        return $null
+    }
+
+    $pAccId = if ($PendingFile) { [string](Get-SafeProperty $PendingFile 'AccountId' '') } else { '' }
+    $pProvId = if ($PendingFile) { [string](Get-SafeProperty $PendingFile 'ProviderId' '') } else { '' }
+    $pPath = if ($PendingFile) { [string](Get-SafeProperty $PendingFile 'Path' '') } else { '' }
+
+    if (-not $pProvId -and $PendingQueueItem -and ($PendingQueueItem -is [System.Collections.IDictionary])) {
+        if ($PendingQueueItem.ContainsKey('ProviderId') -and $PendingQueueItem['ProviderId']) {
+            $pProvId = [string]$PendingQueueItem['ProviderId']
+        }
+    }
+
+    # 1. Exact AccountId match
+    if ($pAccId) {
+        $m = $Accounts | Where-Object { [string](Get-SafeProperty $_ 'Id' '') -eq $pAccId } | Select-Object -First 1
+        if ($m) { return $m }
+    }
+
+    # 2. Compound AccountId match (e.g. gdrive_<Id> or <Id> contained in pAccId)
+    if ($pAccId) {
+        $m = $Accounts | Where-Object {
+            $accId = [string](Get-SafeProperty $_ 'Id' '')
+            $accProv = [string](Get-SafeProperty $_ 'ProviderId' '')
+            ($accId -and ($pAccId -eq "${accProv}_${accId}" -or $pAccId.EndsWith($accId) -or $pAccId.Contains($accId)))
+        } | Select-Object -First 1
+        if ($m) { return $m }
+    }
+
+    # 3. ProviderId match
+    if ($pProvId) {
+        $m = $Accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $pProvId } | Select-Object -First 1
+        if ($m) { return $m }
+    }
+
+    # 4. Inferred provider from AccountId prefix or file path
+    $inferred = ''
+    if ($pAccId -match '^(gdrive|terabox)') {
+        $inferred = $Matches[1].ToLowerInvariant()
+    } elseif ($pPath -match '(?i)[\\/](gdrive|terabox)[\\/_{]') {
+        $inferred = $Matches[1].ToLowerInvariant()
+    }
+
+    if ($inferred) {
+        $m = $Accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $inferred } | Select-Object -First 1
+        if ($m) { return $m }
+    }
+
+    return $null
+}
 
 function Format-LocalByteSize([int64]$Bytes) {
     if ($Bytes -ge 1TB) { return "$([Math]::Round($Bytes / 1TB, 2)) TB" }
@@ -9061,6 +9325,7 @@ function Update-LiveTransferActivity {
     $activeAccount = $null
     $activeDrive = $null
     $allActiveTransfers = [System.Collections.Generic.List[PSObject]]::new()
+    $mountedCachePaths = [System.Collections.Generic.List[string]]::new()
     $accounts = @()
 
     try {
@@ -9069,6 +9334,11 @@ function Update-LiveTransferActivity {
             $letter = [string]$acc.DriveLetter
             if (-not $letter) { continue }
             $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
+            # The live cache root is defined per mount, not per active upload. It must be
+            # known even while idle so staged files in superseded roots are identified.
+            if ($vfs.IsActive -and $vfs.DiskCachePath) {
+                $mountedCachePaths.Add([string]$vfs.DiskCachePath)
+            }
             if ($vfs.IsActive -and ($vfs.UploadsInProgress -gt 0 -or $vfs.UploadsQueued -gt 0 -or ($vfs.Transferring -and $vfs.Transferring.Count -gt 0))) {
                 $allActiveTransfers.Add([PSCustomObject]@{
                     Vfs = $vfs
@@ -9082,6 +9352,8 @@ function Update-LiveTransferActivity {
     $pendingVfsFiles = @()
     $pendingQueueItems = @()
     $pendingCount = 0
+    $queueScanUnavailable = $false
+    $vfsScanUnavailable = $false
 
     $rawQueue = @()
     try {
@@ -9095,43 +9367,116 @@ function Update-LiveTransferActivity {
                 @()
             }
         }
-    } catch { }
+    } catch { $queueScanUnavailable = $true }
 
     $pendingQueueItems = @($rawQueue | Where-Object {
         $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
         $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
     })
 
+    try {
+        if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
+            $activeCachePaths = @($mountedCachePaths | Where-Object { $_ })
+            $pendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory -ActiveCachePaths $activeCachePaths)
+        }
+    } catch { $vfsScanUnavailable = $true }
+
+    # Adopt staged files that sit outside every live cache root. rclone resolves its
+    # upload queue once at mount startup, so those bytes would otherwise stay stranded
+    # forever after a restart changed the cache root name. The durable queue uploads
+    # and verifies them; the staged source files are never moved or deleted here.
+    if (-not $script:TransferQueueStateUnavailable -and -not $script:IsExiting -and
+        $pendingVfsFiles.Count -gt 0 -and (Get-Command Import-StagedVfsFilesToTransferQueue -ErrorAction SilentlyContinue)) {
+        if (([DateTime]::UtcNow - $script:LastStagedQueueAdoptionUtc).TotalSeconds -ge 30.0) {
+            $script:LastStagedQueueAdoptionUtc = [DateTime]::UtcNow
+            try {
+                $adoption = Import-StagedVfsFilesToTransferQueue -StagedFiles $pendingVfsFiles -Accounts $accounts
+                if ($adoption -and [int]$adoption.AdoptedCount -gt 0) {
+                    $qRes = Get-CloudTransferQueue
+                    $rawQueue = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) { @($qRes[0]) } elseif ($null -ne $qRes) { @($qRes) } else { @() }
+                    $pendingQueueItems = @($rawQueue | Where-Object {
+                        $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
+                        $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
+                    })
+                }
+            } catch {
+                if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                    try {
+                        Write-NSCloudLog -Severity 'Warning' -Operation 'staged-upload-adoption' `
+                            -Message ("Staged files could not be adopted into the durable transfer queue: " + (Format-SanitizedDiagnosticMessage $_.Exception.Message))
+                    } catch { }
+                }
+            }
+        }
+    }
+    $pendingSummary = if (Get-Command Get-CloudTransferPendingSummary -ErrorAction SilentlyContinue) {
+        Get-CloudTransferPendingSummary -QueueItems $rawQueue -StagedFiles $pendingVfsFiles
+    } else {
+        [ordered]@{ PendingCount = $pendingQueueItems.Count + $pendingVfsFiles.Count; FailedCount = 0; ConflictCount = 0; NeedsReviewCount = 0 }
+    }
+    $stateUnavailable = ([bool]$script:TransferQueueStateUnavailable -or $queueScanUnavailable -or $vfsScanUnavailable)
+    $pendingCount = if ($stateUnavailable) { -1 } else { [int]$pendingSummary.PendingCount }
+    $script:HasPendingTransferSync = ($stateUnavailable -or $pendingCount -gt 0 -or [int]$pendingSummary.FailedCount -gt 0 -or [int]$pendingSummary.NeedsReviewCount -gt 0)
+
     if ($allActiveTransfers.Count -gt 0) {
         $chosen = $allActiveTransfers | Sort-Object -Property @{ Expression = { if ($_.Vfs.Transferring -and $_.Vfs.Transferring.Count -gt 0) { 0 } elseif ($_.Vfs.UploadsInProgress -gt 0) { 1 } else { 2 } } } | Select-Object -First 1
         $activeTransfer = $chosen.Vfs
         $activeAccount = $chosen.Account
         $activeDrive = $chosen.Drive
-        $script:HasPendingTransferSync = $false
     } else {
-        try {
-            if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
-                $pendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory)
+        if ($pendingVfsFiles.Count -gt 0 -or $pendingQueueItems.Count -gt 0) {
+            $firstPf = if ($pendingVfsFiles.Count -gt 0) { $pendingVfsFiles[0] } else { $null }
+            $firstPq = if ($pendingQueueItems.Count -gt 0) { $pendingQueueItems[0] } else { $null }
+            $matchingAcc = Resolve-PendingTransferAccount -PendingFile $firstPf -PendingQueueItem $firstPq -Accounts $accounts
+            if ($matchingAcc) {
+                $activeAccount = $matchingAcc
+                $activeDrive = [string]$matchingAcc.DriveLetter
+                $script:CurrentActiveTransferDrive = $activeDrive
             }
-        } catch { }
+        }
+    }
 
-        $pendingCount = $pendingVfsFiles.Count + $pendingQueueItems.Count
-        $script:HasPendingTransferSync = ($pendingCount -gt 0)
+    # rclone can only act on staged files that sit inside a live cache root. Files left in
+    # a superseded root are owned by the durable queue after adoption, so a mount refresh
+    # can never clear them and must not be retried forever.
+    $rcloneActionableStaged = @($pendingVfsFiles | Where-Object { -not [bool](Get-SafeProperty $_ 'IsOutsideActiveCache' $false) })
 
-        if ($pendingVfsFiles.Count -gt 0) {
-            $pAccId = [string](Get-SafeProperty $pendingVfsFiles[0] 'AccountId' '')
-            if ($pAccId) {
-                $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'Id' '') -eq $pAccId } | Select-Object -First 1
-                if (-not $matchingAcc) {
-                    $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $pAccId } | Select-Object -First 1
+    # Queue stall detection & recovery: if pending staged files exist, but rclone is idle across multiple cycles
+    if ($rcloneActionableStaged.Count -gt 0 -and $allActiveTransfers.Count -eq 0) {
+        $script:QueueStallPollCycles++
+        if ($script:QueueStallPollCycles -ge 2) {
+            $stallNow = [DateTime]::UtcNow
+            if (($stallNow - $script:LastQueueStallRecovery).TotalSeconds -ge 60.0) {
+                $script:LastQueueStallRecovery = $stallNow
+
+                $stallDrive = if ($activeDrive) {
+                    $activeDrive
+                } elseif ($script:CurrentActiveTransferDrive) {
+                    [string]$script:CurrentActiveTransferDrive
+                } else {
+                    ''
                 }
-                if ($matchingAcc) {
-                    $activeAccount = $matchingAcc
-                    $activeDrive = [string]$matchingAcc.DriveLetter
-                    $script:CurrentActiveTransferDrive = $activeDrive
+
+                if ($stallDrive) {
+                    $cleanLetter = $stallDrive.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+                    $mountRoot = "${cleanLetter}:\"
+                    $rcPort = 5580 + ([int]$cleanLetter[0] - [int][char]'A')
+
+                    [NSCloudDrive.VfsLivenessHelper]::TouchDirectoryAsync($mountRoot)
+                    [NSCloudDrive.VfsLivenessHelper]::RefreshVfsAsync($rcPort)
+
+                    if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                        try {
+                            $accLogId = if ($activeAccount) { [string]$activeAccount.Id } else { 'virtual-drive' }
+                            Write-NSCloudLog -Severity 'Info' -AccountId $accLogId -Operation 'queue-watchdog' `
+                                -Message "No active upload was visible while $($rcloneActionableStaged.Count) staged file(s) remained. Requested one non-blocking root refresh on ${mountRoot} (port $rcPort)."
+                        } catch { }
+                    }
                 }
             }
         }
+    } else {
+        $script:QueueStallPollCycles = 0
     }
 
     $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
@@ -9242,14 +9587,20 @@ function Update-LiveTransferActivity {
         $script:CurrentActiveTransferDrive = $activeDrive
         $transferList = @($activeTransfer.Transferring)
         $t = if ($transferList.Count -gt 0) {
-            $upItem = $transferList | Where-Object { $null -ne $_ -and (Get-SafeProperty $_ 'IsUpload' $false) -eq $true } | Select-Object -First 1
+            $upItem = $transferList | Where-Object { $null -ne $_ -and (Get-SafeProperty $_ 'Direction' '') -eq 'Upload' } | Select-Object -First 1
             if ($upItem) { $upItem } else { $transferList[0] }
         } else {
             $null
         }
 
-        $isUploadProp = if ($t) { Get-SafeProperty $t 'IsUpload' $null } else { $null }
-        $isUpload = if ($null -ne $isUploadProp) { [bool]$isUploadProp } else { ($activeTransfer.UploadsInProgress -gt 0 -or $activeTransfer.UploadsQueued -gt 0) }
+        # Direction comes from the specific rclone transfer item. It is never inferred
+        # from mount-wide upload counters, so a read-through cache hydration cannot be
+        # presented as an upload.
+        $direction = if ($t) { [string](Get-SafeProperty $t 'Direction' 'Unknown') } else { 'Unknown' }
+        $isUpload = ($direction -eq 'Upload')
+        $isHydration = ($direction -eq 'VfsCacheHydration')
+        $isKnownDirection = ($direction -in @('Upload', 'VfsCacheHydration', 'CloudToCloud'))
+        $script:CurrentTransferDirection = $direction
 
         $fileName = if ($t -and (Get-SafeProperty $t 'Name' '')) {
             [System.IO.Path]::GetFileName([string]$t.Name)
@@ -9293,31 +9644,51 @@ function Update-LiveTransferActivity {
             }
         }
 
-        $sourceDesc = "Local SSD Cache"
         $tSrc = if ($t) { [string](Get-SafeProperty $t 'SrcFs' '') } else { '' }
-        if ($tSrc -match '(?i)CloudCache[\\/]([^\\/]+)') {
-            $sourceDesc = "Local SSD Cache (D:\CloudCache)"
-        } elseif (Test-Path -LiteralPath 'D:\CloudCache') {
-            $sourceDesc = "Local SSD Cache (D:\CloudCache)"
-        }
-        $destDesc = "$providerName (${activeDrive}:)"
+        $tDst = if ($t) { [string](Get-SafeProperty $t 'DstFs' '') } else { '' }
+        $sourceDesc = if ($tSrc) { "Local path ($tSrc)" } else { 'Local source' }
+        $destDesc = if ($tDst) { "Cloud ($tDst)" } else { "$providerName (${activeDrive}:)" }
+        if ($isUpload -and -not $tDst) { $destDesc = "$providerName (${activeDrive}:)" }
 
-        $routeText = if ($isUpload) {
-            "From: $sourceDesc $([char]0x2192) To: $destDesc"
-        } else {
-            "From: $destDesc $([char]0x2192) To: Local SSD Cache / App"
+        $routeText = switch ($direction) {
+            'Upload' { "From: Local SSD Cache $([char]0x2192) To: $destDesc" }
+            'VfsCacheHydration' { "From: $destDesc $([char]0x2192) To: Local VFS read cache (background)" }
+            'CloudToCloud' { "From: Cloud $([char]0x2192) To: Cloud" }
+            default { 'Direction unresolved (read-only VFS activity)' }
         }
 
-        $statusPrefix = if ($script:CurrentTransferPaused) {
-            if ($isUpload) { "Upload Paused" } else { "Transfer Paused" }
+        $statusPrefix = if ($isHydration) {
+            'Hydrating VFS read cache (background)'
+        } elseif (-not $isKnownDirection) {
+            'VFS activity (direction unknown)'
+        } elseif ($script:CurrentTransferPaused) {
+            if ($isUpload) { 'Upload Paused' } else { 'Transfer Paused' }
         } elseif ($isUpload) {
             if ($activeTransfer.UploadsInProgress -gt 0 -or ($t -and $speed -gt 0)) {
-                "Uploading to Cloud"
+                'Uploading to Cloud'
             } else {
-                "Staged on SSD cache " + [char]0x2022 + " Queued for upload"
+                'Staged on SSD cache ' + [char]0x2022 + ' Queued for upload'
             }
         } else {
-            "Streaming from Cloud"
+            'Streaming from Cloud'
+        }
+
+        # A VFS hydration is a background read, not a user-initiated transfer. There is
+        # no per-file rclone cancel or pause API, and the only available control throttles
+        # the entire mount, so never offer one for it. Log one sanitized observation per
+        # file per 5 minutes so the external reader can be identified from evidence.
+        if ($isHydration) {
+            $hydrationKey = "${activeDrive}:" + [string](Get-SafeProperty $t 'RelativePath' $fileName)
+            if (([DateTime]::UtcNow - $script:LastVfsHydrationLogUtc).TotalSeconds -ge 300.0 -or $script:LastVfsHydrationLogKey -ne $hydrationKey) {
+                $script:LastVfsHydrationLogUtc = [DateTime]::UtcNow
+                $script:LastVfsHydrationLogKey = $hydrationKey
+                if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
+                    try {
+                        Write-NSCloudLog -Severity 'Info' -AccountId ([string](Get-SafeProperty $activeAccount 'Id' 'virtual-drive')) -Operation 'vfs-cache-hydration' `
+                            -Message ("Observed a read-through VFS cache hydration (not a download job): " + (Format-SanitizedDiagnosticMessage $fileName) + " from " + (Format-SanitizedDiagnosticMessage $tSrc) + " to " + (Format-SanitizedDiagnosticMessage $tDst) + ". No transfer job was created.")
+                    } catch { }
+                }
+            }
         }
 
         # Update Disks dashboard card
@@ -9327,13 +9698,19 @@ function Update-LiveTransferActivity {
         $liveTransferProgressBar.Value = [Math]::Max(0.0, [Math]::Min(100.0, $pct))
         $liveTransferProgressBar.IsIndeterminate = ($pct -le 0.0 -and $isUpload -and $activeTransfer.UploadsQueued -gt 0)
 
-        $isPendingConfirmation = ($pct -ge 100.0 -or ($fileSize -gt 0 -and $bytesRemaining -eq 0L))
+        # Cloud verification applies to uploads only. A hydration that reaches 100% is
+        # simply a completed cache read, not an upload awaiting remote confirmation.
+        $isPendingConfirmation = ($isUpload -and ($pct -ge 100.0 -or ($fileSize -gt 0 -and $bytesRemaining -eq 0L)))
         if ($isPendingConfirmation) {
             $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted (100% complete) " + [char]0x2022 + " All bytes transmitted " + [char]0x2022 + " Awaiting cloud verification"
             $liveTransferEta.Text = if ($script:CurrentTransferPaused) { "Paused" } else { "Awaiting remote confirmation..." }
         } else {
             $liveTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted$planWarning"
-            $liveTransferEta.Text = if ($script:CurrentTransferPaused) {
+            $liveTransferEta.Text = if ($isHydration) {
+                "Background cache read..."
+            } elseif (-not $isKnownDirection) {
+                "Direction unresolved"
+            } elseif ($script:CurrentTransferPaused) {
                 "Paused"
             } elseif ($etaSec -gt 0) {
                 "~$etaFormatted remaining"
@@ -9343,7 +9720,9 @@ function Update-LiveTransferActivity {
                 "Streaming..."
             }
         }
-        $ltPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume" } else { [string][char]0x23F8 + " Pause" }
+        $ltPauseBtn.Content = if ($isHydration -or -not $isKnownDirection) { "No per-file pause" } elseif ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume" } else { [string][char]0x23F8 + " Pause" }
+        $ltPauseBtn.IsEnabled = $isKnownDirection
+        $ltCancelBtn.IsEnabled = $isUpload
 
         if ($liveTransferCard.Visibility -ne [System.Windows.Visibility]::Visible) {
             $liveTransferCard.Visibility = [System.Windows.Visibility]::Visible
@@ -9375,17 +9754,22 @@ function Update-LiveTransferActivity {
 
         # Update Analytics page monitor
         if ($null -ne $analyticsTransferCard) {
-            $analyticsTransferRoute.Text = if ($isUpload) {
-                "Source: $sourceDesc " + [char]0x2192 + " Destination: $destDesc"
-            } else {
-                "Source: $destDesc " + [char]0x2192 + " Destination: Local SSD Cache / App"
+            $analyticsTransferRoute.Text = switch ($direction) {
+                'Upload' { "Source: Local SSD Cache " + [char]0x2192 + " Destination: $destDesc" }
+                'VfsCacheHydration' { "Source: $destDesc " + [char]0x2192 + " Destination: Local VFS read cache (background)" }
+                'CloudToCloud' { "Source: Cloud " + [char]0x2192 + " Destination: Cloud" }
+                default { 'Direction unresolved (read-only VFS activity)' }
             }
             $analyticsTransferFileName.Text = $fileName
             if ($isPendingConfirmation) {
                 $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) { "Status: Upload Paused" } else { "Status: Awaiting remote confirmation..." }
                 $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted (100% complete) " + [char]0x2022 + " All bytes transmitted " + [char]0x2022 + " Awaiting cloud verification"
             } else {
-                $analyticsTransferEta.Text = if ($script:CurrentTransferPaused) {
+                $analyticsTransferEta.Text = if ($isHydration) {
+                    "Status: Background cache read (not a download job)"
+                } elseif (-not $isKnownDirection) {
+                    "Status: Direction unresolved"
+                } elseif ($script:CurrentTransferPaused) {
                     if ($isUpload) { "Status: Upload Paused" } else { "Status: Transfer Paused" }
                 } elseif ($etaSec -gt 0) {
                     "Live Countdown: ~$etaFormatted remaining"
@@ -9397,9 +9781,9 @@ function Update-LiveTransferActivity {
                 $analyticsTransferDetails.Text = "${statusPrefix}: $bytesFormatted of $sizeFormatted ($([Math]::Round($pct, 1))% complete " + [char]0x2022 + " $remainingFormatted left) " + [char]0x2022 + " $speedFormatted$planWarning"
             }
             $pauseVerb = if ($isUpload) { "Upload" } else { "Transfer" }
-            $analyticsTransferPauseBtn.Content = if ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume $pauseVerb" } else { [string][char]0x23F8 + " Pause $pauseVerb" }
-            $analyticsTransferPauseBtn.IsEnabled = $true
-            $analyticsTransferCancelBtn.IsEnabled = $true
+            $analyticsTransferPauseBtn.Content = if ($isHydration -or -not $isKnownDirection) { "No per-file pause" } elseif ($script:CurrentTransferPaused) { [string][char]0x25B6 + " Resume $pauseVerb" } else { [string][char]0x23F8 + " Pause $pauseVerb" }
+            $analyticsTransferPauseBtn.IsEnabled = $isKnownDirection
+            $analyticsTransferCancelBtn.IsEnabled = $isUpload
 
             $analyticsTransferQueueStack.Children.Clear()
             if ($transferList.Count -gt 1) {
@@ -9511,14 +9895,20 @@ function Update-LiveTransferActivity {
             }
         }
 
-        $script:LastActiveTransferInfo = [pscustomobject]@{
-            FileName = $fileName
-            FileSize = $fileSize
-            ProviderName = $providerName
-            Drive = $activeDrive
-            IsFolderItem = ($isFolderItem -and $script:Settings.GroupFolderUploads)
-            IsUpload = $isUpload
-            CompletedAt = [DateTime]::UtcNow
+        # Only an upload may claim a completed, remotely verified transfer. A read-through
+        # VFS hydration is a cache read with no durable job, so it must never surface a
+        # completion notification or a "verified on cloud" card.
+        if ($isUpload) {
+            $script:LastActiveTransferInfo = [pscustomobject]@{
+                FileName = $fileName
+                FileSize = $fileSize
+                ProviderName = $providerName
+                Drive = $activeDrive
+                IsFolderItem = ($isFolderItem -and $script:Settings.GroupFolderUploads)
+                IsUpload = $true
+                Direction = $direction
+                CompletedAt = [DateTime]::UtcNow
+            }
         }
     } else {
         $notificationsAllowed = ($script:Settings.EnableNotifications -and -not (Test-NotificationsSnoozed $script:Settings))
@@ -9561,7 +9951,7 @@ function Update-LiveTransferActivity {
                 }
             }
 
-            if ($pendingCount -eq 0) {
+            if (-not $stateUnavailable -and $pendingCount -eq 0 -and [int]$pendingSummary.FailedCount -eq 0 -and [int]$pendingSummary.NeedsReviewCount -eq 0) {
                 $script:LastCompletedTransferTime = [DateTime]::UtcNow
                 $liveTransferFileName.Text = [string][char]0x2713 + " Completed: $($prev.FileName)"
                 $liveTransferDriveBadgeText.Text = "$($prev.Drive): " + [char]0x2022 + " $($prev.ProviderName)"
@@ -9578,24 +9968,34 @@ function Update-LiveTransferActivity {
             }
         }
 
-        if ($pendingCount -gt 0) {
-            $statusPending = "Local SSD staging complete " + [char]0x2022 + " Resuming background sync (" + $pendingCount + " files pending)"
+        if ($stateUnavailable -or $pendingCount -gt 0 -or [int]$pendingSummary.FailedCount -gt 0 -or [int]$pendingSummary.NeedsReviewCount -gt 0) {
+            $statusPending = if ($stateUnavailable) {
+                if ($script:TransferQueueStateUnavailable -or $queueScanUnavailable) {
+                    'Durable transfer state is unreadable; pending count is unknown and queue scheduling is paused.'
+                } else {
+                    'Staged-file state could not be scanned; total pending count is unknown while recoverable data is checked.'
+                }
+            } elseif ($pendingCount -eq 0) {
+                'Transfers need attention before completion can be confirmed.'
+            } else {
+                "$pendingCount files remain in transfer processing"
+            }
+            if ([int]$pendingSummary.FailedCount -gt 0) {
+                $statusPending += " ($($pendingSummary.FailedCount) need attention)"
+            }
+            if ([int]$pendingSummary.NeedsReviewCount -gt 0) {
+                $statusPending += " ($($pendingSummary.NeedsReviewCount) staged item(s) need review)"
+            }
 
             $providerName = 'Cloud Storage'
-            if ($pendingVfsFiles.Count -gt 0) {
-                $pAccId = [string](Get-SafeProperty $pendingVfsFiles[0] 'AccountId' '')
-                if ($pAccId) {
-                    $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'Id' '') -eq $pAccId } | Select-Object -First 1
-                    if (-not $matchingAcc) {
-                        $matchingAcc = $accounts | Where-Object { [string](Get-SafeProperty $_ 'ProviderId' '') -eq $pAccId } | Select-Object -First 1
-                    }
-                    if ($matchingAcc) {
-                        $activeAccount = $matchingAcc
-                        $activeDrive = [string]$matchingAcc.DriveLetter
-                        $providerName = [string]$matchingAcc.DisplayName
-                        $script:CurrentActiveTransferDrive = $activeDrive
-                    }
-                }
+            $firstPf = if ($pendingVfsFiles.Count -gt 0) { $pendingVfsFiles[0] } else { $null }
+            $firstPq = if ($pendingQueueItems.Count -gt 0) { $pendingQueueItems[0] } else { $null }
+            $matchedPendingAcc = Resolve-PendingTransferAccount -PendingFile $firstPf -PendingQueueItem $firstPq -Accounts $accounts
+            if ($matchedPendingAcc) {
+                $activeAccount = $matchedPendingAcc
+                $activeDrive = [string]$matchedPendingAcc.DriveLetter
+                $providerName = [string]$matchedPendingAcc.DisplayName
+                $script:CurrentActiveTransferDrive = $activeDrive
             } elseif ($activeAccount) {
                 $activeDrive = [string]$activeAccount.DriveLetter
                 $providerName = [string]$activeAccount.DisplayName
@@ -9605,8 +10005,6 @@ function Update-LiveTransferActivity {
                 $activeDrive
             } elseif ($script:CurrentActiveTransferDrive) {
                 [string]$script:CurrentActiveTransferDrive
-            } elseif ($accounts.Count -gt 0) {
-                [string]$accounts[0].DriveLetter
             } else {
                 ''
             }
@@ -9650,6 +10048,19 @@ function Update-LiveTransferActivity {
             $liveTransferProgressBar.IsIndeterminate = $true
             $liveTransferDetails.Text = $statusPending
             $liveTransferEta.Text = "Syncing..."
+            # Coordinate the pause/resume button with actual state in the pending-but-idle
+            # branch. Without this, the button retains a stale "Resume" label from a prior
+            # active-transfer cycle while the card says "Syncing...", which misleads the user
+            # into clicking Resume on work that is queued but not actually paused.
+            $ltPauseBtn.Content = if ($script:CurrentTransferDirection -in @('VfsCacheHydration', 'Unknown')) {
+                "No per-file pause"
+            } elseif ($script:CurrentTransferPaused) {
+                [string][char]0x25B6 + " Resume"
+            } else {
+                [string][char]0x23F8 + " Pause"
+            }
+            $ltPauseBtn.IsEnabled = -not ($script:CurrentTransferDirection -in @('VfsCacheHydration', 'Unknown'))
+            $ltCancelBtn.IsEnabled = $false
             $script:LastCompletedTransferTime = [DateTime]::MinValue
 
             if ($badgeDrive -and $providerName -ne 'Cloud Storage') {
@@ -9666,21 +10077,24 @@ function Update-LiveTransferActivity {
 
             if ($null -ne $liveTransferQueuePanel) {
                 $liveTransferQueuePanel.Children.Clear()
-                $allPendingNames = [System.Collections.Generic.List[string]]::new()
+                $allPendingRows = [System.Collections.Generic.List[PSObject]]::new()
                 foreach ($pf in $pendingVfsFiles) {
                     if ($pf.PSObject.Properties['Name'] -and $pf.Name) {
-                        $allPendingNames.Add([string]$pf.Name)
+                        $pfState = if ($pf.PSObject.Properties['State'] -and $pf.State -like 'Needs review*') { [string]$pf.State } else { 'Staged on SSD cache' }
+                        $allPendingRows.Add([pscustomobject]@{ Name = [string]$pf.Name; State = $pfState })
                     }
                 }
                 foreach ($pq in $pendingQueueItems) {
                     if ($pq.ContainsKey('FileName') -and $pq['FileName']) {
-                        $allPendingNames.Add([string]$pq['FileName'])
+                        $pqState = if ($pq.ContainsKey('Status')) { [string]$pq['Status'] } else { 'Queued' }
+                        $allPendingRows.Add([pscustomobject]@{ Name = [string]$pq['FileName']; State = $pqState })
                     }
                 }
-                $maxSub = [Math]::Min(3, $allPendingNames.Count)
+                $maxSub = [Math]::Min(3, $allPendingRows.Count)
                 for ($idx = 0; $idx -lt $maxSub; $idx++) {
-                    $subName = $allPendingNames[$idx]
-                    $subRow = New-Label ("  " + [char]0x2022 + " $subName " + [char]0x2014 + " Staged on SSD cache") 11 $script:Palette.TextSecondary $false
+                    $subName = $allPendingRows[$idx].Name
+                    $subState = $allPendingRows[$idx].State
+                    $subRow = New-Label ("  " + [char]0x2022 + " $subName " + [char]0x2014 + " $subState") 11 $script:Palette.TextSecondary $false
                     $subRow.Margin = [System.Windows.Thickness]::new(0, 1, 0, 1)
                     $liveTransferQueuePanel.Children.Add($subRow) | Out-Null
                 }
