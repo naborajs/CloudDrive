@@ -1,6 +1,6 @@
 # Engineering Incidents and Verified Fixes
 
-This is an evidence ledger, not a list of assumptions. “Verified” below means
+This is an evidence ledger, not a list of assumptions. â€œVerifiedâ€ below means
 the stated behavior was reproduced by source analysis or the named test; it
 does not mean every fix was validated against live provider accounts or
 concurrent Windows mounts. Commit identifiers are full hashes from repository
@@ -108,8 +108,8 @@ state explicitly.
 
 ## 3. OAuth browser success, failed identity verification, or failed save
 
-**Observed symptom:** The browser displayed rclone's generic “Success! All
-done! Please go back to rclone.” page, but the app did not create the expected
+**Observed symptom:** The browser displayed rclone's generic â€œSuccess! All
+done! Please go back to rclone.â€ page, but the app did not create the expected
 account or previously surfaced a missing `State` property.
 
 **What is established:** The generic success page is produced by the rclone
@@ -196,7 +196,7 @@ field becomes read-write by default. Commit adding the test:
 `aaaad755e4f720152d4a3a3833e8dd9768e40bfb`.
 
 **Unresolved:** The exact historical object and call stack for
-“The property 'ReadOnly' cannot be found on this object” are not available.
+â€œThe property 'ReadOnly' cannot be found on this objectâ€ are not available.
 The evidence proves the missing-field case is normalized in current
 settings paths, not that this was the sole original source. Do not simply
 catch the property exception; trace the producer and consumer and add a
@@ -348,7 +348,7 @@ changing code.
 3. **Cache Inactivity TTL & Physical Drive Protection (`CacheManager.ps1`)**:
    - Created `Invoke-InactivityCacheEviction` using exact binary boundaries:
      - `< 1 GB` (< 1,073,741,824 bytes): 5 minutes of inactivity.
-     - `1 GB – 3 GB` (1,073,741,824 to 3,221,225,472 bytes): 20 minutes of inactivity.
+     - `1 GB â€“ 3 GB` (1,073,741,824 to 3,221,225,472 bytes): 20 minutes of inactivity.
      - `> 3 GB` (> 3,221,225,472 bytes): 45 minutes of inactivity.
    - Evaluates inactivity against `LastAccessTimeUtc` (falling back to `LastWriteTimeUtc`).
    - Strictly protects staged files (`Dirty: true`) and in-use files (`Test-FileInUse`) from eviction.
@@ -357,7 +357,7 @@ changing code.
    - Wired to periodic DispatcherTimer in `NSCloudDrive.ps1` (runs every 60s).
 4. **Large-File Transfer Reporting Accuracy (`NSCloudDrive.ps1`)**:
    - `Update-LiveTransferActivity` strictly distinguishes local SSD staging from remote cloud streaming.
-   - Displays `"Staged in Local SSD Cache • Cloud Upload Pending"` when files are queued in cache.
+   - Displays `"Staged in Local SSD Cache â€¢ Cloud Upload Pending"` when files are queued in cache.
    - Network streaming speed and ETA are only reported when bytes are actively transmitting over the wire (`UploadsInProgress > 0`).
    - Appends warning badge if a staged file exceeds TeraBox's 4.0 GB free plan limit.
 
@@ -469,7 +469,7 @@ This cycle repeated over and over for the exact same file during playback, and r
 ## 18. Cloud Drive Card Reordering UI Modernization (Removal of Cluttered Arrow Buttons & Smooth Drag-and-Drop)
 
 **Observed symptom:**
-On the Disks dashboard, each cloud drive card displayed two tiny 16x16 arrow buttons (`▲` and `▼`) crammed directly underneath the six-dot drag handle (`:::`) on the left edge. This cluttered the card header, created awkward alignment, and detracted from the visual experience.
+On the Disks dashboard, each cloud drive card displayed two tiny 16x16 arrow buttons (`â–²` and `â–¼`) crammed directly underneath the six-dot drag handle (`:::`) on the left edge. This cluttered the card header, created awkward alignment, and detracted from the visual experience.
 
 **Fix:**
 1. Removed `$aOrderBtnRow`, `$aMoveUp`, and `$aMoveDown` from `Update-DisksView`.
@@ -585,7 +585,7 @@ On the Disks page, each cloud drive card displayed a drag handle with tooltip "C
 1. **Mount Arguments Tuning**: Reduced `--vfs-cache-poll-interval` to `2s` and `--vfs-write-back` to `1s` in `Build-RcloneMountArguments`. Configured Google Drive streaming chunks to `32M` and bounded TeraBox transfers to `2`.
 2. **Durable Queue Recovery**: Wired `Invoke-StartupTransferQueueRecovery` into `Start-ApplicationStartupSequence` in `src/NSCloudDrive.ps1`. Interrupted jobs are verified against cloud remotes; verified files become "Completed and remotely confirmed", while unverified files reset to "Queued" with clean retry budgets.
 3. **Continuous Background Pumping**: Wired `Process-CloudTransferQueue` into the 1-second dispatcher timer in `src/NSCloudDrive.ps1` (every 2 seconds when visible, every 5 seconds when minimized).
-4. **Honest Inter-File Gap Persistence**: Updated `Update-LiveTransferActivity` to check `Get-VirtualDrivePendingUploads` and `Get-CloudTransferQueue` when active transfers are 0. If pending items remain, the UI keeps the live card visible with honest status: `"Local SSD staging complete • Resuming background sync (X files pending)"`.
+4. **Honest Inter-File Gap Persistence**: Updated `Update-LiveTransferActivity` to check `Get-VirtualDrivePendingUploads` and `Get-CloudTransferQueue` when active transfers are 0. If pending items remain, the UI keeps the live card visible with honest status: `"Local SSD staging complete â€¢ Resuming background sync (X files pending)"`.
 5. **Path Normalization & Mutex Safety**: Normalized destination file paths using `[System.IO.Path]::GetFileName`, wrapped single directory listings in `@(...)`, handled `AbandonedMutexException`, and prevented handle leaks on mutex contention.
 
 **Verification & Evidence:**
@@ -635,7 +635,7 @@ When launching or restoring Google Drive mounts (legacy or saved accounts), the 
 ## 30. Post-Restart Transfer Stalling & 501 Duplicate Pending Files from Rclone Cache Hash Divergence
 
 **Observed symptom:**
-After submitting ~197 files for upload and restarting Windows, the UI reported `Local SSD staging complete • Resuming background sync (501 files pending)`, with the badge showing `T: Cloud Storage` instead of `G:`. After waiting 10+ minutes, no transfers progressed.
+After submitting ~197 files for upload and restarting Windows, the UI reported `Local SSD staging complete â€¢ Resuming background sync (501 files pending)`, with the badge showing `T: Cloud Storage` instead of `G:`. After waiting 10+ minutes, no transfers progressed.
 
 **Root causes identified:**
 1. **Rclone Dynamic Environment Hashing**: Rclone was started with backend credentials passed entirely via `RCLONE_CONFIG_...` environment variables. When extra backend options are passed via environment variables, rclone appends a short 5-character cryptographic hash in curly braces (e.g. `gdrive{48FKa}`, `gdrive{gN719}`) to the VFS cache folder name to isolate configurations.
@@ -658,7 +658,6 @@ After submitting ~197 files for upload and restarting Windows, the UI reported `
 - `Test-OrphanedVfsCacheReconciliation.ps1`: Passed (Exit code 0).
 - `Get-VirtualDrivePendingUploads`: Count verified at exactly 197 files in `D:\CloudCache`.
 - `Run-AllTests.ps1`: 36 Passed, 0 Failed (Exit code 0).
-
 
 ## 29. Drive Card Drag-and-Drop Directional Reordering Inversion & Notification Center Upgrade
 
@@ -696,7 +695,7 @@ After submitting ~197 files for upload and restarting Windows, the UI reported `
 ## 30. Post-Restart Transfer Stalling & 501 Duplicate Pending Files from Rclone Cache Hash Divergence
 
 **Observed symptom:**
-After submitting ~197 files for upload and restarting Windows, the UI reported `Local SSD staging complete • Resuming background sync (501 files pending)`, with the badge showing `T: Cloud Storage` instead of `G:`. After waiting 10+ minutes, no transfers progressed.
+After submitting ~197 files for upload and restarting Windows, the UI reported `Local SSD staging complete â€¢ Resuming background sync (501 files pending)`, with the badge showing `T: Cloud Storage` instead of `G:`. After waiting 10+ minutes, no transfers progressed.
 
 **Root causes identified:**
 1. **Rclone Dynamic Environment Hashing**: Rclone was started with backend credentials passed entirely via `RCLONE_CONFIG_...` environment variables. When extra backend options are passed via environment variables, rclone appends a short 5-character cryptographic hash in curly braces (e.g. `gdrive{48FKa}`, `gdrive{gN719}`) to the VFS cache folder name to isolate configurations.
@@ -731,4 +730,85 @@ After submitting ~197 files for upload and restarting Windows, the UI reported `
 
 
 
+
+
+## 31. Durable Transfer State, Staged-File Preservation, and Honest Pending Counts (2026-10-27)
+
+**Current evidence:** The application queue file was valid schema 1.0 with `Jobs=[]`; this does not imply that VFS staging was empty. A read-only metadata scan found 165 distinct dirty staged paths, all associated with Google Drive. Historical logs record 197 staged files reconciled at 17:43 and 165 at later scans; the available evidence does not establish that the difference represents 32 completed uploads. Earlier incident evidence documented 501 raw entries across three cache hash roots but 197 unique relative paths. Recent rclone logs include quota/rate-limit and 503 errors, so a live process or mount alone did not prove transfer progress.
+
+**Root causes corrected:**
+1. Corrupt queue JSON could be treated like an empty queue, and the previous replacement fallback could overwrite the only recoverable state.
+2. A worker lease heartbeat was renewed without requiring byte progress, so a live but stalled transfer could look active indefinitely.
+3. UI pending totals combined VFS and durable queue counts without reconciling overlapping logical paths or provider-prefixed account identities.
+4. VFS reconciliation removed source copies based on metadata and size/time, without proving content identity. The previous behavior could destroy recoverable staged data.
+5. Relative paths used Windows backslashes in some scans, making UI/test matching inconsistent; generic first-segment stripping could collapse valid nested paths.
+6. Generated rclone mount configuration and queue snapshots could persist credential fields in plaintext.
+
+**Fixes:** The queue now writes a same-directory temporary file, atomically replaces the primary while retaining versioned backups, refuses unreadable state without a valid recovery source, validates schema and stable job IDs, and loads a valid backup without resetting unreadable data. An initialization marker distinguishes a first-run empty queue from later loss of every snapshot. Queue account snapshots remove credential fields and resolve current stored credentials by account ID after load. Batch transfers have stable content-revision keys; rescans do not duplicate unchanged jobs. Worker recovery uses byte-progress timestamps, bounded retries, failure classification, and `Retry-After`; remote confirmation remains distinct from local staging or transmission. UI counts use one queue/VFS reconciliation summary and normalize provider-prefixed VFS account IDs. VFS reconciliation uses rclone's reported cache and metadata paths after validating they remain inside the account cache roots. Paths with multiple historical copies or an existing active copy are preserved for review rather than copied into the live mount; unique copies are copied to an external temporary file, hash-checked, and atomically placed with metadata. Historical-only staged files are explicitly shown as needing review while outside the active rclone cache, even after their active mirror has been written back. Relative paths are normalized with `/` separators.
+
+**Verification:** `tests/Test-TransferRecoveryAndProgression.ps1` passed with temporary local data, including 5, 200, and 2,000 synthetic jobs, restart/remote verification recovery, duplicate scans, corrupt-state recovery, credential redaction, rate limits, mocked stale-worker detection, legacy migration, and missing-state detection. `tests/Test-OrphanedVfsCacheReconciliation.ps1` passed using temporary cache directories and verified ambiguous-version preservation, runtime-root validation, and nested paths. No live cloud upload was performed. Ambiguous historical VFS copies remain explicitly tracked as needing review; no automatic content-deduplication or deletion was added. The documented 197/501 relationship is historical. The later 165 scan was subsequently explained by section 32: those files are dirty staged entries inside a superseded rclone cache root, and none of them was a durable queue job.
+
+## 32. Post-Restart Upload Loss: Superseded VFS Cache Root, Mount-Start Upload Queue, and Extended-Length Path Crash (TASK-008, 2026-10-27)
+
+**Observed symptom:** after a Windows restart the UI reported pending uploads, but nothing was ever uploaded. The durable queue file was valid schema 2.0 with `Jobs=[]`, while the UI showed 165 pending transfers that never reached the provider and never appeared in the transfer queue.
+
+**What the 165 count actually was:** 165 distinct dirty staged paths (3,367,602,616 bytes) under `D:\CloudCache\gdrive_7b5ae9da29274defb774f9178fc5b02e\vfs\gdrive`. They were rclone VFS cache entries carrying `"Dirty": true` metadata, not durable queue jobs. The 165 files were all still on disk and unmodified; no upload had been attempted for any of them.
+
+**Root causes:**
+
+1. **Reconciliation crashed on every startup.** `Sync-VirtualDriveOrphanedVfsCache` passed rclone's reported cache root through `[System.IO.Path]::GetFullPath()`. rclone reports extended-length paths (`\\?\D:\CloudCache\...`), which that API rejects with `Illegal characters in path`. The orphan-reconciliation pass therefore aborted before adopting or copying anything, silently, on every boot.
+2. **Copying into the live cache cannot trigger an upload.** rclone builds its VFS upload queue once, when the mount starts (`item.reload`). Files plus `Dirty` metadata written into the cache root *after* the mount is running are never ingested. A hermetic experiment confirmed this: a dirty file copied into the live root post-mount stayed invisible, and rclone still reported `to upload 0` after a 26-second wait. Any "migrate the staged files into the active cache directory" strategy is therefore ineffective without a remount.
+3. **The live cache root changed between mounts.** Timestamps show the running mount uses `vfs\gdrive{z0wI1}` (created 27-10 06:54:51Z), while the staged files sit in `vfs\gdrive` (last written 26-10 19:53:50Z). rclone's `vfs/stats` reports `fs: gdrive{z0wI1}:`, and the suffix tracks the per-account mount config path, so the older root is invisible to the running process. This is why the files were stranded rather than queued.
+
+**Fixes:**
+
+1. `VirtualDriveManager.ps1` gained `ConvertFrom-ExtendedLengthPath` and `ConvertTo-NormalizedFullPath`; all four `GetFullPath` call sites now normalize `\\?\` and `\\?\UNC\` forms first. Reconciliation no longer throws.
+2. Reconciliation now defaults to **preserve-only**: it reports `PreservedFiles` and copies nothing into the live cache root. The previous copy behavior is available only through the explicit `-CopyIntoActiveCache` switch, because a post-mount copy provably cannot be uploaded and would only duplicate up to 3.3 GB of staged data.
+3. `CloudTransferManager.ps1` gained `Import-StagedVfsFilesToTransferQueue`, which adopts orphan-root staged files as durable queue jobs: it binds them to the real destination account, sets the staged file itself as the source, records `StagedSourcePath`, `StagedSourceLastWriteUtc`, `RecoveredFromVfsCache` and a shared `RecoveryBatchId`, and uploads with `ConflictAction Overwrite` and `MaxRetries 5`. Adoption never moves or deletes the staged source.
+4. Adoption refuses to touch files inside the live cache root (rclone owns those) and fails closed when the active root is unknown, so a missing mount can never cause a double-upload race.
+5. `Get-CloudTransferPendingSummary` gained settled-revision suppression: a completed, remotely verified job hides its staged duplicate only when size and `StagedSourceLastWriteUtc` match exactly, so a newer dirty revision at the same path is still counted and re-queued.
+6. `NSCloudDrive.ps1` adopts outside-root files from the live activity timer (rate-limited to once per 30 s), refreshes the queue, and reports honest `StagedOnlyCount`/`NeedsReviewCount` values instead of a raw VFS file count. The startup orphan sync was removed from `Start-ApplicationStartupSequence`; the mount-time pass is authoritative.
+7. Durable-queue persistence now round-trips the staging linkage fields, so suppression and revision checks still work after a restart.
+8. The durable queue file now also records settled staged revisions. Because adoption deliberately leaves every staged source on disk, clearing the completed list would otherwise delete the only proof that those bytes reached the provider, and the next adoption pass would re-upload all 165 files. Settlement evidence is now harvested before completed jobs are removed and reloaded with the queue.
+9. The rclone stall watchdog only considers staged files inside a live cache root. Files in a superseded root are owned by the durable queue, so refreshing the mount could never clear them; previously it would have issued a pointless remote refresh every 60 seconds forever.
+
+**Test isolation defect found and fixed:** `tests/Test-TransferBandwidthAndQueue.ps1` enqueued 120 synthetic jobs without redirecting the queue path, so it wrote the live `%LOCALAPPDATA%\NSCloudDrive\state\transfer-jobs.json` 128 times and left 128 atomic backups (18,143,627 bytes). Both that suite and the tail of `Test-TransferRecoveryAndProgression.ps1` now keep an isolated queue path inside `%TEMP%`. The 128 backups were verified to contain only `folder/file_N.dat` and `fail1.bin`/`fail2.bin` fixtures generated by the same suite, then removed; the live queue was restored byte-for-byte from the pre-test snapshot (SHA256 `2401E89C7BE16F8E49911B3BA43782B1D72C615B6E7CF91577C2410D6514D5F7`) and both suites now leave the live state directory unchanged.
+
+**Verification (mocked and read-only; no provider upload):** `tests/Test-StagedVfsQueueAdoption.ps1` passed (exit 0) covering live-root exclusion, fail-closed behavior without a mounted root, adoption and persistence, reload after a simulated restart, idempotency, ambiguous-path skipping, settled-revision suppression, newer-revision re-queuing, clearing completed jobs without resurrecting a settled upload, settlement-ledger reload from durable state, and exact 197-transfer accounting (32 queued + 165 staged) before and after adoption. `tests/Test-OrphanedVfsCacheReconciliation.ps1` passed (exit 0) including default preserve-only behavior and `\\?\`, `\\?\UNC\` and forward-slash path handling. `Test-TransferRecoveryAndProgression.ps1`, `Test-TransferBandwidthAndQueue.ps1`, `Test-CloudTransferManager.ps1` and `Test-TransferTelemetryAndVerification.ps1` all passed (exit 0), and the two queue-writing suites were confirmed to cause zero changes in the live state directory. A read-only live dry run against the real 165 files, writing only to a temporary queue file, reported `SCANNED=165 OUTSIDE=165 INSIDE=0`, `ADOPTED=165 BYTES=3367602616`, zero bad destinations, zero missing sources, zero bad account bindings and zero duplicate destinations.
+
+**Not verified:** the live app was not restarted and no real upload was attempted, so "165 jobs appear in the queue after restart" and "the 165 files reach Google Drive" remain unproven in production. No genuine Windows reboot test was performed and no live TeraBox upload was tested. The 197-file batch history is still partly unexplained: the 165 files are accounted for, but the evidence does not show whether the remaining ~32 were uploaded, deleted, or never staged.
+
+## 33. Transfer Direction, Identity, and VFS Hydration Defects (TASK-009, 2026-10-27)
+
+**Observed symptoms:**
+- A TeraBox→local MP4 video (SEX/ANUJSINGH_COLLECTIONS_20240305_125426(1).mp4) appeared in the live card as a "Streaming from Cloud" download with a Cancel button. No `rclone copy` process or log entry existed for it; the durable queue was empty; the app has no download/thumbnail/preview code. The T: mount logged `vfs cache: failed to download ... 503 Service Unavailable` repeatedly from 26-10 22:42:48 through 27-10 12:33, indicating an external reader (Explorer thumbnail, indexer, AV, or media player) triggered rclone read-through cache hydration. The user clicked Cancel at 2026-10-27T07:04:46Z (`transfer-cancel` log). The exact external reader is not determinable from available evidence.
+- The same video's VFS read-cache files were being deleted by `Invoke-InactivityCacheEviction` after 5/20/45 minutes of inactivity, fighting rclone's own 72h `--vfs-cache-max-age`; rclone then logged `vfs cache: detected external removal of cache file` and re-downloaded on the next read, producing apparent repeated transfers.
+- `Stop-ActiveTransfer` set a global 1 B/s bandwidth cap on the mount and never restored it, silently crippling all later reads and uploads.
+- Queue jobs had no persisted `OperationType`, `Direction`, provider, or account identity. Direction was re-inferred from path shape on every scheduler pass and every restart, so a job could change direction or be lost entirely when endpoints were incomplete.
+- The main "Upload Files" dialog copied into the mount with no durable job, and the cloud-to-cloud modal called `Start-CloudTransfer` directly without persistence — a job-memory gap where direction and intent were not durable.
+
+**Root causes:**
+1. `Get-VirtualDriveVfsStats` defaulted `$isUpload` from mount-wide upload counters (`$uploadsInProg -gt 0 -or $uploadsQueued -gt 0`) and from `srcFs`/`dstFs` prefix matching, so cloud→local read-through hydration was labeled "Uploading to cloud" with `Direction='Download'`. Direction was a property of the mount, not of the individual transfer.
+2. `Update-LiveTransferActivity` preferred any upload item and hid downloads, so a hydration could surface as the primary "active transfer."
+3. `Invoke-InactivityCacheEviction` deleted rclone-owned `vfs` read-cache files, causing repeated re-downloads that looked like transfer repetition.
+4. `Stop-ActiveTransfer` applied `Set-VirtualDriveBandwidthLimit -Rate '1B'` and never restored it to `'off'`.
+5. `Add-CloudTransferQueueItem` had no `OperationType`, `Direction`, `SourceProvider`, `DestinationProvider`, `SourceAccountId`, `DestinationAccountId`, or `TransferKey` fields. `Get-CloudTransferLogicalKey` used only account ID, source path, destination path, size, and write time — missing operation type and provider identity.
+
+**Fixes:**
+1. `Get-VirtualDriveVfsStats` now determines direction per transfer item from `srcFs`/`dstFs`: local→cloud = Upload, cloud→local = `VfsCacheHydration`, cloud→cloud = CloudToCloud, local→local = Local. Mount-wide upload counters are never consulted. Hydration and unknown-direction items get `CanCancel=$false` and `CanPause=$false`.
+2. `Update-LiveTransferActivity` uses per-item direction, labels hydration as "Hydrating VFS read cache (background)", disables Pause/Cancel for hydration, and logs one sanitized hydration observation per file per 5 minutes (`vfs-cache-hydration` operation) so the external reader can be identified from evidence. Completed state is only claimed for uploads (`IsUpload`), never for hydration.
+3. `Invoke-InactivityCacheEviction` now skips all files under `\vfs\` and `\vfsMeta\` (rclone-owned), reporting them as `SkippedRcloneOwnedCount`. rclone's `--vfs-cache-max-size`/`--vfs-cache-max-age` remain authoritative.
+4. `Stop-ActiveTransfer` restores the bandwidth limit to `'off'` after cancellation, so a 1 B/s cap never persists.
+5. `Resolve-CloudTransferOperation` resolves direction exclusively from explicit account providers — never from drive letters, file names, extensions, UI labels, or working directories. An unknown or empty provider fails closed to `IsValid=$false` with a reason, and the job waits for reconciliation instead of guessing.
+6. `Add-CloudTransferQueueItem` persists `OperationType`, `Direction`, `SourceProvider`, `DestinationProvider`, `SourceAccountId`, `DestinationAccountId`, `Origin`, `TransferKey`, `SourceLastWriteUtc`, and `PreviousJobId`. Dedup is by `TransferKey`; terminal jobs are not revived implicitly (`-AllowNewAttempt` required for a new attempt).
+7. `Save-DurableTransferQueue`/`Load-DurableTransferQueue` round-trip all new fields and validate them. Legacy records migrate `OperationType`/`Direction`/providers from the persisted account providers on load; records with missing endpoints are preserved but fail closed to `Needs reconciliation: operation unresolved` and are never scheduled.
+8. `Invoke-StartupTransferQueueRecovery` and `Process-CloudTransferQueue` block scheduling for jobs with `ReconciliationStatus='Required'` and revalidate operation before every scheduling pass.
+9. `Start-CloudTransfer` accepts `-OperationType` and resolves direction from providers only; local endpoint detection comes from `ProviderId`, never from path shape. `Resume-CloudTransferQueueItem` blocks completed jobs, revalidates operation, and resets verification retries.
+10. Transfer Center cards show `Direction`, `OperationType`, `SourceProvider`, `DestinationProvider`, `SourcePath`, `DestinationPath`, source/destination account IDs, and `Origin`. Reconciliation-required and needs-attention states are visually distinct.
+
+**Verification:** `tests/Test-TransferDirectionAndIdentity.ps1` passed (exit 0) covering 14 cases: Upload/Download/CloudCopy resolution, local-to-local rejection, unknown/empty provider fail-closed, missing source/destination path fail-closed, declared-vs-resolved operation mismatch, TransferKey dedup, terminal-job non-revival without `-AllowNewAttempt`, legacy-record migration, legacy missing-endpoint fail-closed, and job-operation resolution from persisted fields. `Test-TransferRecoveryAndProgression.ps1`, `Test-TransferBandwidthAndQueue.ps1`, `Test-OrphanedVfsCacheReconciliation.ps1`, `Test-StagedVfsQueueAdoption.ps1`, `Test-CloudTransferManager.ps1`, and `Test-CacheManagement.ps1` all passed (exit 0). All four modified source files parse cleanly under `[System.Management.Automation.Language.Parser]` with zero errors under `Set-StrictMode -Version Latest`.
+
+**Logical vs duplicate counts:** `Get-CloudTransferPendingSummary` now reports `UploadCount`/`DownloadCount`/`CloudCopyCount` by resolved operation, plus `ReconciliationCount`/`SupersededCount`. Duplicate logical transfers are suppressed at enqueue time (not counted twice); terminal jobs are not counted as pending. Settled staged revisions are excluded from `StagedOnlyCount` even after their jobs are cleared.
+
+**Not verified:** live app restart and real provider upload remain pending (require a manual tray "Exit NS Cloud Drive" followed by `NSCloudDrive.exe -Minimized`). No genuine Windows reboot test and no live TeraBox upload test were performed. The exact external reader that triggered the video hydration remains undetermined; diagnostic logging has been added but the reader identity was not captured in existing logs.
 
