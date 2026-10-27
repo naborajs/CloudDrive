@@ -41,6 +41,9 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-WriteAndUploadVerification.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxStreamingAndMaintenance.ps1'),
     (Join-Path $PSScriptRoot 'Test-OrphanedVfsCacheReconciliation.ps1'),
+    (Join-Path $PSScriptRoot 'Test-StagedVfsQueueAdoption.ps1'),
+    (Join-Path $PSScriptRoot 'Test-TransferAdoptionToWorkerE2E.ps1'),
+    (Join-Path $PSScriptRoot 'Test-TransferDirectionAndIdentity.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
 )
 
