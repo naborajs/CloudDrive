@@ -144,6 +144,7 @@ function Invoke-InactivityCacheEviction {
     $evictedFiles = 0
     $skippedInUse = 0
     $skippedStaged = 0
+    $skippedRcloneOwned = 0
     $errors = [System.Collections.Generic.List[string]]::new()
 
     # Query active rclone transfers across accounts to prevent evicting files being actively read, streamed, or uploaded
@@ -177,13 +178,20 @@ function Invoke-InactivityCacheEviction {
         if (-not (Test-Path -LiteralPath $managedDir -PathType Container)) { continue }
 
         $vfsDir = Join-Path $managedDir 'vfs'
-        $scanTarget = if (Test-Path -LiteralPath $vfsDir -PathType Container) { $vfsDir } else { $managedDir }
+        $scanTarget = $managedDir
 
         $files = Get-ChildItem -LiteralPath $scanTarget -Recurse -File -Force -ErrorAction SilentlyContinue
         if (-not $files) { continue }
 
         foreach ($f in $files) {
-            if ($f.FullName -match '[\\/]vfsMeta[\\/]') { continue }
+            # rclone owns everything under its VFS read cache and its metadata. Its own
+            # --vfs-cache-max-age/--vfs-cache-max-size are authoritative; deleting files
+            # behind a running mount causes 'detected external removal of cache file'
+            # and an immediate re-download, which looks like a repeated transfer.
+            if ($f.FullName -match '[\\/]vfs[\\/]' -or $f.FullName -match '[\\/]vfsMeta[\\/]') {
+                $skippedRcloneOwned++
+                continue
+            }
 
             # Do NOT evict files actively being transferred or in-use by any process
             if ($activeTransferFileNames.Contains($f.Name) -or $activeTransferFileNames.Contains([System.IO.Path]::GetFileName($f.FullName)) -or (Test-FileInUse -FilePath $f.FullName)) {
@@ -280,6 +288,7 @@ function Invoke-InactivityCacheEviction {
         EvictedFiles = $evictedFiles
         SkippedInUseCount = $skippedInUse
         SkippedStagedCount = $skippedStaged
+        SkippedRcloneOwnedCount = $skippedRcloneOwned
         Errors = @($errors.ToArray())
     }
 }
