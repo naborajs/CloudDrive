@@ -32,30 +32,52 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 
 ---
 
+<div align="center">
+
+## ⬇️ Download & Quick Launch
+
+[![Download Standalone EXE](https://img.shields.io/badge/Download-NSCloudDrive.exe%20(Launcher)-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive.exe)
+&nbsp;&nbsp;
+[![Download Full Portable Package](https://img.shields.io/badge/Download-Complete%20Release%20ZIP%20(2.1%20MB)-0969da?style=for-the-badge&logo=zip&logoColor=white)](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive-v1.0.0-Windows-x64.zip)
+
+| Download Package | Description | Direct Link | Checksum |
+| :--- | :--- | :--- | :--- |
+| **`NSCloudDrive.exe`** | 64-bit Standalone Launcher (High-DPI, AppUserModelID, zero-console) | [⬇️ **Download EXE**](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive.exe) | [SHA-256](NSCloudDrive.exe.sha256) |
+| **`NSCloudDrive-v1.0.0-Windows-x64.zip`** | **Complete Portable Release** (Includes WebView2 runtime, configs, launcher, and docs) | [📦 **Download Release ZIP**](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive-v1.0.0-Windows-x64.zip) | [SHA-256](dist/NSCloudDrive-v1.0.0-Windows-x64.zip.sha256) |
+| **`GitHub Releases`** | Release notes, asset tags, and source code | [🚀 **View Release v1.0.0**](https://github.com/naborajs/CloudDrive/releases/tag/v1.0.0) | `v1.0.0` |
+
+> [!TIP]
+> **First-time users:** Download the **Complete Release ZIP**, extract it to any folder (e.g. `C:\Tools\NSCloudDrive`), and double-click **`NSCloudDrive.exe`** to start mounting your drives immediately!
+
+</div>
+
+---
+
 ## Table of Contents
-1. [Overview](#overview)
-2. [Visual Tour & Interface](#visual-tour--interface)
-3. [Key Features](#key-features)
-4. [Architecture & Technology Stack](#architecture--technology-stack)
-5. [System Requirements](#system-requirements)
-6. [Quick Start & Installation](#quick-start--installation)
-7. [Windows SmartScreen & Unsigned Binary Notice](#windows-smartscreen--unsigned-binary-notice)
-8. [Cloud Account Setup Guide](#cloud-account-setup-guide)
+1. [Download & Quick Launch](#-download--quick-launch)
+2. [Overview](#overview)
+3. [Visual Tour & Interface](#visual-tour--interface)
+4. [Key Features](#key-features)
+5. [Architecture & Technology Stack](#architecture--technology-stack)
+6. [System Requirements](#system-requirements)
+7. [Quick Start & Installation](#quick-start--installation)
+8. [Windows SmartScreen & Unsigned Binary Notice](#windows-smartscreen--unsigned-binary-notice)
+9. [Cloud Account Setup Guide](#cloud-account-setup-guide)
    - [Google Drive (OAuth 2.0 PKCE)](#google-drive-setup)
    - [TeraBox (Bridge Mode)](#terabox-setup)
-9. [Transfer Engine & Telemetry](#transfer-engine--telemetry)
-10. [On-Demand Analytics & Performance Monitoring](#on-demand-analytics--performance-monitoring)
-11. [Adaptive Bandwidth & Gaming Optimization](#adaptive-bandwidth--gaming-optimization)
-12. [Cache Management & Inactivity TTL](#cache-management--inactivity-ttl)
-13. [Desktop UI & Theme System](#desktop-ui--theme-system)
-14. [Memory Optimization & System Tray](#memory-optimization--system-tray)
-15. [Security, Privacy & DPAPI Storage](#security-privacy--dpapi-storage)
-16. [Automated Test Suites](#automated-test-suites)
-17. [Troubleshooting & FAQ](#troubleshooting--faq)
-18. [Known Limitations](#known-limitations)
-19. [Contributing](#contributing)
-20. [License & Permitted Use](#license--permitted-use)
-21. [Questions, Suggestions, and Contact](#questions-suggestions-and-contact)
+10. [Transfer Engine & Telemetry](#transfer-engine--telemetry)
+11. [On-Demand Analytics & Performance Monitoring](#on-demand-analytics--performance-monitoring)
+12. [Adaptive Bandwidth & Gaming Optimization](#adaptive-bandwidth--gaming-optimization)
+13. [Cache Management & Inactivity TTL](#cache-management--inactivity-ttl)
+14. [Desktop UI & Theme System](#desktop-ui--theme-system)
+15. [Memory Optimization & System Tray](#memory-optimization--system-tray)
+16. [Security, Privacy & DPAPI Storage](#security-privacy--dpapi-storage)
+17. [Automated Test Suites](#automated-test-suites)
+18. [Troubleshooting & FAQ](#troubleshooting--faq)
+19. [Known Limitations](#known-limitations)
+20. [Contributing](#contributing)
+21. [License & Permitted Use](#license--permitted-use)
+22. [Questions, Suggestions, and Contact](#questions-suggestions-and-contact)
 
 ---
 
@@ -175,15 +197,20 @@ flowchart TD
 
 ## Quick Start & Installation
 
-### Option 1: Native Executable Launcher (Recommended)
-Double-click `NSCloudDrive.exe` in the application root directory.
+### Option 1: Complete Portable Release (Recommended for New Users)
+1. Download **[`NSCloudDrive-v1.0.0-Windows-x64.zip`](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive-v1.0.0-Windows-x64.zip)**.
+2. Extract the archive to any folder (e.g. `C:\Tools\NSCloudDrive`).
+3. Double-click **`NSCloudDrive.exe`** to launch the dashboard.
 
-### Option 2: Windows Command Prompt
+### Option 2: Native Executable Launcher (For Cloned Repository)
+If you have cloned this repository, simply double-click **[`NSCloudDrive.exe`](NSCloudDrive.exe)** located directly in the root directory.
+
+### Option 3: Windows Command Prompt
 ```cmd
 .\NSCloudDrive.cmd
 ```
 
-### Option 3: PowerShell Terminal
+### Option 4: PowerShell Terminal
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
 ```
