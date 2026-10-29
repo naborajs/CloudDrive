@@ -480,8 +480,9 @@ function Test-ProviderUploadPreflight {
         [string]$FileName = ''
     )
 
-    $providerId = if ($Account.ContainsKey('ProviderId')) { [string]$Account.ProviderId } else { 'gdrive' }
-    $accountId = if ($Account.ContainsKey('Id')) { [string]$Account.Id } else { '' }
+    $providerId = Get-CloudTransferProviderId $Account
+    if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = 'gdrive' }
+    $accountId = [string](Get-CloudTransferFieldValue $Account 'Id')
     $cleanFileName = if ($FileName) { $FileName } else { 'Selected file' }
 
     if ($providerId -eq 'terabox') {
@@ -609,8 +610,9 @@ function Get-CloudAccountTransferRemoteEnvironment {
         throw "rclone binary not found. Cannot configure cloud transfer remote."
     }
 
-    $providerId = if ($Account.ContainsKey('ProviderId')) { $Account.ProviderId } else { 'gdrive' }
-    $accountId = if ($Account.ContainsKey('Id')) { $Account.Id } else { '' }
+    $providerId = Get-CloudTransferProviderId $Account
+    if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = 'gdrive' }
+    $accountId = [string](Get-CloudTransferFieldValue $Account 'Id')
 
     if ($providerId -eq 'local') {
         return @{}
@@ -648,8 +650,9 @@ function Get-CloudDirectoryContents {
         [switch]$BypassLocalMount = $false
     )
 
-    $providerId = if ($Account.ContainsKey('ProviderId')) { $Account.ProviderId } else { 'gdrive' }
-    $accountId = if ($Account.ContainsKey('Id')) { $Account.Id } else { '' }
+    $providerId = Get-CloudTransferProviderId $Account
+    if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = 'gdrive' }
+    $accountId = [string](Get-CloudTransferFieldValue $Account 'Id')
 
     if ($providerId -eq 'local') {
         $localDir = $Path
@@ -810,7 +813,8 @@ function Test-RemoteCloudFileVerification {
         [string]$ExpectedMd5Hash = ''
     )
 
-    $providerId = if ($Account.Contains('ProviderId')) { [string]$Account['ProviderId'] } else { 'gdrive' }
+    $providerId = Get-CloudTransferProviderId $Account
+    if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = 'gdrive' }
     $effectiveExpectedMd5 = ''
     if (-not [string]::IsNullOrWhiteSpace($ExpectedMd5Hash)) {
         $effectiveExpectedMd5 = $ExpectedMd5Hash.Trim().ToLowerInvariant()
@@ -1167,7 +1171,7 @@ function Start-CloudTransfer {
     $logBuffer = [System.Collections.Generic.List[string]]::new()
     $errorBuffer = [System.Collections.Generic.List[string]]::new()
 
-    $isLoopbackStaging = ($DestinationAccount.ContainsKey('ProviderId') -and $DestinationAccount.ProviderId -eq 'terabox')
+    $isLoopbackStaging = ((Get-CloudTransferProviderId $DestinationAccount) -eq 'terabox')
 
     $jobRecord = [ordered]@{
         JobId = $jobId
@@ -1288,7 +1292,7 @@ function Get-CloudTransferStatus {
                     $cleanItemName = [System.IO.Path]::GetFileName([string]$job.SourcePath.Replace('/', '\').TrimEnd('\'))
                     $destItemName = if ($cleanItemName) { $cleanItemName } else { [string]$job.SourcePath }
                     $destFullPath = if ($job.DestinationPath) { Normalize-CloudPath "$($job.DestinationPath)/$destItemName" } else { $destItemName }
-                    $localSource = if ($job.ContainsKey('SourcePath')) { [string]$job.SourcePath } else { '' }
+                    $localSource = [string](Get-CloudTransferFieldValue $job 'SourcePath')
                     $vRes = Test-RemoteCloudFileVerification -Account $job.DestinationAccount -RemotePath $destFullPath -ExpectedSizeBytes ([int64]$job.TotalBytes) -LocalSourcePath $localSource
                     if ($vRes -and $vRes['Verified']) {
                         $job.Status = 'Remotely confirmed'
@@ -1332,8 +1336,16 @@ function Get-CloudTransferStatus {
         Mode = $job.Mode
         IsServerSide = $job.IsServerSide
         IsLoopbackStaging = $isLoopback
-        SourceAccount = $job.SourceAccount.DisplayName
-        DestinationAccount = $job.DestinationAccount.DisplayName
+        SourceAccount = if ($job.SourceAccount) {
+            $name = [string](Get-CloudTransferFieldValue $job.SourceAccount 'DisplayName')
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = [string](Get-CloudTransferFieldValue $job.SourceAccount 'Id') }
+            $name
+        } else { '' }
+        DestinationAccount = if ($job.DestinationAccount) {
+            $name = [string](Get-CloudTransferFieldValue $job.DestinationAccount 'DisplayName')
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = [string](Get-CloudTransferFieldValue $job.DestinationAccount 'Id') }
+            $name
+        } else { '' }
         SourcePath = $job.SourcePath
         DestinationPath = $job.DestinationPath
         BytesTransferred = $job.BytesTransferred
@@ -1348,8 +1360,8 @@ function Get-CloudTransferStatus {
         StartTime = $job.StartTime
         EndTime = $job.EndTime
         LastError = $job.LastError
-        RemoteHash = if ($job.ContainsKey('RemoteHash')) { [string]$job['RemoteHash'] } else { '' }
-        VerificationType = if ($job.ContainsKey('VerificationType')) { [string]$job['VerificationType'] } else { '' }
+        RemoteHash = [string](Get-CloudTransferFieldValue $job 'RemoteHash')
+        VerificationType = [string](Get-CloudTransferFieldValue $job 'VerificationType')
         RecentLogs = @($job.RecentLogs)
         RecentErrors = @($job.RecentErrors)
     }
@@ -1507,10 +1519,10 @@ function ConvertTo-TransferAccountSnapshot {
 
 function Resolve-TransferAccountSnapshot {
     [CmdletBinding()]
-    param([AllowNull()][hashtable]$Snapshot)
+    param([AllowNull()][System.Collections.IDictionary]$Snapshot)
 
     if ($null -eq $Snapshot) { return @{} }
-    $accountId = if ($Snapshot.ContainsKey('Id')) { [string]$Snapshot['Id'] } else { '' }
+    $accountId = [string](Get-CloudTransferFieldValue $Snapshot 'Id')
     if ($accountId -and (Get-Command Get-CloudAccount -ErrorAction SilentlyContinue)) {
         try {
             $storedAccount = Get-CloudAccount -AccountId $accountId
@@ -1994,10 +2006,12 @@ function Add-CloudTransferFolderBatch {
     $batchId = "batch_" + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $rootLen = $cleanSourceRoot.Length
 
-    $srcAccId = if ($SourceAccount.ContainsKey('Id')) { [string]$SourceAccount['Id'] } else { '' }
-    $srcProvId = if ($SourceAccount.ContainsKey('ProviderId')) { [string]$SourceAccount['ProviderId'] } else { 'local' }
-    $dstAccId = if ($DestinationAccount.ContainsKey('Id')) { [string]$DestinationAccount['Id'] } else { '' }
-    $dstProvId = if ($DestinationAccount.ContainsKey('ProviderId')) { [string]$DestinationAccount['ProviderId'] } else { 'gdrive' }
+    $srcAccId = [string](Get-CloudTransferFieldValue $SourceAccount 'Id')
+    $srcProvId = Get-CloudTransferProviderId $SourceAccount
+    if ([string]::IsNullOrWhiteSpace($srcProvId)) { $srcProvId = 'local' }
+    $dstAccId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
+    $dstProvId = Get-CloudTransferProviderId $DestinationAccount
+    if ([string]::IsNullOrWhiteSpace($dstProvId)) { $dstProvId = 'gdrive' }
 
     # Streaming recursive enumeration using [System.IO.Directory]::EnumerateFiles
     # Avoids loading entire tree into memory for folders with thousands of files
@@ -2005,8 +2019,9 @@ function Add-CloudTransferFolderBatch {
     $createdJobs = [System.Collections.Generic.List[hashtable]]::new()
     $knownTransferKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($existingJob in @($script:CloudTransferQueue)) {
-        if ($existingJob.ContainsKey('TransferKey') -and $existingJob['TransferKey']) {
-            $knownTransferKeys.Add([string]$existingJob['TransferKey']) | Out-Null
+        $tk = [string](Get-CloudTransferFieldValue $existingJob 'TransferKey')
+        if ($tk) {
+            $knownTransferKeys.Add($tk) | Out-Null
         }
     }
     $totalBatchBytes = 0L
@@ -2469,9 +2484,9 @@ function Add-CloudTransferQueueItem {
     $cleanSrc = Normalize-CloudPath -Path $SourcePath
     $fileName = if ($cleanSrc.Contains('/')) { $cleanSrc.Substring($cleanSrc.LastIndexOf('/') + 1) } else { $cleanSrc }
 
-    $srcAccId = if ($SourceAccount.ContainsKey('Id')) { [string]$SourceAccount['Id'] } else { '' }
-    $dstAccId = if ($DestinationAccount.ContainsKey('Id')) { [string]$DestinationAccount['Id'] } else { '' }
-    $dstProvId = if ($DestinationAccount.ContainsKey('ProviderId')) { [string]$DestinationAccount['ProviderId'] } else { '' }
+    $srcAccId = [string](Get-CloudTransferFieldValue $SourceAccount 'Id')
+    $dstAccId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
+    $dstProvId = Get-CloudTransferProviderId $DestinationAccount
 
     $operation = Resolve-CloudTransferOperation `
         -SourceAccount $SourceAccount `
@@ -3033,6 +3048,9 @@ function Get-CloudTransferPendingSummary {
 
     foreach ($item in $StagedFiles) {
         if ($null -eq $item) { continue }
+        if ($item -is [System.Collections.ICollection] -and $item -isnot [string] -and $item -isnot [System.Collections.IDictionary]) {
+            if ($item.Count -eq 0) { continue }
+        }
         $accountId = ''
         $logicalPath = ''
         $path = ''
@@ -3055,6 +3073,7 @@ function Get-CloudTransferPendingSummary {
             if ($item.PSObject.Properties['LastWriteTimeUtc']) { $stagedWriteRaw = $item.LastWriteTimeUtc }
         }
         if (-not $accountId -or -not $logicalPath) {
+            if (-not $path -and -not $logicalPath) { continue }
             # Do not merge records when account/path identity is incomplete.
             $identity = if ($path) { "staged|$($path.ToLowerInvariant())" } else { "staged|$([Guid]::NewGuid().ToString('N'))" }
         } else {
