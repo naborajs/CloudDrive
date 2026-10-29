@@ -2711,7 +2711,7 @@ $h4 = New-HelpSectionCard 'Lightweight Performance & Resource Footprint' "NS Clo
 $helpPerfCard = $h4.Card; $helpPerfTitle = $h4.Title; $helpPerfText = $h4.Text
 $helpContent.Children.Add($helpPerfCard) | Out-Null
 
-$hAbout = New-HelpSectionCard 'About NS Cloud Drive' "NS Cloud Drive`nDeveloped by NABORAJ SARKAR`nCopyright $([char]0x00A9) 2026 NABORAJ SARKAR. All rights reserved.`nLicense: Source-Available (Non-Commercial Redistribution)`n`nRepository & Issue Tracker: https://github.com/naborajs/CloudDrive`nDeveloper Contact: nishant.ns.business@gmail.com`n`nA high-performance Windows desktop application mounting Google Drive and TeraBox accounts as virtual drives with local SSD staging, jitter-free transfer telemetry, and adaptive bandwidth management."
+$hAbout = New-HelpSectionCard 'About NS Cloud Drive' "NS Cloud Drive`nDeveloped by NABORAJ SARKAR`nCopyright $([char]0x00A9) 2026 NABORAJ SARKAR. All rights reserved.`nLicense: Source-Available (Non-Commercial Redistribution)`n`nRepository & Issue Tracker: https://github.com/naborajs/CloudDrive`nCommunity Discussions: https://github.com/naborajs/CloudDrive/discussions/1`nDeveloper Contact: nishant.ns.business@gmail.com`n`nA high-performance Windows desktop application mounting Google Drive and TeraBox accounts as virtual drives with local SSD staging, jitter-free transfer telemetry, and adaptive bandwidth management."
 $helpAboutCard = $hAbout.Card; $helpAboutTitle = $hAbout.Title; $helpAboutText = $hAbout.Text
 $helpContent.Children.Add($helpAboutCard) | Out-Null
 
