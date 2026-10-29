@@ -15,7 +15,7 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-blue.svg)](#system-requirements)
 [![Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20WPF-purple.svg)](#architecture--technology-stack)
 [![VFS Engine](https://img.shields.io/badge/VFS%20Engine-rclone%20%2B%20WinFsp-orange.svg)](#architecture--technology-stack)
-[![License](https://img.shields.io/badge/License-Proprietary%20%2F%20All%20Rights%20Reserved-red.svg)](#developer-attribution--license)
+[![License: Source-Available](https://img.shields.io/badge/License-Source--Available%20(Non--Commercial)-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing%20(100%25%20Verified)-brightgreen.svg)](#automated-test-suites)
 
 ---
@@ -42,7 +42,8 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 17. [Troubleshooting & FAQ](#troubleshooting--faq)
 18. [Known Limitations](#known-limitations)
 19. [Contributing](#contributing)
-20. [Developer Attribution & License](#developer-attribution--license)
+20. [License & Permitted Use](#license--permitted-use)
+21. [Questions, Suggestions, and Contact](#questions-suggestions-and-contact)
 
 ---
 
@@ -349,15 +350,36 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-BackendCorr
 
 Contributions, bug reports, and suggestions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards, strict mode guidelines, and PR procedures.
 
+By contributing to NS Cloud Drive, you agree that your contributions will be licensed under the project's [NS Cloud Drive Source-Available, Non-Commercial Redistribution License](LICENSE).
+
 ---
 
-## Developer Attribution & License
+## License & Permitted Use
 
-**NS Cloud Drive**  
-Designed and Developed by **NABORAJ SARKAR**  
-Copyright © 2026 NABORAJ SARKAR. All rights reserved.
+**NS Cloud Drive** is licensed under the custom **NS Cloud Drive Source-Available, Non-Commercial Redistribution License**.
 
-For commercial licensing, enterprise deployment inquiries, or feature partnerships, please contact:  
-**NABORAJ SARKAR**  
-Email: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)  
-GitHub: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
+### Plain English Summary:
+- **Public & Source-Available**: The complete source code is publicly accessible for learning, study, inspection, academic research, and personal use free of charge.
+- **Permitted Modification**: You may freely modify the source code and build derivative versions for personal, educational, or internal operational use.
+- **Free Redistribution & Community Forks**: You may share, redistribute, and publish copies of the original or modified code free of charge, provided that:
+  1. All copies preserve the original copyright notice (`Copyright © 2026 NABORAJ SARKAR. All rights reserved.`), the full [LICENSE](LICENSE) text, and the official repository URL ([https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)).
+  2. Prominent author attribution to **NABORAJ SARKAR** is retained in all distributions, documentation, and user interfaces.
+  3. Derivative works are clearly identified as modified forks and are not misrepresented as the official NS Cloud Drive product.
+  4. No one may falsely claim or imply original authorship of this software.
+- **Commercial Restrictions**: You may **NOT** sell, rent, monetize, charge access fees for, or commercially redistribute this software or any derivative works without prior express written permission from NABORAJ SARKAR.
+- **Permitted Internal Use**: Businesses and organizations may run and use NS Cloud Drive internally for their own operations free of charge, provided they do not resell or commercially redistribute it to third parties.
+- **Not OSI-Approved Open Source**: This is a source-available license with non-commercial restrictions, not an Open Source Initiative (OSI) approved open-source license.
+- **Commercial Licensing**: Anyone interested in commercial distribution, white-labeling, or resale authorization should contact the copyright holder directly.
+
+For the full legal terms, please read the complete [LICENSE](LICENSE) file.
+
+---
+
+## Questions, Suggestions, and Contact
+
+If you have questions, suggestions, feedback, or want to discuss contributing to NS Cloud Drive, please open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
+
+- **Official Repository**: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
+- **Issue Tracker & Discussions**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
+- **Developer & Copyright Holder**: **NABORAJ SARKAR**
+- **Contact Email**: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)
