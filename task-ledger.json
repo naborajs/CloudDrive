@@ -46,6 +46,11 @@
       "date": "2026-10-30",
       "decision": "Formalize v1.0.0 Official Release closure. All subsequent features, optimizations, and provider additions (such as Proton Drive) transition to v1.1.0 Next Releases roadmap.",
       "rationale": "Owner officially signed off on v1.0.0 production deployment."
+    },
+    {
+      "date": "2026-10-30",
+      "decision": "Synchronize official Community Discussion Hub link (https://github.com/naborajs/CloudDrive/discussions/1) across README, CONTRIBUTING, USER_GUIDE, in-app Help card, and GitHub Release notes.",
+      "rationale": "Directs community questions, feature requests, and provider proposals to Discussion #1."
     }
   ],
   "reviewFindings": [
