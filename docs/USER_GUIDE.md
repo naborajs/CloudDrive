@@ -114,3 +114,12 @@ The **Logs** view offers full transparency into application events, provider ses
 - **Severity & Account Filtering**: Filter events by `Info`, `Warning`, or `Error`, or isolate logs for a specific cloud account.
 - **Local Bounded Storage**: Logs are stored strictly on your local machine in `%LOCALAPPDATA%\NSCloudDrive\logs` and automatically rotate at 2 MB to prevent unbounded disk usage.
 - **Zero Remote Telemetry**: NS Cloud Drive never transmits log files, personal filenames, or diagnostic traces to external third-party servers.
+
+---
+
+## 7. Community Discussion & Support
+
+Have questions about setup, configuration, or want to suggest new features for future releases?
+- **Community Discussion Hub**: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)
+- **Issue Tracker**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
+- **Official Repository**: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
