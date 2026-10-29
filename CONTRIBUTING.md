@@ -93,8 +93,9 @@ By submitting pull requests or contributing to this repository:
 
 ## Questions, Suggestions & Contact
 
-If you have questions, suggestions, feedback, or want to discuss contributing to NS Cloud Drive, please open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
+If you have questions, suggestions, feedback, or want to discuss contributing or proposing features for NS Cloud Drive, please join our community discussion or open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
 
 - **Repository**: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
+- **Community Discussion Hub**: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)
 - **Issue Tracker**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
 - **Developer**: **NABORAJ SARKAR** ([nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com))
