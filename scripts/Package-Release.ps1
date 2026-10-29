@@ -47,9 +47,21 @@ Copy-Item -LiteralPath $exePath -Destination $stageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'NSCloudDrive.exe.sha256') -Destination $stageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $stageDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $stageDir
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'CONTRIBUTING.md')) {
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'CONTRIBUTING.md') -Destination $stageDir
+}
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'NSCloudDrive.cmd')) {
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'NSCloudDrive.cmd') -Destination $stageDir
+}
 Copy-Item -LiteralPath (Join-Path $repoRoot 'src') -Destination $stageDir -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'assets') -Destination $stageDir -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs') -Destination $stageDir -Recurse
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'lib')) {
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'lib') -Destination $stageDir -Recurse
+}
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'config')) {
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'config') -Destination $stageDir -Recurse
+}
 
 # 4. Create ZIP archive
 Write-Host "Creating zip archive: $zipFile..." -ForegroundColor Green
