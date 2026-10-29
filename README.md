@@ -10,13 +10,25 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 
 ---
 
-![NS Cloud Drive](assets/logos/clouddrive.png)
+<p align="center">
+  <img src="assets/logos/clouddrive.png" alt="NS Cloud Drive Logo" width="110" />
+</p>
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-blue.svg)](#system-requirements)
-[![Framework](https://img.shields.io/badge/.NET%20Framework-4.8%20WPF-purple.svg)](#architecture--technology-stack)
-[![VFS Engine](https://img.shields.io/badge/VFS%20Engine-rclone%20%2B%20WinFsp-orange.svg)](#architecture--technology-stack)
-[![License: Source-Available](https://img.shields.io/badge/License-Source--Available%20(Non--Commercial)-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing%20(100%25%20Verified)-brightgreen.svg)](#automated-test-suites)
+<p align="center">
+  <a href="#system-requirements"><img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64--bit)-blue.svg" alt="Platform" /></a>
+  <a href="#architecture--technology-stack"><img src="https://img.shields.io/badge/.NET%20Framework-4.8%20WPF-purple.svg" alt="Framework" /></a>
+  <a href="#architecture--technology-stack"><img src="https://img.shields.io/badge/VFS%20Engine-rclone%20%2B%20WinFsp-orange.svg" alt="VFS Engine" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Source--Available%20(Non--Commercial)-blue.svg" alt="License" /></a>
+  <a href="#automated-test-suites"><img src="https://img.shields.io/badge/Build-Passing%20(100%25%20Verified)-brightgreen.svg" alt="Build Status" /></a>
+</p>
+
+<p align="center">
+  <a href="assets/screenshots/06_windows_explorer_mounts.png">
+    <img src="assets/screenshots/06_windows_explorer_mounts.png" alt="NS Cloud Drive - Live Virtual Drives in Windows 11 File Explorer" width="920" />
+  </a>
+  <br />
+  <em><strong>Live System Evidence:</strong> Real-world multi-cloud integration active on Windows 11. Google Drive (G:) (4.98 TB) and dual TeraBox accounts (I:, T:) (1.00 TB each) mounted concurrently as native local disk volumes with live storage meters and authentic provider branding.</em>
+</p>
 
 ---
 
@@ -61,15 +73,21 @@ Unlike sync clients that mirror your entire cloud storage to an expensive local 
 > For a comprehensive, step-by-step walkthrough of all features and screens, see the [Visual User Guide](docs/USER_GUIDE.md).
 
 <p align="center">
+  <img src="assets/screenshots/06_windows_explorer_mounts.png" alt="NS Cloud Drive - Windows 11 File Explorer Multi-Account Integration" width="920" />
+  <br />
+  <em>Figure 1: Windows 11 File Explorer Integration — Multiple cloud accounts (Google Drive G: and TeraBox I:, T:) operating natively as local Windows storage drives with dynamic capacity meters and immediate file access.</em>
+</p>
+
+<p align="center">
   <img src="assets/screenshots/01_disks_dashboard.png" alt="NS Cloud Drive - Multi-Account Disks Dashboard" width="900" />
   <br />
-  <em>Figure 1: Native Disks Dashboard — Simultaneous multi-account mounting (Google Drive and TeraBox), live health indicators, and one-click cloud drive management.</em>
+  <em>Figure 2: Native Disks Dashboard — Simultaneous multi-account mounting (Google Drive and TeraBox), live health indicators, and one-click cloud drive management.</em>
 </p>
 
 <p align="center">
   <img src="assets/screenshots/05_transfer_center.png" alt="NS Cloud Drive - Transfer Center & Verification" width="850" />
   <br />
-  <em>Figure 2: Transfer Center & History — Durable queue management, cryptographic confirmation (MD5 / SHA-1 hashes), and remote lifecycle verification.</em>
+  <em>Figure 3: Transfer Center & History — Durable queue management, cryptographic confirmation (MD5 / SHA-1 hashes), and remote lifecycle verification.</em>
 </p>
 
 ---
