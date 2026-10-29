@@ -1,9 +1,103 @@
+NS Cloud Drive Source-Available, Non-Commercial Redistribution License
 Copyright (c) 2026 NABORAJ SARKAR. All rights reserved.
 
-NS Cloud Drive
-Developed by NABORAJ SARKAR
-Email: nishant.ns.business@gmail.com
-GitHub: https://github.com/naborajs/CloudDrive
+Official Project: NS Cloud Drive
+Official Repository: https://github.com/naborajs/CloudDrive
+Contact / Inquiries: nishant.ns.business@gmail.com
 
-All rights reserved. Unauthorized copying, reverse engineering, redistribution,
-or public deployment of this software without explicit permission is strictly prohibited.
+================================================================================
+1. GRANT OF LICENSE FOR PERMITTED USES
+================================================================================
+
+Subject to the terms and conditions of this License, the copyright holder,
+NABORAJ SARKAR ("Licensor"), hereby grants to any person or entity obtaining a
+copy of this software and associated documentation files (the "Software") a free,
+worldwide, non-exclusive, non-transferable, revocable-for-breach license to:
+
+  a) Inspect, study, learn from, evaluate, and run the Software free of charge
+     for personal, educational, academic, non-commercial, and internal
+     organizational purposes;
+  b) Modify, adapt, translate, and create derivative works based upon the
+     Software; and
+  c) Redistribute, publish, share, and fork copies of the Software (or any
+     derivative works thereof) free of charge, strictly subject to the conditions
+     and restrictions set forth in Sections 2, 3, and 4 below.
+
+================================================================================
+2. ATTRIBUTION AND PRESERVATION OF NOTICES
+================================================================================
+
+Any redistribution of the Software or any portion thereof, whether in source
+code or compiled binary form, with or without modification, must satisfy all of
+the following conditions:
+
+  a) PRESERVATION OF NOTICES: All copies must retain the above copyright notice,
+     this full License text, and the official repository link
+     (https://github.com/naborajs/CloudDrive).
+  b) PROMINENT AUTHOR ATTRIBUTION: All distributions, user interfaces, documentation,
+     and "About" dialogs that display developer credits must prominently credit
+     NABORAJ SARKAR as the original author and creator of NS Cloud Drive.
+  c) DERIVATIVE IDENTIFICATION: Any modified or derivative version must be clearly
+     and visibly identified as a modified fork. You may not misrepresent an
+     unofficial modification or fork as the official NS Cloud Drive release, nor
+     may you use the name "NS Cloud Drive" or the author's name to endorse or
+     promote derivative products without prior written permission.
+  d) NO FALSE CLAIMS OF AUTHORSHIP: You may not remove, obscure, or alter any
+     author attribution, nor may you falsely claim or imply that you or any other
+     party originally created the Software or its core architecture.
+
+================================================================================
+3. COMMERCIAL RESTRICTIONS AND PROHIBITED USES
+================================================================================
+
+The following activities are strictly prohibited without prior express written
+authorization from NABORAJ SARKAR:
+
+  a) NO PAID DISTRIBUTION OR RESALE: You may NOT sell, rent, lease, sublicense,
+     monetize, or charge any fee (including access fees, subscription fees,
+     paywalls, download fees, or bundling charges) for the Software, copies of the
+     Software, or any modified or derivative works thereof.
+  b) NO COMMERCIAL REDISTRIBUTION: You may NOT redistribute the Software or any
+     derivative work as part of a commercial product, service, SaaS platform,
+     commercial installer, or paid distribution channel without a separate
+     commercial license.
+  c) PERMITTED INTERNAL USE: Organizations, companies, and commercial entities
+     may run and use the Software internally for their own operations free of
+     charge, provided they do not resell, commercially redistribute, or charge
+     third parties for access to the Software.
+
+Any commercial use, distribution, or monetization not expressly permitted by this
+License requires a separate written commercial agreement with NABORAJ SARKAR.
+For inquiries, please contact: nishant.ns.business@gmail.com.
+
+================================================================================
+4. NATURE OF THIS LICENSE
+================================================================================
+
+This is a source-available, non-commercial redistribution license. Because it
+contains restrictions on commercial distribution and resale, it is NOT an
+Open Source Initiative (OSI) approved open-source license, nor is it a Free
+Software Foundation (FSF) free software license. It is designed to ensure that
+NS Cloud Drive remains publicly accessible, auditable, and freely usable by the
+community while protecting the author from unauthorized commercial exploitation
+and rebranding.
+
+================================================================================
+5. TERMINATION
+================================================================================
+
+This license and the rights granted hereunder will terminate automatically if
+you fail to comply with any of its terms or conditions. Upon termination, you
+must cease all use, reproduction, modification, and distribution of the Software.
+
+================================================================================
+6. DISCLAIMER OF WARRANTY AND LIMITATION OF LIABILITY
+================================================================================
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHOR, COPYRIGHT HOLDER, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES,
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
