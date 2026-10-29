@@ -377,3 +377,29 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-DesktopUIRe
 | Two accounts merged into one card | `Get-CloudAccounts` return shape — must emit individual records, not `return ,$list` |
 | Legacy mount attributed to saved account | `Get-CachedUiDriveStatus` — must reject cached status whose AccountId/DriveLetter contradicts the requested identity |
 | Sign-in window closes without saving | `Show-TeraBoxEmbeddedLoginWindow` `Add_Closing` — checks `LoginCompleted` and existing DPAPI session |
+| OrderedDictionary `ContainsKey` runtime error | `Get-CloudAccountTransferRemoteEnvironment` — use `Get-CloudTransferFieldValue` or safe `IDictionary` indexer, never `.ContainsKey()` |
+| Phantom "1 file remaining" on idle restart | `VirtualDriveManager.ps1` — check array unboxing; use `return @()` instead of unary comma `return ,@()` |
+
+---
+
+## Future Provider Expansion Blueprint: Proton Drive (Phase 15)
+
+When adding support for **Proton Drive** (`proton`), follow the strict architectural contract established in [`src/providers/ProviderContract.ps1`](../../../src/providers/ProviderContract.ps1):
+
+### 1. Architectural Contract Implementation (`src/providers/ProtonDriveProvider.ps1`)
+Any Proton Drive integration must implement the 7 contract methods before UI registration:
+- `Get-ProtonDriveProviderInfo`: Reports capability flags (`SupportsOAuth = $false`, `SupportsManualSession = $true`, `SupportsQuota = $true`, `SupportsMultipleAccounts = $true`).
+- `Test-ProtonDriveBackendSession`: Authenticates via rclone's native `protondrive` backend or Proton SRP credentials; validates identity and quota.
+- `Save-ProtonDriveSession`: Encrypts Proton 2FA/SRP tokens or session cookies using DPAPI (`ProtectedData`) with per-user ACLs under `%LOCALAPPDATA%\NSCloudDrive\credentials\`.
+- `Get-ProtonDriveStoredSession`: Retrieves decrypted session material strictly scoped to `$AccountId`.
+- `Remove-ProtonDriveSession`: Revokes and wipes credentials for `$AccountId` without cross-contaminating other accounts.
+- `Get-ProtonDriveRcloneEnvironment`: Emits isolated rclone environment variables (`RCLONE_CONFIG_<REMOTE>_TYPE=protondrive`, `RCLONE_CONFIG_<REMOTE>_USERNAME`, etc.).
+- `Get-ProtonDriveFileList`: Retrieves remote folder listings for the transfer engine.
+
+### 2. Contract Registration & UI Wiring Steps
+1. **Contract Registration**: Add `'proton'` to `RequiredNames` map in `src/providers/ProviderContract.ps1`.
+2. **Automated Verification**: Run `tests/Test-ProviderContracts.ps1` to assert all 7 functions conform to expected shapes.
+3. **UI Setup Modal**: Add `Show-ProtonDriveSetupModal` in `src/ui/ProviderConnectionWindow.ps1` with SecureString credential entry.
+4. **Provider Card & Icons**: Add Proton Drive provider card to `Show-AddCloudDiskModal` and place high-res icon in `assets/logos/protondrive.png`.
+5. **Mount & VFS Lifecycle**: Virtual drive manager routes `proton` via standard rclone VFS mount arguments with isolated mount namespaces.
+
