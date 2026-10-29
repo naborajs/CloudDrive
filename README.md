@@ -22,25 +22,27 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Key Features](#key-features)
-3. [Architecture & Technology Stack](#architecture--technology-stack)
-4. [System Requirements](#system-requirements)
-5. [Quick Start & Installation](#quick-start--installation)
-6. [Windows SmartScreen & Unsigned Binary Notice](#windows-smartscreen--unsigned-binary-notice)
-7. [Cloud Account Setup Guide](#cloud-account-setup-guide)
+2. [Visual Tour & Interface](#visual-tour--interface)
+3. [Key Features](#key-features)
+4. [Architecture & Technology Stack](#architecture--technology-stack)
+5. [System Requirements](#system-requirements)
+6. [Quick Start & Installation](#quick-start--installation)
+7. [Windows SmartScreen & Unsigned Binary Notice](#windows-smartscreen--unsigned-binary-notice)
+8. [Cloud Account Setup Guide](#cloud-account-setup-guide)
    - [Google Drive (OAuth 2.0 PKCE)](#google-drive-setup)
    - [TeraBox (Bridge Mode)](#terabox-setup)
-8. [Transfer Engine & Telemetry](#transfer-engine--telemetry)
-9. [Adaptive Bandwidth & Gaming Optimization](#adaptive-bandwidth--gaming-optimization)
-10. [Cache Management & Inactivity TTL](#cache-management--inactivity-ttl)
-11. [Desktop UI & Theme System](#desktop-ui--theme-system)
-12. [Memory Optimization & System Tray](#memory-optimization--system-tray)
-13. [Security, Privacy & DPAPI Storage](#security-privacy--dpapi-storage)
-14. [Automated Test Suites](#automated-test-suites)
-15. [Troubleshooting & FAQ](#troubleshooting--faq)
-16. [Known Limitations](#known-limitations)
-17. [Contributing](#contributing)
-18. [Developer Attribution & License](#developer-attribution--license)
+9. [Transfer Engine & Telemetry](#transfer-engine--telemetry)
+10. [On-Demand Analytics & Performance Monitoring](#on-demand-analytics--performance-monitoring)
+11. [Adaptive Bandwidth & Gaming Optimization](#adaptive-bandwidth--gaming-optimization)
+12. [Cache Management & Inactivity TTL](#cache-management--inactivity-ttl)
+13. [Desktop UI & Theme System](#desktop-ui--theme-system)
+14. [Memory Optimization & System Tray](#memory-optimization--system-tray)
+15. [Security, Privacy & DPAPI Storage](#security-privacy--dpapi-storage)
+16. [Automated Test Suites](#automated-test-suites)
+17. [Troubleshooting & FAQ](#troubleshooting--faq)
+18. [Known Limitations](#known-limitations)
+19. [Contributing](#contributing)
+20. [Developer Attribution & License](#developer-attribution--license)
 
 ---
 
@@ -49,6 +51,25 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 **NS Cloud Drive** transforms your cloud storage accounts (Google Drive and TeraBox) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
 
 Unlike sync clients that mirror your entire cloud storage to an expensive local hard drive, NS Cloud Drive uses a high-speed SSD staging and read-ahead cache. Files stream seamlessly when opened, and newly written files are safely staged locally before uploading to the cloud in the background.
+
+---
+
+## Visual Tour & Interface
+
+> [!TIP]
+> For a comprehensive, step-by-step walkthrough of all features and screens, see the [Visual User Guide](docs/USER_GUIDE.md).
+
+<p align="center">
+  <img src="assets/screenshots/01_disks_dashboard.png" alt="NS Cloud Drive - Multi-Account Disks Dashboard" width="900" />
+  <br />
+  <em>Figure 1: Native Disks Dashboard — Simultaneous multi-account mounting (Google Drive and TeraBox), live health indicators, and one-click cloud drive management.</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/05_transfer_center.png" alt="NS Cloud Drive - Transfer Center & Verification" width="850" />
+  <br />
+  <em>Figure 2: Transfer Center & History — Durable queue management, cryptographic confirmation (MD5 / SHA-1 hashes), and remote lifecycle verification.</em>
+</p>
 
 ---
 
@@ -202,6 +223,22 @@ The NS Cloud Drive transfer engine provides real-time streaming telemetry and co
 
 ---
 
+## On-Demand Analytics & Performance Monitoring
+
+NS Cloud Drive provides a built-in diagnostics monitor designed with zero idle CPU overhead:
+- **Zero Background Polling**: Diagnostic metrics and hardware counters are collected strictly on-demand when navigating to the Analytics tab.
+- **Per-Mount Health Diagnostics**: Real-time responsiveness testing for each mounted virtual filesystem root (`WinFsp NTFS`).
+- **Network Latency & Throughput Probes**: Live round-trip ICMP ping and provider response timing to prevent bufferbloat.
+- **Hardware Footprint Transparency**: Direct visibility into process memory, working set size, and local cache quota pressure.
+
+<p align="center">
+  <img src="assets/screenshots/03_analytics_dashboard.png" alt="NS Cloud Drive - On-Demand Analytics Dashboard" width="900" />
+  <br />
+  <em>Figure 3: On-Demand Analytics — Real-time mount health breakdown, latency probes, SSD cache pressure, and host hardware footprint.</em>
+</p>
+
+---
+
 ## Adaptive Bandwidth & Gaming Optimization
 
 NS Cloud Drive ensures cloud synchronization never interrupts competitive gaming, video conferencing, or high-definition streaming:
@@ -231,6 +268,12 @@ NS Cloud Drive features a responsive Windows Presentation Foundation (WPF) inter
 - **Translucent Liquid Glass**: Windows DWM acrylic material backdrop with subtle blur effects (supported via settings configuration and CLI).
 - **Pure White (`#F8FAFC`)**: Clean, crisp light theme with refined typography and contrast.
 
+<p align="center">
+  <img src="assets/screenshots/02_options_themes.png" alt="NS Cloud Drive - Options and Theme Configuration" width="900" />
+  <br />
+  <em>Figure 4: Options & Preferences — Instant theme selection, SSD staging cache thresholds, Explorer integration, and Windows startup settings.</em>
+</p>
+
 ---
 
 ## Memory Optimization & System Tray
@@ -248,6 +291,12 @@ NS Cloud Drive is engineered to run permanently in the background without wastin
 - **Strict File Access Control Lists (ACLs)**: Credential files are restricted exclusively to the active Windows User SID (`Disable-AccountInheritance`), blocking unauthorized access from other local accounts.
 - **Redacted Diagnostics**: The logging framework automatically scrubs OAuth tokens, session cookies, and private tokens before writing to disk.
 - **Zero Insecure Shell Execution**: Replaced all unmanaged ThreadPool script blocks with compiled C# thread workers to prevent runspace termination.
+
+<p align="center">
+  <img src="assets/screenshots/04_logs_diagnostics.png" alt="NS Cloud Drive - Security Audit & Diagnostic Logs" width="900" />
+  <br />
+  <em>Figure 5: Security & Audit Log Viewer — Real-time sanitized logging, per-account event tracing, severity filtering, and privacy retention rules.</em>
+</p>
 
 ---
 
