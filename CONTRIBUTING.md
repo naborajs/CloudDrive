@@ -80,7 +80,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Executab
 
 ---
 
-## Reporting Issues & Feature Requests
+## Licensing & Intellectual Property
 
-- **Bug Reports**: Open an issue at [GitHub Issues](https://github.com/naborajs/CloudDrive/issues/new) using the Bug Report template.
-- **Contact**: For project inquiries, reach out to NABORAJ SARKAR at `nishant.ns.business@gmail.com`.
+NS Cloud Drive is released under the **NS Cloud Drive Source-Available, Non-Commercial Redistribution License** (see [LICENSE](LICENSE)).
+
+By submitting pull requests or contributing to this repository:
+1. You agree that all contributions will be licensed under the project's Source-Available License.
+2. You confirm that all code you submit is your own original work or is provided under compatible terms with appropriate third-party notices.
+3. You acknowledge that NS Cloud Drive is a source-available project with non-commercial restrictions, not an OSI-approved open-source license.
+
+---
+
+## Questions, Suggestions & Contact
+
+If you have questions, suggestions, feedback, or want to discuss contributing to NS Cloud Drive, please open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
+
+- **Repository**: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
+- **Issue Tracker**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
+- **Developer**: **NABORAJ SARKAR** ([nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com))
