@@ -189,7 +189,7 @@ Commercial Extended Validation (EV) code-signing certificates cost hundreds of d
 Get-FileHash -Path .\NSCloudDrive.exe -Algorithm SHA256
 ```
 Verified Release Hash:
-`94D9407D323DA6DFDC8617631C31B0A5DCA42A316069388C81FDA353707269DC`
+`0DE503E5671C66DBC5BABBD18960F13BA879DA5A233429B04395C97F860E87EE`
 
 ---
 
