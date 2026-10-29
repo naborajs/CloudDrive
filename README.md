@@ -6,6 +6,7 @@ Developed by **NABORAJ SARKAR**
 Copyright © 2026 NABORAJ SARKAR. All rights reserved.  
 Contact: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)  
 Repository: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)  
+Community Discussion: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)  
 Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://github.com/naborajs/CloudDrive/issues/new)
 
 ---
@@ -45,6 +46,7 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 | **`NSCloudDrive.exe`** | 64-bit Standalone Launcher (High-DPI, AppUserModelID, zero-console) | [⬇️ **Download EXE**](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive.exe) | [SHA-256](NSCloudDrive.exe.sha256) |
 | **`NSCloudDrive-v1.0.0-Windows-x64.zip`** | **Complete Portable Release** (Includes WebView2 runtime, configs, launcher, and docs) | [📦 **Download Release ZIP**](https://github.com/naborajs/CloudDrive/releases/download/v1.0.0/NSCloudDrive-v1.0.0-Windows-x64.zip) | [SHA-256](dist/NSCloudDrive-v1.0.0-Windows-x64.zip.sha256) |
 | **`GitHub Releases`** | Release notes, asset tags, and source code | [🚀 **View Release v1.0.0**](https://github.com/naborajs/CloudDrive/releases/tag/v1.0.0) | `v1.0.0` |
+| **`Community Hub`** | Feature requests, future releases, Q&A, and community chat | [💬 **Join Discussion #1**](https://github.com/naborajs/CloudDrive/discussions/1) | Active |
 
 > [!TIP]
 > **First-time users:** Download the **Complete Release ZIP**, extract it to any folder (e.g. `C:\Tools\NSCloudDrive`), and double-click **`NSCloudDrive.exe`** to start mounting your drives immediately!
@@ -422,9 +424,10 @@ For the full legal terms, please read the complete [LICENSE](LICENSE) file.
 
 ## Questions, Suggestions, and Contact
 
-If you have questions, suggestions, feedback, or want to discuss contributing to NS Cloud Drive, please open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
+If you have questions, suggestions, feedback, or want to discuss contributing or proposing new features for NS Cloud Drive, please join our community discussion or open an issue in the GitHub repository. You can also contact me directly by email at the address listed in my GitHub profile.
 
 - **Official Repository**: [https://github.com/naborajs/CloudDrive](https://github.com/naborajs/CloudDrive)
-- **Issue Tracker & Discussions**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
+- **Community Discussion Hub**: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)
+- **Issue Tracker**: [https://github.com/naborajs/CloudDrive/issues](https://github.com/naborajs/CloudDrive/issues)
 - **Developer & Copyright Holder**: **NABORAJ SARKAR**
 - **Contact Email**: [nishant.ns.business@gmail.com](mailto:nishant.ns.business@gmail.com)
