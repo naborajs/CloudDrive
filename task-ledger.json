@@ -41,6 +41,11 @@
       "date": "2026-10-30",
       "decision": "Add real-world Windows 11 Explorer multi-drive mounting screenshot to README and User Guide; scale logo to compact header.",
       "rationale": "Directly proves to prospective users and developers that NS Cloud Drive mounts Google Drive and TeraBox natively as Windows Explorer drives with authentic icons and live capacity bars."
+    },
+    {
+      "date": "2026-10-30",
+      "decision": "Formalize v1.0.0 Official Release closure. All subsequent features, optimizations, and provider additions (such as Proton Drive) transition to v1.1.0 Next Releases roadmap.",
+      "rationale": "Owner officially signed off on v1.0.0 production deployment."
     }
   ],
   "reviewFindings": [
