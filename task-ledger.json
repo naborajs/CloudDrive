@@ -36,6 +36,11 @@
       "date": "2026-10-30",
       "decision": "Commit and push each file individually per explicit user instruction.",
       "rationale": "Maintains a granular, transparent commit and push history on GitHub with a 1:1 mapping between file change and push event."
+    },
+    {
+      "date": "2026-10-30",
+      "decision": "Add real-world Windows 11 Explorer multi-drive mounting screenshot to README and User Guide; scale logo to compact header.",
+      "rationale": "Directly proves to prospective users and developers that NS Cloud Drive mounts Google Drive and TeraBox natively as Windows Explorer drives with authentic icons and live capacity bars."
     }
   ],
   "reviewFindings": [
