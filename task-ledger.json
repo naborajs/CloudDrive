@@ -1,14 +1,17 @@
 {
-  "taskId": "TASK-011",
-  "goal": "NS Cloud Drive — Capture Application Screenshots & Enhance Visual Documentation (README & Docs)",
+  "taskId": "TASK-012",
+  "goal": "NS Cloud Drive — Implement Source-Available Non-Commercial Redistribution License and Update Documentation",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Capture high-resolution, pixel-perfect PNG screenshots of the core application screens and modals: Disks Dashboard, Options & Themes, Analytics Dashboard, Logs & Diagnostics, Transfer Center & History.",
-    "2. Place all images in assets/screenshots/.",
-    "3. Embed screenshots into README.md with captions, visual tour, and structured markdown layout.",
-    "4. Create comprehensive docs/USER_GUIDE.md featuring full visual interface walkthrough.",
-    "5. Ensure full test suite passes with exit code 0 under Set-StrictMode -Version Latest (41/41 passed)."
+    "1. Implement custom NS Cloud Drive Source-Available, Non-Commercial Redistribution License in LICENSE with free personal, educational, and internal use.",
+    "2. Prohibit commercial sale, paid redistribution, charging access fees, or unauthorized rebranding without prior written authorization from Naboraj Sarkar.",
+    "3. Require strict author attribution and copyright notice preservation across all distributions and community forks.",
+    "4. Explicitly declare that the license is source-available and not an OSI-approved open-source license.",
+    "5. Update README.md with license badge, plain English summary, and required Questions, Suggestions, and Contact section.",
+    "6. Update CONTRIBUTING.md with contributor licensing agreement.",
+    "7. Update About dialog in src/NSCloudDrive.ps1 preserving 0 non-ASCII encoding rules.",
+    "8. Commit and push every single file individually to GitHub per user requirement."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -17,38 +20,40 @@
   ],
   "status": "completed",
   "filesChanged": [
-    "assets/screenshots/01_disks_dashboard.png",
-    "assets/screenshots/02_options_themes.png",
-    "assets/screenshots/03_analytics_dashboard.png",
-    "assets/screenshots/04_logs_diagnostics.png",
-    "assets/screenshots/05_transfer_center.png",
+    "LICENSE",
     "README.md",
-    "docs/USER_GUIDE.md",
+    "CONTRIBUTING.md",
+    "src/NSCloudDrive.ps1",
     "task-ledger.json"
   ],
   "decisions": [
     {
-      "date": "2026-10-29",
-      "decision": "Capture off-screen WPF screenshots using STA PowerShell and RenderTargetBitmap with full live mount and telemetry states.",
-      "rationale": "By initializing the window off-screen (-3000, -3000) and populating the live drive statuses and dispatcher frame, we capture authentic, production-quality screenshots showing all drives mounted (G:, I:, T:) without interfering with active user displays."
+      "date": "2026-10-30",
+      "decision": "Implement custom NS Cloud Drive Source-Available License instead of standard OSI open-source licenses (MIT/GPL/Apache).",
+      "rationale": "Matches owner's explicit intention: software is freely accessible to download, inspect, study, and use, but prevents commercial exploitation, resale, or rebranding under third-party names without permission."
     },
     {
-      "date": "2026-10-29",
-      "decision": "Create docs/USER_GUIDE.md as a dedicated visual user walkthrough.",
-      "rationale": "Provides open-source users with a clear, illustrated guide to every feature (Dashboard, Transfer Center, Analytics, Options, Logs) and links seamlessly from the main README."
+      "date": "2026-10-30",
+      "decision": "Commit and push each file individually per explicit user instruction.",
+      "rationale": "Maintains a granular, transparent commit and push history on GitHub with a 1:1 mapping between file change and push event."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
       "status": "APPROVED",
-      "findings": "All 5 screenshots verified pixel-perfect; UTF-8 glyph encoding rules preserved ([char]0x...); markdown links verified; test suite 100% passing."
+      "findings": "All legal terms verified; third-party notices untouched; encoding compliance strictly maintained (0 non-ASCII bytes in NSCloudDrive.ps1); links verified; contact email verified."
     }
   ],
   "testResults": [
     { "suite": "tests/Run-AllTests.ps1", "status": "passed", "exitCode": 0, "total": 41, "passed": 41, "failed": 0 }
   ],
   "securityFindings": [],
-  "commitRefs": [],
+  "commitRefs": [
+    "f3e1fc0",
+    "e4eed68",
+    "e52c128",
+    "baaec77"
+  ],
   "blockers": []
 }
