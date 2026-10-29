@@ -44,6 +44,8 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-StagedVfsQueueAdoption.ps1'),
     (Join-Path $PSScriptRoot 'Test-TransferAdoptionToWorkerE2E.ps1'),
     (Join-Path $PSScriptRoot 'Test-TransferDirectionAndIdentity.ps1'),
+    (Join-Path $PSScriptRoot 'Test-OrderedDictionaryAccountTransfer.ps1'),
+    (Join-Path $PSScriptRoot 'Test-EmptyPendingUploadsSummary.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
 )
 

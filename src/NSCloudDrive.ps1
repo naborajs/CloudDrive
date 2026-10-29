@@ -9200,8 +9200,31 @@ function Start-ApplicationStartupSequence {
     }
     try { Start-StartupCacheRecoveryWorker } catch { }
     try {
-        Invoke-StartupTransferQueueRecovery | Out-Null
+        $recoverySummary = Invoke-StartupTransferQueueRecovery
         $script:TransferQueueStateUnavailable = $false
+
+        # Notify user if any transfers were interrupted across application/system restart
+        $hasInterrupted = $false
+        if ($recoverySummary -and [int]$recoverySummary.ResetCount -gt 0) {
+            $hasInterrupted = $true
+        } else {
+            try {
+                $qRes = if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) { Get-CloudTransferQueue } else { $null }
+                $checkQ = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) { @($qRes[0]) } elseif ($null -ne $qRes) { @($qRes) } else { @() }
+                $hasInterrupted = ($checkQ | Where-Object {
+                    $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
+                    $_['Status'] -in @('Waiting for network/provider', 'Awaiting remote confirmation', 'Needs attention: remote verification unavailable')
+                }).Count -gt 0
+            } catch { }
+        }
+
+        if ($hasInterrupted) {
+            try {
+                if ($notifyIcon) {
+                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Transfer Interrupted", "Transfer interrupted by restart. Please re-upload your files.", [System.Windows.Forms.ToolTipIcon]::Warning)
+                }
+            } catch { }
+        }
     } catch {
         $script:TransferQueueStateUnavailable = $true
         try {

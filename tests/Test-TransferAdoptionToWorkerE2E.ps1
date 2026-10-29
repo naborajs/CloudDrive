@@ -120,8 +120,10 @@ try {
     $pending = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir -ActiveCachePaths @($activeRoot))
     Check 'Discovered 2 staged files' ($pending.Count -eq 2) ("got $($pending.Count)")
 
-    $pf1 = @($pending | Where-Object { Get-Prop $_ 'Path' -eq $stagedFile1 })[0]
-    $pf2 = @($pending | Where-Object { Get-Prop $_ 'Path' -eq $stagedFile2 })[0]
+    $pf1Matches = @($pending | Where-Object { [System.IO.Path]::GetFullPath((Get-Prop $_ 'Path')) -eq [System.IO.Path]::GetFullPath($stagedFile1) })
+    $pf2Matches = @($pending | Where-Object { [System.IO.Path]::GetFullPath((Get-Prop $_ 'Path')) -eq [System.IO.Path]::GetFullPath($stagedFile2) })
+    $pf1 = if ($pf1Matches.Count -gt 0) { $pf1Matches[0] } else { $null }
+    $pf2 = if ($pf2Matches.Count -gt 0) { $pf2Matches[0] } else { $null }
     Check 'File 1 found' ($null -ne $pf1)
     Check 'File 2 found' ($null -ne $pf2)
     Check 'File 1 marked outside active cache' ([bool](Get-Prop $pf1 'IsOutsideActiveCache'))
@@ -140,7 +142,8 @@ try {
     [System.IO.File]::WriteAllText($metaActivePath, ($metaActive | ConvertTo-Json -Depth 3))
 
     $pendingAll = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir -ActiveCachePaths @($activeRoot))
-    $activeFileInResults = @($pendingAll | Where-Object { Get-Prop $_ 'Path' -eq $activeFile })[0]
+    $activeMatches = @($pendingAll | Where-Object { [System.IO.Path]::GetFullPath((Get-Prop $_ 'Path')) -eq [System.IO.Path]::GetFullPath($activeFile) })
+    $activeFileInResults = if ($activeMatches.Count -gt 0) { $activeMatches[0] } else { $null }
     Check 'Active-root file excluded from adoption' ((-not $activeFileInResults) -or (-not [bool](Get-Prop $activeFileInResults 'IsOutsideActiveCache')))
 
     # --------------------------------------------------------------------------

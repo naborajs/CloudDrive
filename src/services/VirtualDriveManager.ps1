@@ -2128,7 +2128,7 @@ function Get-VirtualDrivePendingUploads {
 
     $pendingMap = [System.Collections.Generic.Dictionary[string, PSObject]]::new([System.StringComparer]::OrdinalIgnoreCase)
     if (-not (Test-Path -LiteralPath $CacheDirectory)) {
-        return ,@()
+        return @()
     }
 
     # Discover candidate directories that contain a 'vfs' folder:
@@ -2197,27 +2197,14 @@ function Get-VirtualDrivePendingUploads {
                             $isDirty = $true
                         }
                     } catch {
-                        # If meta cannot be read, verify if file is in use/locked before treating as dirty
-                        try {
-                            $testStream = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-                            $testStream.Close()
-                            $testStream.Dispose()
-                        } catch {
-                            $isDirty = $true
-                        }
+                        # If vfsMeta fails to read or parse, do not treat as dirty
+                        $isDirty = $false
                     }
                 } else {
-                    # No vfsMeta yet; only treat as pending if actively locked/written or in an active upload queue.
-                    # Do NOT treat arbitrary read-cache files or 0-byte orphan files without vfsMeta as pending uploads.
-                    if ($f.Length -gt 0) {
-                        try {
-                            $testStream = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-                            $testStream.Close()
-                            $testStream.Dispose()
-                        } catch {
-                            $isDirty = $true
-                        }
-                    }
+                    # In rclone VFS mode 'full', rclone creates a matching .vfsMeta file immediately upon local
+                    # file creation or modification with 'Dirty': true. Files without vfsMeta are read-ahead cache
+                    # files or remote download streams. They must NEVER be treated as dirty pending uploads.
+                    $isDirty = $false
                 }
 
                 # Only include truly dirty staged files (not clean read/synced cache)
@@ -2323,7 +2310,7 @@ function Get-VirtualDrivePendingUploads {
     }
 
     if ($pendingMap.Count -eq 0) {
-        return ,@()
+        return @()
     }
     return @($pendingMap.Values)
 }
