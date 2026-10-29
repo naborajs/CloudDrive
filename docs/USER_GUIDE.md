@@ -29,7 +29,23 @@ The **Disks Dashboard** is the primary hub of NS Cloud Drive. It provides real-t
 
 ---
 
-## 2. Cloud Transfer Center & History
+## 2. Native Windows File Explorer Integration
+
+Once mounted, all cloud disks appear directly inside Windows 11 File Explorer under **Devices and drives** just like physical storage volumes.
+
+<p align="center">
+  <img src="../assets/screenshots/06_windows_explorer_mounts.png" alt="Windows Explorer Multi-Account Virtual Drives" width="900" />
+</p>
+
+### Native Windows Features:
+- **Direct Volume Letter Assignment**: Each account receives its own designated drive letter (e.g., `G:`, `I:`, `T:`).
+- **Active Capacity Gauges**: Real-time storage consumption and remaining gigabytes/terabytes display natively in Windows Explorer.
+- **Provider Branding**: Official high-resolution cloud icons (Google Drive, TeraBox) display in File Explorer for instant visual recognition.
+- **Direct Shell Integration**: Drag-and-drop file copying, standard right-click context menus, and on-demand streaming on file open.
+
+---
+
+## 3. Cloud Transfer Center & History
 
 The **Transfer Center** tracks all file transfers, local SSD staging progress, background uploads, and cryptographic confirmation results.
 
@@ -45,7 +61,7 @@ The **Transfer Center** tracks all file transfers, local SSD staging progress, b
 
 ---
 
-## 3. On-Demand Analytics & Performance Monitor
+## 4. On-Demand Analytics & Performance Monitor
 
 The **Analytics Dashboard** provides comprehensive hardware resource, network latency, and filesystem health metrics gathered strictly on demand—guaranteeing **zero background CPU polling** when idle.
 
@@ -62,7 +78,7 @@ The **Analytics Dashboard** provides comprehensive hardware resource, network la
 
 ---
 
-## 4. Options & Appearance Settings
+## 5. Options & Appearance Settings
 
 The **Options** screen allows customization of visual themes, SSD staging folder locations, cache eviction rules, and Windows operating system integration.
 
@@ -85,7 +101,7 @@ The **Options** screen allows customization of visual themes, SSD staging folder
 
 ---
 
-## 5. Security & Audit Diagnostic Logs
+## 6. Security & Audit Diagnostic Logs
 
 The **Logs** view offers full transparency into application events, provider session validations, and mount operations while guaranteeing absolute privacy.
 
