@@ -52,7 +52,7 @@ function Get-AgentVpsAccounts {
         }
     }
 
-    return $accounts
+    return ,@($accounts)
 }
 
 function Start-AgentFileTransfer {
