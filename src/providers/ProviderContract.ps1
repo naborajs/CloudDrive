@@ -83,6 +83,24 @@ function Get-CloudProviderContract {
                 'Get-TeraBoxRcloneEnvironment',
                 'Get-TeraBoxFileList'
             )
+            vps     = @(
+                'Get-VpsProviderInfo',
+                'Test-VpsBackendSession',
+                'Save-VpsSession',
+                'Get-VpsStoredSession',
+                'Remove-VpsSession',
+                'Get-VpsRcloneEnvironment',
+                'Get-VpsFileList'
+            )
+            proton  = @(
+                'Get-ProtonDriveProviderInfo',
+                'Test-ProtonDriveBackendSession',
+                'Save-ProtonDriveSession',
+                'Get-ProtonDriveStoredSession',
+                'Remove-ProtonDriveSession',
+                'Get-ProtonDriveRcloneEnvironment',
+                'Get-ProtonDriveFileList'
+            )
         }
 
         # Mount semantics:
@@ -110,10 +128,11 @@ function Test-ProviderContract {
     $missing = [System.Collections.Generic.List[string]]::new()
 
     if ($ProviderId -eq 'proton') { $word = 'Proton Drive' }
+    elseif ($ProviderId -eq 'vps') { $word = 'VPS / Remote Server' }
     elseif ($contract.RequiredNames.Contains($ProviderId)) { $word = $ProviderId }
     else { return [ordered]@{ ProviderId = $ProviderId; Satisfied = $false; Missing = @('Unknown provider id: unsupported ids cannot be wired into the account UI.'); Word = $ProviderId } }
 
-    # A provider not registered with RequiredNames (like proton) is refused
+    # A provider not registered with RequiredNames is refused
     # upfront: there is no implementation to wire and no fake connector.
     if (-not $contract.RequiredNames.Contains($ProviderId)) {
         $missing.Add("No required-function registration for '$word' yet; a real implementation must be added to the contract map before wiring.");
@@ -140,7 +159,7 @@ function Get-CloudProviderContractSummary {
     # Registry of wired provider ids (must match known ids above). Future
     # providers join this list ONLY together with a real implementation.
     $summary = @()
-    foreach ($providerId in @('gdrive', 'terabox')) {
+    foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton')) {
         $check = Test-ProviderContract -ProviderId $providerId
         $summary += $check
     }
