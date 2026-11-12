@@ -5,40 +5,67 @@ $ErrorActionPreference = 'Stop'
 .SYNOPSIS
     AgentWebhookServer provides a local HTTP listener for remote and local AI agents.
 .DESCRIPTION
-    Listens on 127.0.0.1:5998 (configurable) for incoming HTTP POST notifications from
-    agents operating on Linux VPS or local environments (e.g. training completed,
-    dataset ready, file generated). Triggers desktop alerts and optional auto-downloads.
+    Listens on 127.0.0.1:5998 (configurable) in a dedicated MTA Runspace for incoming
+    HTTP POST notifications from agents operating on Linux VPS or local environments
+    (e.g. training completed, dataset ready, file generated). Triggers desktop alerts and
+    persists notifications to agent-notifications.jsonl.
 #>
 
-$script:AgentWebhookListener = $null
+$script:AgentWebhookRunspace = $null
+$script:AgentWebhookPowerShell = $null
+$script:AgentWebhookAsyncHandle = $null
 $script:AgentWebhookRunning = $false
 $script:AgentWebhookPort = 5998
-$script:AgentWebhookRequestCount = 0
-$script:AgentWebhookCallback = $null
+
+function Get-AgentNotificationLogPath {
+    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\state\agent-notifications.jsonl')
+}
 
 function Get-AgentWebhookStatus {
     [CmdletBinding()]
     param()
 
     return [ordered]@{
-        IsRunning = [bool]($script:AgentWebhookRunning -and $null -ne $script:AgentWebhookListener -and $script:AgentWebhookListener.IsListening)
+        IsRunning = [bool]($script:AgentWebhookRunning -and $null -ne $script:AgentWebhookRunspace)
         Port = $script:AgentWebhookPort
-        RequestCount = $script:AgentWebhookRequestCount
         Endpoint = "http://127.0.0.1:$($script:AgentWebhookPort)/agent-notify"
+        HealthEndpoint = "http://127.0.0.1:$($script:AgentWebhookPort)/health"
     }
+}
+
+function Get-LatestAgentNotifications {
+    [CmdletBinding()]
+    param([int]$Limit = 20)
+
+    $logPath = Get-AgentNotificationLogPath
+    if (-not (Test-Path -LiteralPath $logPath)) {
+        return @()
+    }
+
+    $results = @()
+    try {
+        $lines = [System.IO.File]::ReadAllLines($logPath)
+        for ($i = $lines.Length - 1; $i -ge 0 -and $results.Count -lt $Limit; $i--) {
+            $line = $lines[$i].Trim()
+            if ($line) {
+                try {
+                    $results += ($line | ConvertFrom-Json)
+                } catch { }
+            }
+        }
+    } catch { }
+
+    return ,@($results)
 }
 
 function Start-AgentWebhookServer {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
-        [int]$Port = 5998,
-
-        [Parameter(Mandatory = $false)]
-        [scriptblock]$OnNotificationReceived = $null
+        [int]$Port = 5998
     )
 
-    if ($script:AgentWebhookRunning -and $null -ne $script:AgentWebhookListener -and $script:AgentWebhookListener.IsListening) {
+    if ($script:AgentWebhookRunning -and $null -ne $script:AgentWebhookRunspace) {
         if ($script:AgentWebhookPort -eq $Port) {
             return (Get-AgentWebhookStatus)
         }
@@ -46,39 +73,33 @@ function Start-AgentWebhookServer {
     }
 
     $script:AgentWebhookPort = $Port
-    $script:AgentWebhookCallback = $OnNotificationReceived
+    $logFile = Get-AgentNotificationLogPath
 
-    try {
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.Open()
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+
+    [void]$ps.AddScript({
+        param([int]$p, [string]$targetLog)
         $listener = [System.Net.HttpListener]::new()
-        $listener.Prefixes.Add("http://127.0.0.1:$Port/")
-        $listener.Start()
+        $listener.Prefixes.Add("http://127.0.0.1:$p/")
+        try {
+            $listener.Start()
+        } catch {
+            return
+        }
 
-        $script:AgentWebhookListener = $listener
-        $script:AgentWebhookRunning = $true
-
-        # Start asynchronous listen loop
-        $listenCallback = $null
-        $listenCallback = [System.AsyncCallback]{
-            param($asyncResult)
-            if (-not $script:AgentWebhookRunning -or $null -eq $script:AgentWebhookListener -or -not $script:AgentWebhookListener.IsListening) {
-                return
-            }
-
+        while ($listener.IsListening) {
             try {
-                $context = $script:AgentWebhookListener.EndGetContext($asyncResult)
-                # Re-queue next async accept immediately
-                if ($script:AgentWebhookRunning -and $script:AgentWebhookListener.IsListening) {
-                    [void]$script:AgentWebhookListener.BeginGetContext($listenCallback, $null)
-                }
-
-                $script:AgentWebhookRequestCount++
+                $context = $listener.GetContext()
                 $req = $context.Request
                 $resp = $context.Response
-
                 $path = $req.Url.AbsolutePath.ToLowerInvariant()
                 $method = $req.HttpMethod.ToUpperInvariant()
 
-                # CORS and headers
                 $resp.Headers.Add('Access-Control-Allow-Origin', '*')
                 $resp.Headers.Add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
                 $resp.Headers.Add('Access-Control-Allow-Headers', 'Content-Type')
@@ -86,22 +107,19 @@ function Start-AgentWebhookServer {
                 if ($method -eq 'OPTIONS') {
                     $resp.StatusCode = 200
                     $resp.Close()
-                    return
+                    continue
                 }
 
                 if ($path -eq '/health' -or $path -eq '/status') {
-                    $payload = @{
-                        status = 'online'
-                        service = 'NSCloudDrive Agent Webhook Server'
-                        port = $script:AgentWebhookPort
-                        requestsProcessed = $script:AgentWebhookRequestCount
-                    } | ConvertTo-Json -Compress
+                    $payload = '{"status":"online","service":"NSCloudDrive Agent Webhook Server","success":true}'
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
                     $resp.ContentType = 'application/json'
+                    $resp.ContentLength64 = $bytes.Length
+                    $resp.KeepAlive = $false
                     $resp.StatusCode = 200
                     $resp.OutputStream.Write($bytes, 0, $bytes.Length)
                     $resp.Close()
-                    return
+                    continue
                 }
 
                 if ($path -eq '/agent-notify') {
@@ -112,84 +130,52 @@ function Start-AgentWebhookServer {
                         $reader.Close()
                     }
 
-                    $parsed = $null
                     if (-not [string]::IsNullOrWhiteSpace($bodyText)) {
                         try {
-                            $parsed = ($bodyText | ConvertFrom-Json)
+                            $parentDir = [System.IO.Path]::GetDirectoryName($targetLog)
+                            if (-not [string]::IsNullOrEmpty($parentDir) -and -not (Test-Path -LiteralPath $parentDir)) {
+                                [void][System.IO.Directory]::CreateDirectory($parentDir)
+                            }
+                            # Normalize to single-line JSONL entry
+                            $normalizedEntry = $null
+                            try {
+                                $normalizedEntry = ($bodyText | ConvertFrom-Json | ConvertTo-Json -Compress)
+                            } catch {
+                                $normalizedEntry = ($bodyText -replace '[\r\n]+', ' ')
+                            }
+                            [System.IO.File]::AppendAllText($targetLog, "$normalizedEntry`r`n")
                         } catch { }
                     }
 
-                    $evtTitle = if ($parsed -and $parsed.PSObject.Properties['title']) { [string]$parsed.title } else { 'Agent Notification' }
-                    $evtMessage = if ($parsed -and $parsed.PSObject.Properties['message']) { [string]$parsed.message } else { 'Agent task completed.' }
-                    $evtFile = if ($parsed -and $parsed.PSObject.Properties['file']) { [string]$parsed.file } else { '' }
-                    $autoDownload = if ($parsed -and $parsed.PSObject.Properties['autoDownload']) { [bool]$parsed.autoDownload } else { $false }
-                    $accountId = if ($parsed -and $parsed.PSObject.Properties['accountId']) { [string]$parsed.accountId } else { '' }
-
-                    $notificationData = [ordered]@{
-                        Event = if ($parsed -and $parsed.PSObject.Properties['event']) { [string]$parsed.event } else { 'job_done' }
-                        Title = $evtTitle
-                        Message = $evtMessage
-                        File = $evtFile
-                        AutoDownload = $autoDownload
-                        AccountId = $accountId
-                        ReceivedUtc = [DateTime]::UtcNow.ToString('o')
-                    }
-
-                    # Trigger registered callback if provided
-                    if ($null -ne $script:AgentWebhookCallback) {
-                        try {
-                            & $script:AgentWebhookCallback $notificationData
-                        } catch { }
-                    }
-
-                    # Record in transfer notification center if function exists
-                    if (Get-Command 'Add-TransferNotificationEvent' -ErrorAction SilentlyContinue) {
-                        try {
-                            Add-TransferNotificationEvent -Type 'AgentWebhook' `
-                                -ProviderId 'vps' `
-                                -Path $evtFile `
-                                -Message "Agent Webhook: $evtTitle - $evtMessage" `
-                                -Status 'Completed' `
-                                -Direction 'Push'
-                        } catch { }
-                    }
-
-                    $respData = @{
-                        status = 'received'
-                        success = $true
-                        title = $evtTitle
-                        timestamp = [DateTime]::UtcNow.ToString('o')
-                    } | ConvertTo-Json -Compress
-
+                    $respData = '{"status":"received","success":true}'
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($respData)
                     $resp.ContentType = 'application/json'
+                    $resp.ContentLength64 = $bytes.Length
+                    $resp.KeepAlive = $false
                     $resp.StatusCode = 200
                     $resp.OutputStream.Write($bytes, 0, $bytes.Length)
                     $resp.Close()
-                    return
+                    continue
                 }
 
-                # 404 for unknown endpoints
                 $resp.StatusCode = 404
-                $errBytes = [System.Text.Encoding]::UTF8.GetBytes('{"error":"Not Found"}')
-                $resp.ContentType = 'application/json'
-                $resp.OutputStream.Write($errBytes, 0, $errBytes.Length)
+                $resp.KeepAlive = $false
                 $resp.Close()
             } catch {
-                # Listener shutting down or aborted
+                break
             }
         }
+        try { $listener.Close() } catch { }
+    }).AddArgument($Port).AddArgument($logFile)
 
-        [void]$listener.BeginGetContext($listenCallback, $null)
-        return (Get-AgentWebhookStatus)
-    } catch {
-        $script:AgentWebhookRunning = $false
-        if ($null -ne $script:AgentWebhookListener) {
-            try { $script:AgentWebhookListener.Close() } catch { }
-            $script:AgentWebhookListener = $null
-        }
-        throw "Failed to start Agent Webhook Server on port ${Port}: $($_.Exception.Message)"
-    }
+    $script:AgentWebhookRunspace = $rs
+    $script:AgentWebhookPowerShell = $ps
+    $script:AgentWebhookAsyncHandle = $ps.BeginInvoke()
+    $script:AgentWebhookRunning = $true
+
+    # Brief warm-up sleep
+    Start-Sleep -Milliseconds 250
+    return (Get-AgentWebhookStatus)
 }
 
 function Stop-AgentWebhookServer {
@@ -197,12 +183,23 @@ function Stop-AgentWebhookServer {
     param()
 
     $script:AgentWebhookRunning = $false
-    if ($null -ne $script:AgentWebhookListener) {
+
+    if ($null -ne $script:AgentWebhookPowerShell) {
         try {
-            $script:AgentWebhookListener.Stop()
-            $script:AgentWebhookListener.Close()
+            $wc = [System.Net.WebClient]::new()
+            try { $wc.DownloadString("http://127.0.0.1:$($script:AgentWebhookPort)/health") | Out-Null } catch { }
+            $wc.Dispose()
         } catch { }
-        $script:AgentWebhookListener = $null
+        try { $script:AgentWebhookPowerShell.Stop() } catch { }
+        try { $script:AgentWebhookPowerShell.Dispose() } catch { }
+        $script:AgentWebhookPowerShell = $null
     }
+
+    if ($null -ne $script:AgentWebhookRunspace) {
+        try { $script:AgentWebhookRunspace.Close() } catch { }
+        try { $script:AgentWebhookRunspace.Dispose() } catch { }
+        $script:AgentWebhookRunspace = $null
+    }
+
     return (Get-AgentWebhookStatus)
 }
