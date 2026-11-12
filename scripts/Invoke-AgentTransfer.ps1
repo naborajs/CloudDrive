@@ -31,6 +31,9 @@ param(
     [switch]$Checksum,
 
     [Parameter(Mandatory = $false)]
+    [switch]$Compress,
+
+    [Parameter(Mandatory = $false)]
     [switch]$AsJson
 )
 
@@ -76,6 +79,7 @@ try {
     if ($RemotePath) { $transferParams['RemotePath'] = $RemotePath }
     if ($HugeFileMode) { $transferParams['HugeFileMode'] = $true }
     if ($Checksum) { $transferParams['Checksum'] = $true }
+    if ($Compress) { $transferParams['Compress'] = $true }
     if ($progressCallback) { $transferParams['ProgressCallback'] = $progressCallback }
 
     $result = Start-AgentFileTransfer @transferParams
