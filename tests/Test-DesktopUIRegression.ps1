@@ -47,12 +47,12 @@ if ($dotSourceCheck -notmatch 'LoadedOK') {
 }
 Write-Output '  [PASS] NSCloudDrive.ps1 loads cleanly in STA, constructs window elements, and creates a branded tray icon'
 
-# 5. Test Show-AddCloudDiskModal and Show-CloudAccountSetupModal functions exist and load cleanly
-$modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if ((Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) -and (Get-Command Show-CloudAccountSetupModal -ErrorAction SilentlyContinue)) { 'ModalOK' } else { 'Failed' } }"
+# 5. Test modal dialogs exist and load cleanly in STA
+$modalCheck = powershell.exe -NoProfile -STA -Command "& { . (Resolve-Path '.\src\ui\ProviderConnectionWindow.ps1'); if ((Get-Command Show-AddCloudDiskModal -ErrorAction SilentlyContinue) -and (Get-Command Show-CloudAccountSetupModal -ErrorAction SilentlyContinue) -and (Get-Command Show-VpsSetupDialog -ErrorAction SilentlyContinue) -and (Get-Command Show-ProtonDriveSetupDialog -ErrorAction SilentlyContinue)) { 'ModalOK' } else { 'Failed' } }"
 if ($modalCheck -notmatch 'ModalOK') {
-    throw "Show-AddCloudDiskModal or Show-CloudAccountSetupModal is not exported or defined in ProviderConnectionWindow.ps1: $modalCheck"
+    throw "Modal dialogs (AddCloudDisk, CloudAccountSetup, VpsSetup, or ProtonDriveSetup) failed to load: $modalCheck"
 }
-Write-Output '  [PASS] Show-AddCloudDiskModal and Show-CloudAccountSetupModal definitions verified'
+Write-Output '  [PASS] All provider modal dialogs (Google, TeraBox, VPS, Proton Drive) verified in STA'
 
 # 6. Test single-instance mutex detection and second-instance graceful foreground restoration
 $createdNew = $false
