@@ -20,6 +20,8 @@ Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 . (Join-Path $PSScriptRoot 'VirtualDriveManager.ps1')
 
@@ -630,6 +632,12 @@ function Get-CloudAccountTransferRemoteEnvironment {
         }
         $tbEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus['Password'] -Port $bridgeStatus['Port'] -RcloneBinary $rclonePath -RemoteName $RemoteAlias
         return $tbEnv
+    } elseif ($providerId -eq 'vps') {
+        $vpsEnv = Get-VpsRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
+        return $vpsEnv
+    } elseif ($providerId -eq 'proton') {
+        $protonEnv = Get-ProtonDriveRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
+        return $protonEnv
     } else {
         throw "Unsupported provider for cloud transfer: $providerId"
     }
@@ -1007,6 +1015,9 @@ function Test-RemoteCloudFileVerification {
                 }
             }
             $verificationType = 'SizeAndModTime'
+        } elseif ($providerId -in @('vps', 'proton')) {
+            # VPS and Proton verify file presence and exact size match
+            $verificationType = 'SizeAndPresence'
         } else {
             $verificationType = 'SizeAndPresence'
         }
@@ -3405,6 +3416,8 @@ function Process-CloudTransferQueue {
             switch ($concProvider) {
                 'terabox' { $tbActiveCount++ }
                 'gdrive' { $gdActiveCount++ }
+                'vps' { $otherActiveCount++ }
+                'proton' { $otherActiveCount++ }
                 default { $otherActiveCount++ }
             }
         }
