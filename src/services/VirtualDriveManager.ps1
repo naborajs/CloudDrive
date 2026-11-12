@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot 'SettingsManager.ps1')
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
+. (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
 
 $script:DefaultDriveLetter = 'T'
 $script:DefaultCacheDirectory = 'D:\CloudCache'
@@ -522,6 +524,10 @@ function Build-RcloneMountArguments(
         'Google Drive'
     } elseif ($RemoteName -match '(?i)terabox') {
         'TeraBox'
+    } elseif ($RemoteName -match '(?i)vps') {
+        'VPS Remote'
+    } elseif ($RemoteName -match '(?i)proton') {
+        'Proton Drive'
     } else {
         'NS Cloud Drive'
     }
@@ -656,6 +662,30 @@ function Start-VirtualDriveMount(
         }
     }
 
+    # If VPS is being mounted, configure SFTP rclone remote
+    if ($RemoteName -match '(?i)^vps' -or $resolvedProvider -eq 'vps') {
+        try {
+            $vpsEnv = Get-VpsRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
+            foreach ($k in $vpsEnv.Keys) {
+                $EnvironmentVariables[$k] = $vpsEnv[$k]
+            }
+        } catch {
+            throw "Failed to configure VPS SFTP mount: $($_.Exception.Message)"
+        }
+    }
+
+    # If Proton Drive is being mounted, configure protondrive rclone remote
+    if ($RemoteName -match '(?i)^proton' -or $resolvedProvider -eq 'proton') {
+        try {
+            $protonEnv = Get-ProtonDriveRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
+            foreach ($k in $protonEnv.Keys) {
+                $EnvironmentVariables[$k] = $protonEnv[$k]
+            }
+        } catch {
+            throw "Failed to configure Proton Drive mount: $($_.Exception.Message)"
+        }
+    }
+
     $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
     $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if (-not (Test-DriveLetterAvailable $cleanLetter)) {
@@ -673,6 +703,10 @@ function Start-VirtualDriveMount(
         'Google Drive'
     } elseif ($resolvedProvider -eq 'terabox') {
         'TeraBox'
+    } elseif ($resolvedProvider -eq 'vps') {
+        'VPS Remote'
+    } elseif ($resolvedProvider -eq 'proton') {
+        'Proton Drive'
     } else {
         'NS Cloud Drive'
     }
@@ -2215,13 +2249,15 @@ function Get-VirtualDrivePendingUploads {
                     $parentDir = [System.IO.Path]::GetDirectoryName($vfsDir)
                     if ($parentDir) {
                         $parentName = [System.IO.Path]::GetFileName($parentDir)
-                        if ($parentName -match '^(gdrive|terabox)(?:_(.+))?$') {
+                        if ($parentName -match '^(gdrive|terabox|vps|proton)(?:_(.+))?$') {
                             $provId = $Matches[1]
                             $accId = $parentName
                         } else {
                             $accId = $parentName
                             if ($parentName -match 'gdrive') { $provId = 'gdrive' }
                             elseif ($parentName -match 'terabox') { $provId = 'terabox' }
+                            elseif ($parentName -match 'vps') { $provId = 'vps' }
+                            elseif ($parentName -match 'proton') { $provId = 'proton' }
                         }
                     }
 
@@ -2237,7 +2273,7 @@ function Get-VirtualDrivePendingUploads {
                     if ($firstSlash -gt 0) {
                         $firstSeg = $relToVfs.Substring(0, $firstSlash)
                         $isRemoteCacheRoot = ($provId -and $firstSeg -eq $provId) -or
-                            ($firstSeg -match '^(?:gdrive|terabox)\{[^\}]+\}$')
+                            ($firstSeg -match '^(?:gdrive|terabox|vps|proton)\{[^\}]+\}$')
                         if ($isRemoteCacheRoot) {
                             $logicalRelPath = $relToVfs.Substring($firstSlash + 1)
                         }
