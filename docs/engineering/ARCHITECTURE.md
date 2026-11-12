@@ -14,6 +14,10 @@ experimental Windows application, not a production-readiness claim.
 | [`src/services/SettingsManager.ps1`](../../src/services/SettingsManager.ps1) | Settings normalization and atomic JSON persistence; account list CRUD, drive-letter allocation, and settings migration defaults. |
 | [`src/providers/GoogleDriveProvider.ps1`](../../src/providers/GoogleDriveProvider.ps1) | Google OAuth, loopback callback/state validation, PKCE, account-scoped token storage, Google API identity/quota checks, and per-account rclone environment variables. |
 | [`src/providers/TeraBoxProvider.ps1`](../../src/providers/TeraBoxProvider.ps1) | TeraBox session persistence, backend validation, account-scoped session use, and rclone environment configuration. Web-session mode uses an unofficial community backend. |
+| [`src/providers/VpsProvider.ps1`](../../src/providers/VpsProvider.ps1) | Linux VPS / Remote Server SSH and SFTP provider engine, OpenSSH/PEM key support, password auth, DPAPI key storage, and per-account SFTP mount environment. |
+| [`src/providers/ProtonDriveProvider.ps1`](../../src/providers/ProtonDriveProvider.ps1) | Proton Drive zero-knowledge encrypted storage engine via Secure Remote Password (SRP) authentication, TOTP 2FA, and dual-password mailbox encryption. |
+| [`src/services/AgentTransferBridge.ps1`](../../src/services/AgentTransferBridge.ps1) | Autonomous AI agent file transfer bridge providing multi-stream accelerated SFTP streaming, live telemetry, and bidirectional Push/Pull/Sync pipelines. |
+| [`scripts/Invoke-AgentTransfer.ps1`](../../scripts/Invoke-AgentTransfer.ps1) | Autonomous agent headless CLI for executing high-throughput file transfers between local device and remote Linux VPS agent workspaces. |
 | [`src/services/VirtualDriveManager.ps1`](../../src/services/VirtualDriveManager.ps1) | rclone mount arguments/processes, process ownership, account-to-letter mapping, filesystem-root verification, disconnect, and mount status. |
 | [`src/services/TeraBoxBridgeManager.ps1`](../../src/services/TeraBoxBridgeManager.ps1) | Local CPX WebDAV bridge, per-account bridge home/port/password, health checks, and lifecycle. |
 | [`src/services/BackgroundOperationManager.ps1`](../../src/services/BackgroundOperationManager.ps1) | Bounded background operations used to keep provider checks, mounting, logs, and storage checks off the WPF dispatcher. |
@@ -187,17 +191,48 @@ setting/user action. Recovery/startup code should not open Explorer merely
 because a mount was restored. Explorer icon registration is a separate,
 ownership-tracked feature in `ExplorerIntegration.ps1`.
 
+## Linux VPS / Remote Server (SSH & SFTP) Architecture
+
+The `VpsProvider.ps1` module establishes native Windows mount integration for remote
+Linux servers where AI coding agents or server workloads run:
+
+1. **Authentication:** Supports password and public key cryptography (OpenSSH/PEM keys,
+   encrypted key passphrases, and inline keys). Passwords and passphrases are obscured
+   using rclone's obscurity engine before generating dynamic environment variables.
+2. **Credential Isolation:** Encrypted under Windows DPAPI (`vps-session-<id>.xml`) with
+   restrictive ACLs enforcing exclusive access by the logged-in Windows user and SYSTEM.
+3. **Mount Parameters:** Generates dynamic `RCLONE_CONFIG_<REMOTE>_*` environment variables
+   so that no plain-text rclone configuration file ever touches disk.
+4. **Agent Fast Transfer Pipeline:** The `AgentTransferBridge.ps1` service and
+   `Invoke-AgentTransfer.ps1` CLI bypass normal explorer caching for massive file transfers
+   (model weights, dataset archives, tarballs), using chunked multi-stream SFTP buffers
+   (`--sftp-chunk-size 256k`, `--buffer-size 64M`, 4 streams) and optional SHA-256 integrity
+   verification.
+
+## Proton Drive Architecture
+
+The `ProtonDriveProvider.ps1` module integrates Proton's zero-knowledge encrypted cloud:
+
+1. **SRP Protocol:** Handles Secure Remote Password authentication via rclone's `protondrive`
+   backend, verifying server challenges without exposing password plaintext across the wire.
+2. **2FA & Dual-Password:** Accommodates TOTP two-factor verification and dual-password
+   mailbox encryption keys.
+3. **DPAPI Session Protection:** Stores Proton SRP tokens in `%LOCALAPPDATA%\NSCloudDrive\credentials\proton-session-<id>.xml`.
+4. **Fixed Disk Mount:** Mounts Proton Drive as a virtual drive letter (default `P:\`) with
+   transparent on-demand file hydration and dirty-queue write caching.
+
 ## Validation commands
 
 Run from the repository root in Windows PowerShell:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AccountCreationSaveFlow.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-GoogleAccountCreationRecovery.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MultiAccountLifecycle.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MultiAccountIsolation.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-StartupAutoMountTimer.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SettingsManager.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-VpsProvider.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ProtonDriveProvider.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AgentTransferBridge.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InteractiveAppButtons.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ProviderContracts.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-DesktopUIRegression.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-AllTests.ps1
 ```
 
 See [Testing and validation](TESTING_AND_VALIDATION.md) before running
