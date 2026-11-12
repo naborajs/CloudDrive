@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName PresentationFramework
@@ -8,6 +8,8 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
 . (Join-Path $PSScriptRoot '..\services\CloudTransferManager.ps1')
 . (Join-Path $PSScriptRoot '..\services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'EmbeddedBrowserWindow.ps1')
@@ -386,8 +388,8 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $p = Get-ModalThemePalette $Theme
     $addWin = [System.Windows.Window]::new()
     $addWin.Title = 'Add Cloud Disk'
-    $addWin.Width = 520
-    $addWin.Height = 360
+    $addWin.Width = 540
+    $addWin.Height = 560
     $addWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $addWin.Owner = $Owner }
     $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
@@ -546,6 +548,120 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $tbBtn.Add_Click($SelectTB)
     $tbBorder.Add_MouseLeftButtonDown($SelectTB)
     $listStack.Children.Add($tbBorder) | Out-Null
+
+    # Provider 3: VPS / Remote Server (SSH & SFTP)
+    $vpsBorder = [System.Windows.Controls.Border]::new()
+    $vpsBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $vpsBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $vpsBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $vpsBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $vpsBorder.Padding = [System.Windows.Thickness]::new(14)
+    $vpsBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $vpsBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $vpsDock = [System.Windows.Controls.DockPanel]::new()
+    $vpsBorder.Child = $vpsDock
+
+    $vpsBtn = [System.Windows.Controls.Button]::new()
+    $vpsBtn.Content = 'Select'
+    $vpsBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $vpsBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6366F1')
+    $vpsBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $vpsBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $vpsBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($vpsBtn, 'Right')
+    $vpsDock.Children.Add($vpsBtn) | Out-Null
+
+    $vpsLeft = [System.Windows.Controls.StackPanel]::new()
+    $vpsLeft.Orientation = 'Horizontal'
+    $vpsDock.Children.Add($vpsLeft) | Out-Null
+
+    $vpsLogoImg = New-LogoImageControl 'vps.png' 38 38
+    $vpsLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $vpsLeft.Children.Add($vpsLogoImg) | Out-Null
+
+    $vpsText = [System.Windows.Controls.StackPanel]::new()
+    $vpsText.Children.Add((New-UIElement-Label 'VPS / Remote Server (SSH & SFTP)' 15 $p.TextPrimary $true)) | Out-Null
+    $vpsText.Children.Add((New-UIElement-Label 'Direct SSH/SFTP connection for AI agents, VPS & massive file sync' 12 $p.TextMuted)) | Out-Null
+    $vpsLeft.Children.Add($vpsText) | Out-Null
+
+    $SelectVPS = {
+        if ($script:CloudAccountCreationBusy) { return }
+        $script:SelectedProvider = 'vps'
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 'vps' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
+        $addWin.Close()
+    }
+    $vpsBtn.Add_Click($SelectVPS)
+    $vpsBorder.Add_MouseLeftButtonDown($SelectVPS)
+    $listStack.Children.Add($vpsBorder) | Out-Null
+
+    # Provider 4: Proton Drive
+    $pdBorder = [System.Windows.Controls.Border]::new()
+    $pdBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $pdBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $pdBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $pdBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $pdBorder.Padding = [System.Windows.Thickness]::new(14)
+    $pdBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $pdBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $pdDock = [System.Windows.Controls.DockPanel]::new()
+    $pdBorder.Child = $pdDock
+
+    $pdBtn = [System.Windows.Controls.Button]::new()
+    $pdBtn.Content = 'Select'
+    $pdBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $pdBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6D4AFF')
+    $pdBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $pdBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $pdBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($pdBtn, 'Right')
+    $pdDock.Children.Add($pdBtn) | Out-Null
+
+    $pdLeft = [System.Windows.Controls.StackPanel]::new()
+    $pdLeft.Orientation = 'Horizontal'
+    $pdDock.Children.Add($pdLeft) | Out-Null
+
+    $pdLogoImg = New-LogoImageControl 'protondrive.png' 38 38
+    $pdLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $pdLeft.Children.Add($pdLogoImg) | Out-Null
+
+    $pdText = [System.Windows.Controls.StackPanel]::new()
+    $pdText.Children.Add((New-UIElement-Label 'Proton Drive' 15 $p.TextPrimary $true)) | Out-Null
+    $pdText.Children.Add((New-UIElement-Label 'Zero-knowledge end-to-end encrypted storage via Proton SRP' 12 $p.TextMuted)) | Out-Null
+    $pdLeft.Children.Add($pdText) | Out-Null
+
+    $SelectPD = {
+        if ($script:CloudAccountCreationBusy) { return }
+        $script:SelectedProvider = 'proton'
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 'proton' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
+        $addWin.Close()
+    }
+    $pdBtn.Add_Click($SelectPD)
+    $pdBorder.Add_MouseLeftButtonDown($SelectPD)
+    $listStack.Children.Add($pdBorder) | Out-Null
 
     [void](Enable-ModalGlassBackdrop $addWin)
     [void]$addWin.ShowDialog()
@@ -844,6 +960,379 @@ function Connect-NewCloudAccount([System.Windows.Window]$Owner = $null, [string]
     }
 }
 
+function Show-VpsSetupDialog([System.Windows.Window]$Owner = $null, [string]$AccountId = '', [string]$Theme = '') {
+    $p = Get-ModalThemePalette $Theme
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'Connect VPS / Remote Server (SSH & SFTP)'
+    $win.Width = 520
+    $win.Height = 580
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.ResizeMode = 'NoResize'
+    $win.FontFamily = 'Segoe UI'
+
+    $rootDock = [System.Windows.Controls.DockPanel]::new()
+    $rootDock.Margin = [System.Windows.Thickness]::new(20)
+    $win.Content = $rootDock
+
+    # Header
+    $header = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($header, 'Top')
+    $header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $header.Children.Add((New-UIElement-Label 'Connect VPS / Remote Server' 18 $p.TextPrimary $true)) | Out-Null
+    $sub = New-UIElement-Label 'Mount a remote Linux VPS or server via SSH/SFTP as a local Windows drive.' 12 $p.TextMuted
+    $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $header.Children.Add($sub) | Out-Null
+    $rootDock.Children.Add($header) | Out-Null
+
+    # Bottom Buttons
+    $btnPanel = [System.Windows.Controls.StackPanel]::new()
+    $btnPanel.Orientation = 'Horizontal'
+    $btnPanel.HorizontalAlignment = 'Right'
+    $btnPanel.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnPanel, 'Bottom')
+
+    $btnCancel = [System.Windows.Controls.Button]::new()
+    $btnCancel.Content = 'Cancel'
+    $btnCancel.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+    $btnCancel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $btnCancel.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $btnCancel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $btnCancel.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $btnCancel.Add_Click({ $win.Close() })
+    $btnPanel.Children.Add($btnCancel) | Out-Null
+
+    $btnSave = [System.Windows.Controls.Button]::new()
+    $btnSave.Content = 'Connect & Next'
+    $btnSave.Padding = [System.Windows.Thickness]::new(20, 7, 20, 7)
+    $btnSave.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6366F1')
+    $btnSave.Foreground = [System.Windows.Media.Brushes]::White
+    $btnSave.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $btnSave.BorderThickness = [System.Windows.Thickness]::new(0)
+    $btnPanel.Children.Add($btnSave) | Out-Null
+
+    $rootDock.Children.Add($btnPanel) | Out-Null
+
+    # Form Fields
+    $form = [System.Windows.Controls.StackPanel]::new()
+    $rootDock.Children.Add($form) | Out-Null
+
+    # Host & Port row
+    $form.Children.Add((New-UIElement-Label 'Server Host / IP' 12 $p.TextPrimary $true)) | Out-Null
+    $hostDock = [System.Windows.Controls.DockPanel]::new()
+    $hostDock.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($hostDock) | Out-Null
+
+    $txtPort = [System.Windows.Controls.TextBox]::new()
+    $txtPort.Width = 60
+    $txtPort.Text = '22'
+    $txtPort.Padding = [System.Windows.Thickness]::new(6)
+    [System.Windows.Controls.DockPanel]::SetDock($txtPort, 'Right')
+    $txtPort.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+    $hostDock.Children.Add($txtPort) | Out-Null
+
+    $txtHost = [System.Windows.Controls.TextBox]::new()
+    $txtHost.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtHost.Text = ''
+    $hostDock.Children.Add($txtHost) | Out-Null
+
+    # Username
+    $form.Children.Add((New-UIElement-Label 'SSH Username' 12 $p.TextPrimary $true)) | Out-Null
+    $txtUser = [System.Windows.Controls.TextBox]::new()
+    $txtUser.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtUser.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $txtUser.Text = 'root'
+    $form.Children.Add($txtUser) | Out-Null
+
+    # Auth Type selector
+    $form.Children.Add((New-UIElement-Label 'Authentication' 12 $p.TextPrimary $true)) | Out-Null
+    $authPanel = [System.Windows.Controls.StackPanel]::new()
+    $authPanel.Orientation = 'Horizontal'
+    $authPanel.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
+    $rbPass = [System.Windows.Controls.RadioButton]::new()
+    $rbPass.Content = 'Password'
+    $rbPass.IsChecked = $true
+    $rbPass.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $rbPass.Margin = [System.Windows.Thickness]::new(0, 0, 16, 0)
+    $rbKey = [System.Windows.Controls.RadioButton]::new()
+    $rbKey.Content = 'SSH Private Key'
+    $rbKey.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $authPanel.Children.Add($rbPass) | Out-Null
+    $authPanel.Children.Add($rbKey) | Out-Null
+    $form.Children.Add($authPanel) | Out-Null
+
+    # Password Box
+    $pwdBox = [System.Windows.Controls.PasswordBox]::new()
+    $pwdBox.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $pwdBox.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+    $form.Children.Add($pwdBox) | Out-Null
+
+    # Key File Dock (initially collapsed)
+    $keyDock = [System.Windows.Controls.DockPanel]::new()
+    $keyDock.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+    $keyDock.Visibility = [System.Windows.Visibility]::Collapsed
+    $form.Children.Add($keyDock) | Out-Null
+
+    $btnBrowseKey = [System.Windows.Controls.Button]::new()
+    $btnBrowseKey.Content = 'Browse...'
+    $btnBrowseKey.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    [System.Windows.Controls.DockPanel]::SetDock($btnBrowseKey, 'Right')
+    $btnBrowseKey.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+    $keyDock.Children.Add($btnBrowseKey) | Out-Null
+
+    $txtKeyPath = [System.Windows.Controls.TextBox]::new()
+    $txtKeyPath.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $keyDock.Children.Add($txtKeyPath) | Out-Null
+
+    $rbPass.Add_Checked({
+        $pwdBox.Visibility = [System.Windows.Visibility]::Visible
+        $keyDock.Visibility = [System.Windows.Visibility]::Collapsed
+    })
+    $rbKey.Add_Checked({
+        $pwdBox.Visibility = [System.Windows.Visibility]::Collapsed
+        $keyDock.Visibility = [System.Windows.Visibility]::Visible
+    })
+
+    $btnBrowseKey.Add_Click({
+        $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+        $dlg.Filter = 'SSH Keys (*.pem;*.key;id_*;*)|*.pem;*.key;id_*;*|All Files (*.*)|*.*'
+        $dlg.Title = 'Select SSH Private Key'
+        if ($dlg.ShowDialog() -eq $true) {
+            $txtKeyPath.Text = $dlg.FileName
+        }
+    })
+
+    # Remote Path
+    $form.Children.Add((New-UIElement-Label 'Remote Root Path' 12 $p.TextPrimary $true)) | Out-Null
+    $txtRemotePath = [System.Windows.Controls.TextBox]::new()
+    $txtRemotePath.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtRemotePath.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $txtRemotePath.Text = '/'
+    $form.Children.Add($txtRemotePath) | Out-Null
+
+    # Status label
+    $lblStatus = New-UIElement-Label '' 11 $p.TextMuted
+    $lblStatus.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $form.Children.Add($lblStatus) | Out-Null
+
+    # Test Connection Button
+    $btnTest = [System.Windows.Controls.Button]::new()
+    $btnTest.Content = 'Test SSH Connection'
+    $btnTest.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
+    $btnTest.HorizontalAlignment = 'Left'
+    $btnTest.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $btnTest.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $btnTest.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $form.Children.Add($btnTest) | Out-Null
+
+    $script:VpsResult = @{ Success = $false }
+
+    $btnTest.Add_Click({
+        $hostVal = $txtHost.Text.Trim()
+        $userVal = $txtUser.Text.Trim()
+        $portVal = $txtPort.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($hostVal)) {
+            $lblStatus.Text = 'Please enter a server host or IP address.'
+            $lblStatus.Foreground = [System.Windows.Media.Brushes]::Red
+            return
+        }
+        $testSession = [ordered]@{
+            Host = $hostVal
+            Port = if ($portVal) { [int]$portVal } else { 22 }
+            User = if ($userVal) { $userVal } else { 'root' }
+            RemotePath = $txtRemotePath.Text.Trim()
+        }
+        if ($rbPass.IsChecked) {
+            $testSession['Password'] = $pwdBox.Password
+        } else {
+            $testSession['KeyFile'] = $txtKeyPath.Text.Trim()
+        }
+
+        $lblStatus.Text = 'Connecting to SSH host...'
+        $lblStatus.Foreground = [System.Windows.Media.Brushes]::DodgerBlue
+
+        try {
+            $probe = Test-VpsBackendSession -SessionOverride $testSession -TimeoutSec 6
+            if ($probe.IsValid) {
+                $lblStatus.Text = "SSH connection verified! ($($probe.UserInfo.UserName))"
+                $lblStatus.Foreground = [System.Windows.Media.Brushes]::Green
+            } else {
+                $lblStatus.Text = "SSH check failed: $($probe.IdentityError)"
+                $lblStatus.Foreground = [System.Windows.Media.Brushes]::Red
+            }
+        } catch {
+            $lblStatus.Text = "Error: $($_.Exception.Message)"
+            $lblStatus.Foreground = [System.Windows.Media.Brushes]::Red
+        }
+    })
+
+    $btnSave.Add_Click({
+        $hostVal = $txtHost.Text.Trim()
+        $userVal = $txtUser.Text.Trim()
+        $portVal = $txtPort.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($hostVal)) {
+            [System.Windows.MessageBox]::Show('Please specify a server host address.', 'VPS Connection', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $sessionData = [ordered]@{
+            Host = $hostVal
+            Port = if ($portVal) { [int]$portVal } else { 22 }
+            User = if ($userVal) { $userVal } else { 'root' }
+            RemotePath = $txtRemotePath.Text.Trim()
+        }
+        if ($rbPass.IsChecked) {
+            $sessionData['Password'] = $pwdBox.Password
+        } else {
+            $sessionData['KeyFile'] = $txtKeyPath.Text.Trim()
+        }
+
+        try {
+            Save-VpsSession -SessionData $sessionData -AccountId $AccountId
+            $script:VpsResult = @{
+                Success = $true
+                Host = $hostVal
+                User = $userVal
+                DisplayName = "VPS ($hostVal)"
+            }
+            $win.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show("Failed to save VPS session: $($_.Exception.Message)", 'VPS Connection', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    })
+
+    [void](Enable-ModalGlassBackdrop $win)
+    [void]$win.ShowDialog()
+    return $script:VpsResult
+}
+
+function Show-ProtonDriveSetupDialog([System.Windows.Window]$Owner = $null, [string]$AccountId = '', [string]$Theme = '') {
+    $p = Get-ModalThemePalette $Theme
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'Connect Proton Drive'
+    $win.Width = 480
+    $win.Height = 490
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.ResizeMode = 'NoResize'
+    $win.FontFamily = 'Segoe UI'
+
+    $rootDock = [System.Windows.Controls.DockPanel]::new()
+    $rootDock.Margin = [System.Windows.Thickness]::new(20)
+    $win.Content = $rootDock
+
+    # Header
+    $header = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($header, 'Top')
+    $header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $header.Children.Add((New-UIElement-Label 'Connect Proton Drive' 18 $p.TextPrimary $true)) | Out-Null
+    $sub = New-UIElement-Label 'Sign in with your Proton account credentials to mount Proton Drive.' 12 $p.TextMuted
+    $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $header.Children.Add($sub) | Out-Null
+    $rootDock.Children.Add($header) | Out-Null
+
+    # Bottom Buttons
+    $btnPanel = [System.Windows.Controls.StackPanel]::new()
+    $btnPanel.Orientation = 'Horizontal'
+    $btnPanel.HorizontalAlignment = 'Right'
+    $btnPanel.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnPanel, 'Bottom')
+
+    $btnCancel = [System.Windows.Controls.Button]::new()
+    $btnCancel.Content = 'Cancel'
+    $btnCancel.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+    $btnCancel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $btnCancel.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $btnCancel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $btnCancel.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $btnCancel.Add_Click({ $win.Close() })
+    $btnPanel.Children.Add($btnCancel) | Out-Null
+
+    $btnSave = [System.Windows.Controls.Button]::new()
+    $btnSave.Content = 'Connect & Next'
+    $btnSave.Padding = [System.Windows.Thickness]::new(20, 7, 20, 7)
+    $btnSave.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6D4AFF')
+    $btnSave.Foreground = [System.Windows.Media.Brushes]::White
+    $btnSave.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $btnSave.BorderThickness = [System.Windows.Thickness]::new(0)
+    $btnPanel.Children.Add($btnSave) | Out-Null
+
+    $rootDock.Children.Add($btnPanel) | Out-Null
+
+    # Form Fields
+    $form = [System.Windows.Controls.StackPanel]::new()
+    $rootDock.Children.Add($form) | Out-Null
+
+    # Username / Email
+    $form.Children.Add((New-UIElement-Label 'Proton Username / Email' 12 $p.TextPrimary $true)) | Out-Null
+    $txtUser = [System.Windows.Controls.TextBox]::new()
+    $txtUser.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtUser.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txtUser) | Out-Null
+
+    # Password
+    $form.Children.Add((New-UIElement-Label 'Account Password' 12 $p.TextPrimary $true)) | Out-Null
+    $pwdBox = [System.Windows.Controls.PasswordBox]::new()
+    $pwdBox.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $pwdBox.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($pwdBox) | Out-Null
+
+    # 2FA Code (Optional)
+    $form.Children.Add((New-UIElement-Label 'Two-Factor Authentication Code (if enabled)' 12 $p.TextMuted)) | Out-Null
+    $txt2FA = [System.Windows.Controls.TextBox]::new()
+    $txt2FA.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txt2FA.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txt2FA) | Out-Null
+
+    # Mailbox Password (Optional)
+    $form.Children.Add((New-UIElement-Label 'Mailbox Password (for two-password accounts only)' 12 $p.TextMuted)) | Out-Null
+    $pwdMailbox = [System.Windows.Controls.PasswordBox]::new()
+    $pwdMailbox.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $pwdMailbox.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($pwdMailbox) | Out-Null
+
+    # Status label
+    $lblStatus = New-UIElement-Label '' 11 $p.TextMuted
+    $lblStatus.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $form.Children.Add($lblStatus) | Out-Null
+
+    $script:ProtonResult = @{ Success = $false }
+
+    $btnSave.Add_Click({
+        $userVal = $txtUser.Text.Trim()
+        $passVal = $pwdBox.Password
+        if ([string]::IsNullOrWhiteSpace($userVal) -or [string]::IsNullOrWhiteSpace($passVal)) {
+            [System.Windows.MessageBox]::Show('Please enter your Proton username and password.', 'Proton Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $sessionData = [ordered]@{
+            Username = $userVal
+            Password = $passVal
+            '2FA' = $txt2FA.Text.Trim()
+            MailboxPassword = $pwdMailbox.Password
+        }
+
+        try {
+            Save-ProtonDriveSession -SessionData $sessionData -AccountId $AccountId
+            $script:ProtonResult = @{
+                Success = $true
+                Username = $userVal
+                DisplayName = "Proton Drive ($userVal)"
+            }
+            $win.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show("Failed to save Proton Drive session: $($_.Exception.Message)", 'Proton Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    })
+
+    [void](Enable-ModalGlassBackdrop $win)
+    [void]$win.ShowDialog()
+    return $script:ProtonResult
+}
+
 function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
     if ($ProviderId -eq 'gdrive') {
         $accId = "gdrive_" + [Guid]::NewGuid().ToString('N')
@@ -949,6 +1438,48 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'terabox' -InitialAccount $initData
         if (-not $saved) { Remove-TeraBoxSession -AccountId $accId }
+        return $saved
+
+    } elseif ($ProviderId -eq 'vps') {
+        $accId = "vps_" + [Guid]::NewGuid().ToString('N')
+        $setupRes = Show-VpsSetupDialog -Owner $Owner -AccountId $accId
+        if (-not $setupRes.Success) {
+            return $null
+        }
+
+        $nextLetter = Get-NextAvailableDriveLetter 'V'
+        $initData = @{
+            Id = $accId
+            ProviderId = 'vps'
+            DisplayName = if ($setupRes.DisplayName) { $setupRes.DisplayName } else { "VPS ($($setupRes.Host))" }
+            AccountEmail = "$($setupRes.User)@$($setupRes.Host)"
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'vps' -InitialAccount $initData
+        if (-not $saved) { Remove-VpsSession -AccountId $accId }
+        return $saved
+
+    } elseif ($ProviderId -eq 'proton') {
+        $accId = "proton_" + [Guid]::NewGuid().ToString('N')
+        $setupRes = Show-ProtonDriveSetupDialog -Owner $Owner -AccountId $accId
+        if (-not $setupRes.Success) {
+            return $null
+        }
+
+        $nextLetter = Get-NextAvailableDriveLetter 'P'
+        $initData = @{
+            Id = $accId
+            ProviderId = 'proton'
+            DisplayName = if ($setupRes.DisplayName) { $setupRes.DisplayName } else { "Proton Drive ($($setupRes.Username))" }
+            AccountEmail = $setupRes.Username
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'proton' -InitialAccount $initData
+        if (-not $saved) { Remove-ProtonDriveSession -AccountId $accId }
         return $saved
     }
 
