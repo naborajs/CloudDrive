@@ -10,6 +10,8 @@ Add-Type -AssemblyName WindowsBase
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\MegaProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\S3Provider.ps1')
 . (Join-Path $PSScriptRoot '..\services\CloudTransferManager.ps1')
 . (Join-Path $PSScriptRoot '..\services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'EmbeddedBrowserWindow.ps1')
@@ -388,8 +390,8 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $p = Get-ModalThemePalette $Theme
     $addWin = [System.Windows.Window]::new()
     $addWin.Title = 'Add Cloud Disk'
-    $addWin.Width = 540
-    $addWin.Height = 560
+    $addWin.Width = 560
+    $addWin.Height = 650
     $addWin.WindowStartupLocation = 'CenterOwner'
     if ($Owner) { $addWin.Owner = $Owner }
     $addWin.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
@@ -424,9 +426,13 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $cancelBtn.Add_Click({ $addWin.Close() })
     $dock.Children.Add($cancelBtn) | Out-Null
 
-    # Provider Options List
+    # Provider Options List inside ScrollViewer
+    $scroll = [System.Windows.Controls.ScrollViewer]::new()
+    $scroll.VerticalScrollBarVisibility = 'Auto'
+    $scroll.HorizontalScrollBarVisibility = 'Disabled'
     $listStack = [System.Windows.Controls.StackPanel]::new()
-    $dock.Children.Add($listStack) | Out-Null
+    $scroll.Content = $listStack
+    $dock.Children.Add($scroll) | Out-Null
 
     $script:SelectedProvider = $null
 
@@ -663,6 +669,120 @@ function Show-AddCloudDiskModal([System.Windows.Window]$Owner = $null, [scriptbl
     $pdBorder.Add_MouseLeftButtonDown($SelectPD)
     $listStack.Children.Add($pdBorder) | Out-Null
 
+    # Provider 5: MEGA
+    $mgBorder = [System.Windows.Controls.Border]::new()
+    $mgBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $mgBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $mgBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $mgBorder.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $mgBorder.Padding = [System.Windows.Thickness]::new(14)
+    $mgBorder.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $mgBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $mgDock = [System.Windows.Controls.DockPanel]::new()
+    $mgBorder.Child = $mgDock
+
+    $mgBtn = [System.Windows.Controls.Button]::new()
+    $mgBtn.Content = 'Select'
+    $mgBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $mgBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9272E')
+    $mgBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $mgBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $mgBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($mgBtn, 'Right')
+    $mgDock.Children.Add($mgBtn) | Out-Null
+
+    $mgLeft = [System.Windows.Controls.StackPanel]::new()
+    $mgLeft.Orientation = 'Horizontal'
+    $mgDock.Children.Add($mgLeft) | Out-Null
+
+    $mgLogoImg = New-LogoImageControl 'mega.png' 38 38
+    $mgLogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $mgLeft.Children.Add($mgLogoImg) | Out-Null
+
+    $mgText = [System.Windows.Controls.StackPanel]::new()
+    $mgText.Children.Add((New-UIElement-Label 'MEGA' 15 $p.TextPrimary $true)) | Out-Null
+    $mgText.Children.Add((New-UIElement-Label '20 GB free end-to-end encrypted cloud storage' 12 $p.TextMuted)) | Out-Null
+    $mgLeft.Children.Add($mgText) | Out-Null
+
+    $SelectMG = {
+        if ($script:CloudAccountCreationBusy) { return }
+        $script:SelectedProvider = 'mega'
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 'mega' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
+        $addWin.Close()
+    }
+    $mgBtn.Add_Click($SelectMG)
+    $mgBorder.Add_MouseLeftButtonDown($SelectMG)
+    $listStack.Children.Add($mgBorder) | Out-Null
+
+    # Provider 6: S3 / Metal Object Storage
+    $s3Border = [System.Windows.Controls.Border]::new()
+    $s3Border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $s3Border.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $s3Border.BorderThickness = [System.Windows.Thickness]::new(1)
+    $s3Border.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $s3Border.Padding = [System.Windows.Thickness]::new(14)
+    $s3Border.Margin = [System.Windows.Thickness]::new(0, 0, 0, 12)
+    $s3Border.Cursor = [System.Windows.Input.Cursors]::Hand
+
+    $s3Dock = [System.Windows.Controls.DockPanel]::new()
+    $s3Border.Child = $s3Dock
+
+    $s3Btn = [System.Windows.Controls.Button]::new()
+    $s3Btn.Content = 'Select'
+    $s3Btn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $s3Btn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E05206')
+    $s3Btn.Foreground = [System.Windows.Media.Brushes]::White
+    $s3Btn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $s3Btn.BorderThickness = [System.Windows.Thickness]::new(0)
+    [System.Windows.Controls.DockPanel]::SetDock($s3Btn, 'Right')
+    $s3Dock.Children.Add($s3Btn) | Out-Null
+
+    $s3Left = [System.Windows.Controls.StackPanel]::new()
+    $s3Left.Orientation = 'Horizontal'
+    $s3Dock.Children.Add($s3Left) | Out-Null
+
+    $s3LogoImg = New-LogoImageControl 's3.png' 38 38
+    $s3LogoImg.Margin = [System.Windows.Thickness]::new(0, 0, 12, 0)
+    $s3Left.Children.Add($s3LogoImg) | Out-Null
+
+    $s3Text = [System.Windows.Controls.StackPanel]::new()
+    $s3Text.Children.Add((New-UIElement-Label 'S3 / Metal Object Storage' 15 $p.TextPrimary $true)) | Out-Null
+    $s3Text.Children.Add((New-UIElement-Label 'High-speed object storage: AWS S3, Cloudflare R2, MinIO, Metal' 12 $p.TextMuted)) | Out-Null
+    $s3Left.Children.Add($s3Text) | Out-Null
+
+    $SelectS3 = {
+        if ($script:CloudAccountCreationBusy) { return }
+        $script:SelectedProvider = 's3'
+        $addWin.Add_Closed({
+            if ($OnProviderSelected) {
+                try {
+                    & $OnProviderSelected 's3' | Out-Null
+                } catch {
+                    try {
+                        $crashReason = Format-SanitizedDiagnosticMessage ([string]$_.Exception.Message)
+                        [System.Windows.MessageBox]::Show("Account creation failed unexpectedly: $crashReason", 'NS Cloud Drive', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                    } catch { }
+                }
+            }
+        })
+        $addWin.Close()
+    }
+    $s3Btn.Add_Click($SelectS3)
+    $s3Border.Add_MouseLeftButtonDown($SelectS3)
+    $listStack.Children.Add($s3Border) | Out-Null
+
     [void](Enable-ModalGlassBackdrop $addWin)
     [void]$addWin.ShowDialog()
     return [ordered]@{ SelectedProvider = $script:SelectedProvider }
@@ -692,7 +812,14 @@ function Show-CloudAccountSetupModal(
     $p = Get-ModalThemePalette $Theme
     $setupWin = [System.Windows.Window]::new()
     $isEdit = ($InitialAccount -and $InitialAccount.ContainsKey('Id') -and (Test-CloudAccountPersisted -AccountId ([string]$InitialAccount.Id)))
-    $provName = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
+    $provName = switch ($ProviderId) {
+        'terabox' { 'TeraBox' }
+        'vps'     { 'VPS' }
+        'proton'  { 'Proton Drive' }
+        'mega'    { 'MEGA' }
+        's3'      { 'S3 Storage' }
+        Default   { 'Google Drive' }
+    }
     $setupWin.Title = if ($isEdit) { "Configure $provName Account" } else { "Add $provName Disk" }
     $setupWin.Width = 470
     $setupWin.Height = 570
@@ -728,12 +855,10 @@ function Show-CloudAccountSetupModal(
     $txtName.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
     $txtName.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
     $txtName.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputText)
-    $defaultName = if ($InitialAccount -and $InitialAccount.ContainsKey('DisplayName')) {
+    $defaultName = if ($InitialAccount -and $InitialAccount.ContainsKey('DisplayName') -and $InitialAccount.DisplayName) {
         [string]$InitialAccount.DisplayName
-    } elseif ($ProviderId -eq 'terabox') {
-        'TeraBox'
     } else {
-        'Google Drive'
+        $provName
     }
     $txtName.Text = $defaultName
     $stack.Children.Add($txtName) | Out-Null
@@ -747,7 +872,14 @@ function Show-CloudAccountSetupModal(
     $cmbLetter.Margin = [System.Windows.Thickness]::new(0, 4, 0, 14)
 
     # Populate drive letter choices
-    $prefDefault = if ($ProviderId -eq 'terabox') { 'T' } else { 'G' }
+    $prefDefault = switch ($ProviderId) {
+        'terabox' { 'T' }
+        'vps'     { 'V' }
+        'proton'  { 'P' }
+        'mega'    { 'M' }
+        's3'      { 'S' }
+        Default   { 'G' }
+    }
     $currentLetter = if ($InitialAccount -and $InitialAccount.ContainsKey('DriveLetter') -and $InitialAccount.DriveLetter) {
         [string]$InitialAccount.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     } else {
@@ -859,7 +991,14 @@ function Show-CloudAccountSetupModal(
     $saveBtn = [System.Windows.Controls.Button]::new()
     $saveBtn.Content = if ($isEdit) { 'Save Changes' } else { 'Add Disk' }
     $saveBtn.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
-    $accent = if ($ProviderId -eq 'terabox') { '#2563EB' } else { '#0F9D58' }
+    $accent = switch ($ProviderId) {
+        'terabox' { '#2563EB' }
+        'vps'     { '#6366F1' }
+        'proton'  { '#6D4AFF' }
+        'mega'    { '#D9272E' }
+        's3'      { '#E05206' }
+        Default   { '#0F9D58' }
+    }
     $saveBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($accent)
     $saveBtn.Foreground = [System.Windows.Media.Brushes]::White
     $saveBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
@@ -882,7 +1021,7 @@ function Show-CloudAccountSetupModal(
     $saveBtn.Add_Click({
         $name = $txtName.Text.Trim()
         if ([string]::IsNullOrEmpty($name)) {
-            $name = if ($ProviderId -eq 'terabox') { 'TeraBox' } else { 'Google Drive' }
+            $name = $provName
         }
         $cacheDirectory = $txtCacheDirectory.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($cacheDirectory)) {
@@ -1333,6 +1472,267 @@ function Show-ProtonDriveSetupDialog([System.Windows.Window]$Owner = $null, [str
     return $script:ProtonResult
 }
 
+function Show-MegaSetupDialog([System.Windows.Window]$Owner = $null, [string]$AccountId = '', [string]$Theme = '') {
+    $p = Get-ModalThemePalette $Theme
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'Connect MEGA'
+    $win.Width = 480
+    $win.Height = 440
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.ResizeMode = 'NoResize'
+    $win.FontFamily = 'Segoe UI'
+
+    $rootDock = [System.Windows.Controls.DockPanel]::new()
+    $rootDock.Margin = [System.Windows.Thickness]::new(20)
+    $win.Content = $rootDock
+
+    # Header
+    $header = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($header, 'Top')
+    $header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $header.Children.Add((New-UIElement-Label 'Connect MEGA' 18 $p.TextPrimary $true)) | Out-Null
+    $sub = New-UIElement-Label 'Sign in with your MEGA account credentials for encrypted cloud mounting.' 12 $p.TextMuted
+    $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $header.Children.Add($sub) | Out-Null
+    $rootDock.Children.Add($header) | Out-Null
+
+    # Bottom Buttons
+    $btnPanel = [System.Windows.Controls.StackPanel]::new()
+    $btnPanel.Orientation = 'Horizontal'
+    $btnPanel.HorizontalAlignment = 'Right'
+    $btnPanel.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnPanel, 'Bottom')
+
+    $btnCancel = [System.Windows.Controls.Button]::new()
+    $btnCancel.Content = 'Cancel'
+    $btnCancel.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+    $btnCancel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $btnCancel.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $btnCancel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $btnCancel.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $btnCancel.Add_Click({ $win.Close() })
+    $btnPanel.Children.Add($btnCancel) | Out-Null
+
+    $btnSave = [System.Windows.Controls.Button]::new()
+    $btnSave.Content = 'Connect & Next'
+    $btnSave.Padding = [System.Windows.Thickness]::new(20, 7, 20, 7)
+    $btnSave.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9272E')
+    $btnSave.Foreground = [System.Windows.Media.Brushes]::White
+    $btnSave.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $btnSave.BorderThickness = [System.Windows.Thickness]::new(0)
+    $btnPanel.Children.Add($btnSave) | Out-Null
+
+    $rootDock.Children.Add($btnPanel) | Out-Null
+
+    # Form Fields
+    $form = [System.Windows.Controls.StackPanel]::new()
+    $rootDock.Children.Add($form) | Out-Null
+
+    # Username / Email
+    $form.Children.Add((New-UIElement-Label 'MEGA Email Address' 12 $p.TextPrimary $true)) | Out-Null
+    $txtEmail = [System.Windows.Controls.TextBox]::new()
+    $txtEmail.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtEmail.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+    $form.Children.Add($txtEmail) | Out-Null
+
+    # Password
+    $form.Children.Add((New-UIElement-Label 'Account Password' 12 $p.TextPrimary $true)) | Out-Null
+    $pwdBox = [System.Windows.Controls.PasswordBox]::new()
+    $pwdBox.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $pwdBox.Margin = [System.Windows.Thickness]::new(0, 4, 0, 16)
+    $form.Children.Add($pwdBox) | Out-Null
+
+    $script:MegaResult = @{ Success = $false }
+
+    $btnSave.Add_Click({
+        $emailVal = $txtEmail.Text.Trim()
+        $passVal = $pwdBox.Password
+        if ([string]::IsNullOrWhiteSpace($emailVal) -or [string]::IsNullOrWhiteSpace($passVal)) {
+            [System.Windows.MessageBox]::Show('Please enter your MEGA email and password.', 'MEGA', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $sessionData = [ordered]@{
+            Username = $emailVal
+            Password = $passVal
+        }
+
+        try {
+            Save-MegaSession -SessionData $sessionData -AccountId $AccountId
+            $script:MegaResult = @{
+                Success = $true
+                Username = $emailVal
+                DisplayName = "MEGA ($emailVal)"
+            }
+            $win.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show("Failed to save MEGA session: $($_.Exception.Message)", 'MEGA', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    })
+
+    [void](Enable-ModalGlassBackdrop $win)
+    [void]$win.ShowDialog()
+    return $script:MegaResult
+}
+
+function Show-S3SetupDialog([System.Windows.Window]$Owner = $null, [string]$AccountId = '', [string]$Theme = '') {
+    $p = Get-ModalThemePalette $Theme
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'Connect S3 / Metal Object Storage'
+    $win.Width = 520
+    $win.Height = 600
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.ResizeMode = 'NoResize'
+    $win.FontFamily = 'Segoe UI'
+
+    $rootDock = [System.Windows.Controls.DockPanel]::new()
+    $rootDock.Margin = [System.Windows.Thickness]::new(20)
+    $win.Content = $rootDock
+
+    # Header
+    $header = [System.Windows.Controls.StackPanel]::new()
+    [System.Windows.Controls.DockPanel]::SetDock($header, 'Top')
+    $header.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $header.Children.Add((New-UIElement-Label 'Connect S3 / Metal Object Storage' 18 $p.TextPrimary $true)) | Out-Null
+    $sub = New-UIElement-Label 'Mount AWS S3, Cloudflare R2, MinIO, Wasabi, or Metal storage as a local drive.' 12 $p.TextMuted
+    $sub.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $header.Children.Add($sub) | Out-Null
+    $rootDock.Children.Add($header) | Out-Null
+
+    # Bottom Buttons
+    $btnPanel = [System.Windows.Controls.StackPanel]::new()
+    $btnPanel.Orientation = 'Horizontal'
+    $btnPanel.HorizontalAlignment = 'Right'
+    $btnPanel.Margin = [System.Windows.Thickness]::new(0, 14, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnPanel, 'Bottom')
+
+    $btnCancel = [System.Windows.Controls.Button]::new()
+    $btnCancel.Content = 'Cancel'
+    $btnCancel.Padding = [System.Windows.Thickness]::new(16, 7, 16, 7)
+    $btnCancel.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBg)
+    $btnCancel.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelBorder)
+    $btnCancel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CancelText)
+    $btnCancel.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $btnCancel.Add_Click({ $win.Close() })
+    $btnPanel.Children.Add($btnCancel) | Out-Null
+
+    $btnSave = [System.Windows.Controls.Button]::new()
+    $btnSave.Content = 'Connect & Next'
+    $btnSave.Padding = [System.Windows.Thickness]::new(20, 7, 20, 7)
+    $btnSave.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E05206')
+    $btnSave.Foreground = [System.Windows.Media.Brushes]::White
+    $btnSave.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $btnSave.BorderThickness = [System.Windows.Thickness]::new(0)
+    $btnPanel.Children.Add($btnSave) | Out-Null
+
+    $rootDock.Children.Add($btnPanel) | Out-Null
+
+    # Form Fields in ScrollViewer
+    $scroll = [System.Windows.Controls.ScrollViewer]::new()
+    $scroll.VerticalScrollBarVisibility = 'Auto'
+    $scroll.HorizontalScrollBarVisibility = 'Disabled'
+    $form = [System.Windows.Controls.StackPanel]::new()
+    $scroll.Content = $form
+    $rootDock.Children.Add($scroll) | Out-Null
+
+    # Storage Provider / Type
+    $form.Children.Add((New-UIElement-Label 'Provider Type (AWS, Cloudflare R2, MinIO, Wasabi, Metal)' 12 $p.TextPrimary $true)) | Out-Null
+    $cmbProvider = [System.Windows.Controls.ComboBox]::new()
+    $cmbProvider.Padding = [System.Windows.Thickness]::new(6, 5, 6, 5)
+    $cmbProvider.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    @('AWS', 'Cloudflare', 'Minio', 'Wasabi', 'Other') | ForEach-Object {
+        $cbi = [System.Windows.Controls.ComboBoxItem]::new()
+        $cbi.Content = $_
+        $cbi.Tag = $_
+        [void]$cmbProvider.Items.Add($cbi)
+    }
+    $cmbProvider.SelectedIndex = 0
+    $form.Children.Add($cmbProvider) | Out-Null
+
+    # Endpoint
+    $form.Children.Add((New-UIElement-Label 'Endpoint URL (leave blank for AWS S3)' 12 $p.TextMuted)) | Out-Null
+    $txtEndpoint = [System.Windows.Controls.TextBox]::new()
+    $txtEndpoint.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtEndpoint.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txtEndpoint) | Out-Null
+
+    # Region
+    $form.Children.Add((New-UIElement-Label 'Region (e.g. us-east-1, auto, eu-central-1)' 12 $p.TextMuted)) | Out-Null
+    $txtRegion = [System.Windows.Controls.TextBox]::new()
+    $txtRegion.Text = 'us-east-1'
+    $txtRegion.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtRegion.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txtRegion) | Out-Null
+
+    # Access Key ID
+    $form.Children.Add((New-UIElement-Label 'Access Key ID' 12 $p.TextPrimary $true)) | Out-Null
+    $txtAccessKey = [System.Windows.Controls.TextBox]::new()
+    $txtAccessKey.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtAccessKey.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txtAccessKey) | Out-Null
+
+    # Secret Access Key
+    $form.Children.Add((New-UIElement-Label 'Secret Access Key' 12 $p.TextPrimary $true)) | Out-Null
+    $pwdSecret = [System.Windows.Controls.PasswordBox]::new()
+    $pwdSecret.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $pwdSecret.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($pwdSecret) | Out-Null
+
+    # Bucket Name (Optional or specific bucket)
+    $form.Children.Add((New-UIElement-Label 'Bucket / Container Name (optional, or specify bucket to mount)' 12 $p.TextMuted)) | Out-Null
+    $txtBucket = [System.Windows.Controls.TextBox]::new()
+    $txtBucket.Padding = [System.Windows.Thickness]::new(8, 6, 8, 6)
+    $txtBucket.Margin = [System.Windows.Thickness]::new(0, 4, 0, 10)
+    $form.Children.Add($txtBucket) | Out-Null
+
+    $script:S3Result = @{ Success = $false }
+
+    $btnSave.Add_Click({
+        $accessKeyVal = $txtAccessKey.Text.Trim()
+        $secretVal = $pwdSecret.Password
+        if ([string]::IsNullOrWhiteSpace($accessKeyVal) -or [string]::IsNullOrWhiteSpace($secretVal)) {
+            [System.Windows.MessageBox]::Show('Please enter your S3 Access Key ID and Secret Access Key.', 'S3 Storage', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $provType = [string]$cmbProvider.SelectedValue
+        if (-not $provType -and $cmbProvider.SelectedItem) {
+            $provType = [string]$cmbProvider.SelectedItem.Tag
+        }
+        if (-not $provType) { $provType = 'AWS' }
+
+        $sessionData = [ordered]@{
+            Provider = $provType
+            Endpoint = $txtEndpoint.Text.Trim()
+            Region = $txtRegion.Text.Trim()
+            AccessKeyId = $accessKeyVal
+            SecretAccessKey = $secretVal
+            Bucket = $txtBucket.Text.Trim()
+        }
+
+        try {
+            Save-S3Session -SessionData $sessionData -AccountId $AccountId
+            $bucketVal = $txtBucket.Text.Trim()
+            $script:S3Result = @{
+                Success = $true
+                Bucket = $bucketVal
+                DisplayName = if ($bucketVal) { "S3 ($bucketVal)" } else { "S3 ($provType)" }
+            }
+            $win.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show("Failed to save S3 session: $($_.Exception.Message)", 'S3 Storage', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    })
+
+    [void](Enable-ModalGlassBackdrop $win)
+    [void]$win.ShowDialog()
+    return $script:S3Result
+}
+
 function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$ProviderId = 'gdrive') {
     if ($ProviderId -eq 'gdrive') {
         $accId = "gdrive_" + [Guid]::NewGuid().ToString('N')
@@ -1480,6 +1880,48 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'proton' -InitialAccount $initData
         if (-not $saved) { Remove-ProtonDriveSession -AccountId $accId }
+        return $saved
+
+    } elseif ($ProviderId -eq 'mega') {
+        $accId = "mega_" + [Guid]::NewGuid().ToString('N')
+        $setupRes = Show-MegaSetupDialog -Owner $Owner -AccountId $accId
+        if (-not $setupRes.Success) {
+            return $null
+        }
+
+        $nextLetter = Get-NextAvailableDriveLetter 'M'
+        $initData = @{
+            Id = $accId
+            ProviderId = 'mega'
+            DisplayName = if ($setupRes.DisplayName) { $setupRes.DisplayName } else { "MEGA ($($setupRes.Username))" }
+            AccountEmail = $setupRes.Username
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'mega' -InitialAccount $initData
+        if (-not $saved) { Remove-MegaSession -AccountId $accId }
+        return $saved
+
+    } elseif ($ProviderId -eq 's3') {
+        $accId = "s3_" + [Guid]::NewGuid().ToString('N')
+        $setupRes = Show-S3SetupDialog -Owner $Owner -AccountId $accId
+        if (-not $setupRes.Success) {
+            return $null
+        }
+
+        $nextLetter = Get-NextAvailableDriveLetter 'S'
+        $initData = @{
+            Id = $accId
+            ProviderId = 's3'
+            DisplayName = if ($setupRes.DisplayName) { $setupRes.DisplayName } else { "S3 Storage" }
+            AccountEmail = if ($setupRes.Bucket) { $setupRes.Bucket } else { 's3' }
+            DriveLetter = $nextLetter
+            AutoMount = $true
+        }
+
+        $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 's3' -InitialAccount $initData
+        if (-not $saved) { Remove-S3Session -AccountId $accId }
         return $saved
     }
 
@@ -1630,6 +2072,14 @@ function Show-ProviderConnectionWindow(
         $providerInfo = Get-TeraBoxProviderInfo
     } elseif ($ProviderId -eq 'gdrive') {
         $providerInfo = Get-GoogleDriveProviderInfo
+    } elseif ($ProviderId -eq 'vps') {
+        $providerInfo = Get-VpsProviderInfo
+    } elseif ($ProviderId -eq 'proton') {
+        $providerInfo = Get-ProtonDriveProviderInfo
+    } elseif ($ProviderId -eq 'mega') {
+        $providerInfo = Get-MegaProviderInfo
+    } elseif ($ProviderId -eq 's3') {
+        $providerInfo = Get-S3ProviderInfo
     } else {
         throw "Unsupported provider ID: $ProviderId"
     }
