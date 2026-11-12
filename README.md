@@ -85,9 +85,11 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 
 ## Overview
 
-**NS Cloud Drive** transforms your cloud storage accounts (Google Drive and TeraBox) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
+**NS Cloud Drive** transforms your cloud storage accounts (**Google Drive**, **TeraBox**, and **Proton Drive**) and remote servers (**Linux VPS via SSH/SFTP**) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
 
-Unlike sync clients that mirror your entire cloud storage to an expensive local hard drive, NS Cloud Drive uses a high-speed SSD staging and read-ahead cache. Files stream seamlessly when opened, and newly written files are safely staged locally before uploading to the cloud in the background.
+With **Version 2.0**, NS Cloud Drive introduces first-class **VPS & Remote Agent Integration**, allowing you to mount your remote VPS filesystems (such as where remote AI coding agents or server workloads run) directly as Windows drive letters (e.g. `V:`). You can seamlessly move massive gigabyte or terabyte files between your local workstation, remote agents, and cloud drives via direct streaming and resilient background queues.
+
+Unlike sync clients that mirror entire cloud storage repositories to expensive local hard drives, NS Cloud Drive uses a high-speed SSD staging and read-ahead cache. Files stream seamlessly when opened, and newly written files are safely staged locally before uploading to the cloud or VPS in the background.
 
 ---
 
@@ -119,7 +121,9 @@ Unlike sync clients that mirror your entire cloud storage to an expensive local 
 ## Key Features
 
 - **Native Windows Explorer Disks**: Drives mount under **Devices and drives** as native `Local Disk` volumes with active storage capacity bars showing real free and total gigabytes.
-- **Multi-Account Concurrent Isolation**: Mount and manage multiple Google Drive and TeraBox accounts simultaneously (e.g., `G:`, `H:`, `N:`, `T:`, `I:`) with independent credentials and non-conflicting mount letters.
+- **Multi-Cloud & Remote Server Isolation**: Mount and manage multiple accounts across Google Drive, TeraBox, Linux VPS (SSH/SFTP), and Proton Drive simultaneously (e.g., `G:`, `T:`, `V:`, `P:`) with independent DPAPI-encrypted credentials and non-conflicting mount letters.
+- **Remote Agent & VPS Workstation Pipeline**: Mount remote VPS environments (hosting AI agents, background batch runners, or application servers) as native Windows drive letters (e.g., `V:`), enabling effortless bidirectional streaming and massive multi-gigabyte file transfers.
+- **Proton Drive Zero-Knowledge Storage**: Native end-to-end encrypted storage mounting via Proton SRP authentication and isolated DPAPI session encryption.
 - **Drag & Drop Drive Reordering**: Effortlessly customize the order of your cloud drives on the dashboard using intuitive drag handles (`⋮⋮`) or keyboard Up/Down shortcuts; settings persist across restarts via `CardDisplayOrder`.
 - **Adaptive Bandwidth Throttling**: Automatically adjusts cloud upload/download speeds based on real-time network latency probes, with automatic backoff when gaming, streaming, or video conferencing processes are active.
 - **Smart Notification Engine**: Intelligently groups folder uploads to prevent balloon tip spam, eliminates false 0 B background sync notifications, and supports customizable snooze timers (15m, 1h, 4h).
@@ -150,9 +154,11 @@ flowchart TD
         Bandwidth["AdaptiveBandwidthManager\n(Latency Probe + Gaming Guard)"]
     end
 
-    subgraph Providers ["Cloud Integrations"]
+    subgraph Providers ["Cloud & Remote Integrations"]
         GD["Google Drive API v3\n(OAuth 2.0 PKCE Loopback)"]
         TB["TeraBox WebDAV Bridge\n(cpx.exe Daemon + Cookie Auth)"]
+        VPS["VPS / Remote Server\n(SSH & SFTP / Key & Pass Auth)"]
+        PD["Proton Drive\n(Zero-Knowledge SRP / Encryption)"]
     end
 
     subgraph WindowsShell ["Windows OS & Shell"]
