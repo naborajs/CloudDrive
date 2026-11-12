@@ -46,6 +46,8 @@ function Get-DefaultSettings {
         ProviderDriveLetters = [ordered]@{
             gdrive = 'G'
             terabox = 'T'
+            vps = 'V'
+            proton = 'P'
         }
         EnableNotifications = $true
         NotifyOnUploadStart = $true
@@ -132,6 +134,8 @@ function Get-NSCloudDriveSettings {
             ProviderDriveLetters = [ordered]@{
                 gdrive = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['gdrive']) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
                 terabox = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['terabox']) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
+                vps = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['vps']) { [string]$json.ProviderDriveLetters.vps } else { 'V' }
+                proton = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['proton']) { [string]$json.ProviderDriveLetters.proton } else { 'P' }
             }
             EnableNotifications = if ($json.PSObject.Properties['EnableNotifications'] -and $null -ne $json.EnableNotifications) { [bool]$json.EnableNotifications } else { $defaults.EnableNotifications }
             NotifyOnUploadStart = if ($json.PSObject.Properties['NotifyOnUploadStart'] -and $null -ne $json.NotifyOnUploadStart) { [bool]$json.NotifyOnUploadStart } else { $defaults.NotifyOnUploadStart }
@@ -204,7 +208,9 @@ function Get-PreferredDriveLetter([string]$ProviderId) {
     }
     if ($ProviderId -eq 'gdrive') { return 'G' }
     if ($ProviderId -eq 'terabox') { return 'T' }
-    return 'V'
+    if ($ProviderId -eq 'vps') { return 'V' }
+    if ($ProviderId -eq 'proton') { return 'P' }
+    return 'Z'
 }
 
 function Set-PreferredDriveLetter([string]$ProviderId, [string]$Letter) {
