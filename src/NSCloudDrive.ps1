@@ -96,6 +96,8 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot 'providers\VpsProvider.ps1')
 . (Join-Path $PSScriptRoot 'providers\ProtonDriveProvider.ps1')
+. (Join-Path $PSScriptRoot 'providers\MegaProvider.ps1')
+. (Join-Path $PSScriptRoot 'providers\S3Provider.ps1')
 . (Join-Path $PSScriptRoot 'services\SettingsManager.ps1')
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
@@ -763,6 +765,8 @@ function New-AccountDiskIcon([string]$ProviderId) {
         'terabox' { Join-Path $PSScriptRoot '..\assets\logos\terabox.png'; break }
         'vps' { Join-Path $PSScriptRoot '..\assets\logos\vps.png'; break }
         'proton' { Join-Path $PSScriptRoot '..\assets\logos\protondrive.png'; break }
+        'mega' { Join-Path $PSScriptRoot '..\assets\logos\mega.png'; break }
+        's3' { Join-Path $PSScriptRoot '..\assets\logos\s3.png'; break }
         default { $null }
     }
     $provBmp = if ($provLogoPath) { Get-WpfBitmapImage $provLogoPath } else { $null }
@@ -1034,7 +1038,7 @@ $addDiskBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $addDiskBtn.Add_Click({
     Show-AddCloudDiskModal -Owner $window -Theme $script:Settings.Theme -OnProviderSelected {
         param($selected)
-        if ($selected -in @('gdrive', 'terabox', 'vps', 'proton')) {
+        if ($selected -in @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) {
             $created = Connect-NewCloudAccount -Owner $window -ProviderId $selected
             if ($created) {
                 try {
@@ -3281,6 +3285,8 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
             . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
             . (Join-Path $sourceRoot 'providers\VpsProvider.ps1')
             . (Join-Path $sourceRoot 'providers\ProtonDriveProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\MegaProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\S3Provider.ps1')
 
             $records = [System.Collections.Generic.List[object]]::new()
             $errors = [System.Collections.Generic.List[string]]::new()
@@ -3292,7 +3298,9 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
                     [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'gdrive') },
                     [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') },
                     [pscustomobject]@{ Id = ''; ProviderId = 'vps'; DisplayName = 'VPS Remote'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'vps') },
-                    [pscustomobject]@{ Id = ''; ProviderId = 'proton'; DisplayName = 'Proton Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'proton') }
+                    [pscustomobject]@{ Id = ''; ProviderId = 'proton'; DisplayName = 'Proton Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'proton') },
+                    [pscustomobject]@{ Id = ''; ProviderId = 'mega'; DisplayName = 'MEGA'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'mega') },
+                    [pscustomobject]@{ Id = ''; ProviderId = 's3'; DisplayName = 'S3 Storage'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 's3') }
                 )
             }
             foreach ($account in $accounts) {
@@ -3306,6 +3314,10 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
                         Test-VpsBackendSession -AccountId ([string]$account.Id)
                     } elseif ($account.ProviderId -eq 'proton') {
                         Test-ProtonDriveBackendSession -AccountId ([string]$account.Id)
+                    } elseif ($account.ProviderId -eq 'mega') {
+                        Test-MegaBackendSession -AccountId ([string]$account.Id)
+                    } elseif ($account.ProviderId -eq 's3') {
+                        Test-S3BackendSession -AccountId ([string]$account.Id)
                     } else { $null }
                     $responseTimer.Stop()
                     if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
@@ -3319,6 +3331,8 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
                         'terabox' { 'TeraBox' }
                         'vps' { 'VPS Remote' }
                         'proton' { 'Proton Drive' }
+                        'mega' { 'MEGA' }
+                        's3' { 'S3 Storage' }
                         default { [string]$account.ProviderId }
                     }
                     $verifiedName = if ($account.ProviderId -eq 'gdrive') {
@@ -3387,7 +3401,7 @@ function Update-AnalyticsMetrics {
                 }
             }
         }
-        foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton')) {
+        foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) {
             $status = Get-CachedUiDriveStatus -ProviderId $providerId
             $letter = ([string]$status.DriveLetter).TrimEnd(':').TrimEnd('\')
             if ($status -and $status.IsMounted -and $letter) {
@@ -4364,6 +4378,8 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
                     'terabox' { 'TeraBox' }
                     'vps' { 'VPS Remote' }
                     'proton' { 'Proton Drive' }
+                    'mega' { 'MEGA' }
+                    's3' { 'S3 Storage' }
                     default { [string]$acc.ProviderId }
                 }
                 $accKey = "$providerName - $($acc.DisplayName)"
@@ -6601,7 +6617,7 @@ function Start-StartupCacheRecoveryWorker {
         foreach ($account in @(Get-CloudAccounts)) {
             $providerId = ([string]$account.ProviderId).ToLowerInvariant()
             $accountId = [string]$account.Id
-            if ($providerId -notin @('gdrive', 'terabox') -or $accountId -notmatch "^${providerId}_[A-Za-z0-9_-]{1,128}$") {
+            if ($providerId -notin @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3') -or $accountId -notmatch "^${providerId}_[A-Za-z0-9_-]{1,128}$") {
                 continue
             }
             $accountCacheBase = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { $cacheDirectory }
@@ -6814,7 +6830,7 @@ function Complete-AvailableStartupWorkers {
 function Write-StartupAutoMountProgressLog {
     $progress = $script:StartupAutoMountProgress
     if (-not $progress -or -not $progress.Stage) { return }
-    $providerId = if ($progress.ProviderId -in @('gdrive', 'terabox')) { [string]$progress.ProviderId } else { '' }
+    $providerId = if ($progress.ProviderId -in @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) { [string]$progress.ProviderId } else { '' }
     $driveLetter = if ([string]$progress.DriveLetter -match '^[A-Za-z]$') { ([string]$progress.DriveLetter).ToUpperInvariant() } else { '' }
     $accountId = if ($progress.AccountId) { [string]$progress.AccountId } else { '' }
     $key = "$($progress.Stage)|$providerId|$driveLetter|$accountId"
