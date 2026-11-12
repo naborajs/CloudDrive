@@ -1,74 +1,57 @@
 {
-  "taskId": "TASK-012",
-  "goal": "NS Cloud Drive — Implement Source-Available Non-Commercial Redistribution License and Update Documentation",
+  "taskId": "TASK-013",
+  "goal": "NS Cloud Drive v2.0 — Architecture Specification & Autonomous Expansion (VPS SSH Connection, Remote Agent File Sync, Proton Drive & Multi-Cloud)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Implement custom NS Cloud Drive Source-Available, Non-Commercial Redistribution License in LICENSE with free personal, educational, and internal use.",
-    "2. Prohibit commercial sale, paid redistribution, charging access fees, or unauthorized rebranding without prior written authorization from Naboraj Sarkar.",
-    "3. Require strict author attribution and copyright notice preservation across all distributions and community forks.",
-    "4. Explicitly declare that the license is source-available and not an OSI-approved open-source license.",
-    "5. Update README.md with license badge, plain English summary, and required Questions, Suggestions, and Contact section.",
-    "6. Update CONTRIBUTING.md with contributor licensing agreement.",
-    "7. Update About dialog in src/NSCloudDrive.ps1 preserving 0 non-ASCII encoding rules.",
-    "8. Commit and push every single file individually to GitHub per user requirement."
+    "1. Author comprehensive Version 2.0 Engineering Roadmap (docs/ROADMAP-v2.md) detailing VPS SSH/SFTP integration, remote agent large-file sync, Proton Drive, and multi-platform expansion.",
+    "2. Implement VPS / Remote Server provider engine (src/providers/VpsProvider.ps1) supporting SSH/SFTP keys, password auth, DPAPI storage, and full ProviderContract compliance.",
+    "3. Implement Proton Drive provider engine (src/providers/ProtonDriveProvider.ps1) adhering strictly to all 7 ProviderContract functions.",
+    "4. Register 'vps' and 'proton' in src/providers/ProviderContract.ps1 and author comprehensive test suites verifying contract satisfaction and security.",
+    "5. Wire VPS and Proton into SettingsManager.ps1, VirtualDriveManager.ps1, CloudTransferManager.ps1, and ProviderConnectionWindow.ps1 with dedicated setup dialogs.",
+    "6. Update NSCloudDrive.ps1 with VPS and Proton branding, status pills, and telemetry while preserving strict mode and 0 non-ASCII rules.",
+    "7. Execute automated regression suites ensuring zero regressions in Google Drive and TeraBox mounts.",
+    "8. Maintain 1:1 granular commit and push protocol for every changed file per explicit owner directive."
   ],
   "assignedAgents": [
     "orchestra-boss",
-    "orchestra-reviewer",
-    "orchestra-tester"
+    "orchestra-coder-a",
+    "orchestra-coder-b",
+    "orchestra-tester",
+    "orchestra-reviewer"
   ],
-  "status": "completed",
+  "status": "in_progress",
   "filesChanged": [
-    "LICENSE",
-    "README.md",
-    "CONTRIBUTING.md",
-    "src/NSCloudDrive.ps1",
+    "docs/ROADMAP-v2.md",
     "task-ledger.json"
   ],
   "decisions": [
     {
-      "date": "2026-10-30",
-      "decision": "Implement custom NS Cloud Drive Source-Available License instead of standard OSI open-source licenses (MIT/GPL/Apache).",
-      "rationale": "Matches owner's explicit intention: software is freely accessible to download, inspect, study, and use, but prevents commercial exploitation, resale, or rebranding under third-party names without permission."
+      "date": "2026-11-12",
+      "decision": "Prioritize VPS SSH / SFTP Remote Server integration as the primary operational pillar of NS Cloud Drive Version 2.0 alongside Proton Drive.",
+      "rationale": "Directly empowers the user and remote AI agents to seamlessly transfer massive files bidirectionally between VPS and local Windows workstation via WinFsp / rclone SFTP native drive mounting and Transfer Center streaming."
     },
     {
-      "date": "2026-10-30",
-      "decision": "Commit and push each file individually per explicit user instruction.",
-      "rationale": "Maintains a granular, transparent commit and push history on GitHub with a 1:1 mapping between file change and push event."
+      "date": "2026-11-12",
+      "decision": "Enforce granular 1:1 commit and push protocol for every single modified file.",
+      "rationale": "Strictly adheres to explicit user requirement: every change is individually committed and pushed to GitHub main branch."
     },
     {
-      "date": "2026-10-30",
-      "decision": "Add real-world Windows 11 Explorer multi-drive mounting screenshot to README and User Guide; scale logo to compact header.",
-      "rationale": "Directly proves to prospective users and developers that NS Cloud Drive mounts Google Drive and TeraBox natively as Windows Explorer drives with authentic icons and live capacity bars."
+      "date": "2026-11-12",
+      "decision": "Adopt strict ProviderContract abstraction model for all v2.0 providers.",
+      "rationale": "Guarantees that new providers (VPS, Proton) maintain identical DPAPI encryption security, isolated cache namespaces, honest verification, and independent mount lifecycles without leaking credentials or regressing v1.0.0 providers."
     },
     {
-      "date": "2026-10-30",
-      "decision": "Formalize v1.0.0 Official Release closure. All subsequent features, optimizations, and provider additions (such as Proton Drive) transition to v1.1.0 Next Releases roadmap.",
-      "rationale": "Owner officially signed off on v1.0.0 production deployment."
-    },
-    {
-      "date": "2026-10-30",
-      "decision": "Synchronize official Community Discussion Hub link (https://github.com/naborajs/CloudDrive/discussions/1) across README, CONTRIBUTING, USER_GUIDE, in-app Help card, and GitHub Release notes.",
-      "rationale": "Directs community questions, feature requests, and provider proposals to Discussion #1."
+      "date": "2026-11-12",
+      "decision": "Pre-flight baseline test suite verification completed: 41 test suites executed with 41 passed, 0 failed.",
+      "rationale": "Establishes a rock-solid verified baseline before introducing any v2.0 code changes."
     }
   ],
-  "reviewFindings": [
-    {
-      "reviewer": "orchestra-reviewer",
-      "status": "APPROVED",
-      "findings": "All legal terms verified; third-party notices untouched; encoding compliance strictly maintained (0 non-ASCII bytes in NSCloudDrive.ps1); links verified; contact email verified."
-    }
-  ],
+  "reviewFindings": [],
   "testResults": [
     { "suite": "tests/Run-AllTests.ps1", "status": "passed", "exitCode": 0, "total": 41, "passed": 41, "failed": 0 }
   ],
   "securityFindings": [],
-  "commitRefs": [
-    "f3e1fc0",
-    "e4eed68",
-    "e52c128",
-    "baaec77"
-  ],
+  "commitRefs": [],
   "blockers": []
 }
