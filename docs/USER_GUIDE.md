@@ -15,12 +15,12 @@ The **Disks Dashboard** is the primary hub of NS Cloud Drive. It provides real-t
 ### Key Interface Elements:
 - **Header Status Banner**: Displays overall mount status across all accounts (e.g., `All 3 drives connected`). Shows interactive badges for each mounted drive letter (`T:`, `I:`, `G:`).
 - **Toolbar Actions**:
-  - `+ Add Cloud Disk`: Launches the provider connection dialog to connect a new Google Drive or TeraBox account.
-  - `⇄ Transfer Files`: Opens the Cloud-to-Cloud Transfer dialog to transfer files directly between connected accounts.
+  - `+ Add Cloud Disk`: Launches the provider connection dialog to connect Google Drive, TeraBox, Linux VPS (SSH/SFTP), or Proton Drive.
+  - `⇄ Transfer Files`: Opens the Cloud-to-Cloud & Cloud-to-VPS Transfer dialog to transfer files directly between connected accounts.
   - `⇄ Transfers`: Opens the durable transfer queue and cryptographic history modal.
   - `Refresh`: Manually triggers a health and mount status probe across all virtual disks.
 - **Drive Cards**:
-  - **Account Details**: Shows provider type (Google Drive or TeraBox), user display name, and registered email or account ID.
+  - **Account Details**: Shows provider type (Google Drive, TeraBox, VPS Remote, or Proton Drive), user display name, and registered email or account ID.
   - **Mount Status Pill**: Green dot indicator (`● Mounted (G:)`) confirms active WinFsp filesystem integration.
   - **Mount / Disconnect Button**: Toggle button to mount or safely disconnect virtual drives on demand.
   - **Drive Letter Selector**: Select and assign preferred available Windows drive letters.
@@ -117,7 +117,29 @@ The **Logs** view offers full transparency into application events, provider ses
 
 ---
 
-## 7. Community Discussion & Support
+## 7. Remote VPS & Proton Drive Setup Guides
+
+### 7.1 Linux VPS / Remote Agent Server (SSH & SFTP)
+Connect remote Linux VPS instances (e.g. cloud servers running AI agents, remote databases, or computational jobs) to mount them directly as Windows drive letters:
+1. Click **+ Add Cloud Disk** and select **VPS / Remote Server (SSH & SFTP)**.
+2. Enter your VPS **Server Host / IP** (e.g., `130.210.42.209` or domain) and **SSH Port** (default `22`).
+3. Enter your **SSH Username** (e.g., `root` or user account).
+4. Choose authentication: **Password** or **SSH Private Key** (browse `.pem`, `id_rsa`, or OpenSSH keys).
+5. Specify the **Remote Root Path** (e.g., `/` for root, `/home/user`, or `/workspace`).
+6. Click **Test SSH Connection** to verify reachability and disk capacity.
+7. Click **Connect & Mount** to assign a drive letter (default `V:`) and mount the remote server natively in Windows File Explorer!
+
+### 7.2 Proton Drive (Zero-Knowledge SRP)
+Mount end-to-end encrypted cloud storage without installing heavy desktop clients:
+1. Click **+ Add Cloud Disk** and select **Proton Drive**.
+2. Enter your Proton account **Username / Email** and **Password**.
+3. (Optional) Provide your **Two-Factor Authentication Code (2FA)** if 2FA is active.
+4. (Optional) Provide your **Mailbox Password** if your account uses Proton's legacy two-password mode.
+5. Click **Connect & Mount** to assign a drive letter (default `P:`) and mount Proton Drive into Windows File Explorer.
+
+---
+
+## 8. Community Discussion & Support
 
 Have questions about setup, configuration, or want to suggest new features for future releases?
 - **Community Discussion Hub**: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)
