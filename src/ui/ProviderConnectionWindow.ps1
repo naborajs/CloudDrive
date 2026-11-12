@@ -2506,3 +2506,360 @@ function Show-CloudTransferModal(
     [void](Enable-ModalGlassBackdrop $win)
     [void]$win.ShowDialog()
 }
+
+function Show-AgentTransferDialog(
+    [System.Windows.Window]$Owner = $null,
+    [string]$InitialAccountId = '',
+    [string]$Theme = 'Pure Black'
+) {
+    $bridgeScript = Join-Path $PSScriptRoot '..\services\AgentTransferBridge.ps1'
+    if (Test-Path -LiteralPath $bridgeScript) {
+        . $bridgeScript
+    }
+
+    $p = Get-ModalThemePalette $Theme
+
+    $win = [System.Windows.Window]::new()
+    $win.Title = 'NS Cloud Drive - Agent Fast Transfer'
+    $win.Width = 660
+    $win.Height = 580
+    $win.WindowStartupLocation = 'CenterOwner'
+    if ($Owner) { $win.Owner = $Owner }
+    $win.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.Background)
+    $win.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $win.FontFamily = 'Segoe UI'
+    $win.ResizeMode = 'NoResize'
+
+    $root = [System.Windows.Controls.DockPanel]::new()
+    $root.Margin = [System.Windows.Thickness]::new(24)
+    $win.Content = $root
+
+    # Bottom Buttons
+    $btnStack = [System.Windows.Controls.StackPanel]::new()
+    $btnStack.Orientation = 'Horizontal'
+    $btnStack.HorizontalAlignment = 'Right'
+    $btnStack.Margin = [System.Windows.Thickness]::new(0, 16, 0, 0)
+    [System.Windows.Controls.DockPanel]::SetDock($btnStack, 'Bottom')
+    $root.Children.Add($btnStack) | Out-Null
+
+    $copyCliBtn = [System.Windows.Controls.Button]::new()
+    $copyCliBtn.Content = 'Copy CLI Command'
+    $copyCliBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+    $copyCliBtn.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $copyCliBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $copyCliBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $copyCliBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $copyCliBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($copyCliBtn) | Out-Null
+
+    $startTransferBtn = [System.Windows.Controls.Button]::new()
+    $startTransferBtn.Content = 'Start Transfer'
+    $startTransferBtn.Padding = [System.Windows.Thickness]::new(20, 6, 20, 6)
+    $startTransferBtn.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $startTransferBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6366F1')
+    $startTransferBtn.BorderThickness = [System.Windows.Thickness]::new(0)
+    $startTransferBtn.Foreground = [System.Windows.Media.Brushes]::White
+    $startTransferBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $startTransferBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $btnStack.Children.Add($startTransferBtn) | Out-Null
+
+    $closeBtn = [System.Windows.Controls.Button]::new()
+    $closeBtn.Content = 'Close'
+    $closeBtn.Padding = [System.Windows.Thickness]::new(16, 6, 16, 6)
+    $closeBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $closeBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $closeBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $closeBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    $closeBtn.Add_Click({ $win.Close() })
+    $btnStack.Children.Add($closeBtn) | Out-Null
+
+    # Main Scrollable Content
+    $scroll = [System.Windows.Controls.ScrollViewer]::new()
+    $scroll.VerticalScrollBarVisibility = 'Auto'
+    $scroll.HorizontalScrollBarVisibility = 'Disabled'
+    $root.Children.Add($scroll) | Out-Null
+
+    $content = [System.Windows.Controls.StackPanel]::new()
+    $scroll.Content = $content
+
+    # Header
+    $headerStack = [System.Windows.Controls.StackPanel]::new()
+    $headerStack.Margin = [System.Windows.Thickness]::new(0, 0, 0, 16)
+    $content.Children.Add($headerStack) | Out-Null
+
+    $titleRow = [System.Windows.Controls.StackPanel]::new()
+    $titleRow.Orientation = 'Horizontal'
+    $headerStack.Children.Add($titleRow) | Out-Null
+
+    $vpsLogo = New-LogoImageControl 'vps.png' 32 32
+    $vpsLogo.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+    $titleRow.Children.Add($vpsLogo) | Out-Null
+
+    $titleText = New-UIElement-Label 'Agent Fast Transfer (VPS & Workstation)' 18 $p.TextPrimary $true
+    $titleText.VerticalAlignment = 'Center'
+    $titleRow.Children.Add($titleText) | Out-Null
+
+    $descText = New-UIElement-Label ('High-speed bidirectional SFTP streaming for AI coding agents and massive file archives.' + ' ' + [char]0x2022 + ' ' + 'Optimized for remote agents with chunked buffers and resume support.') 12 $p.TextMuted
+    $descText.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    $descText.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $headerStack.Children.Add($descText) | Out-Null
+
+    # Card: Configuration
+    $card = [System.Windows.Controls.Border]::new()
+    $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $card.BorderThickness = [System.Windows.Thickness]::new(1)
+    $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $card.Padding = [System.Windows.Thickness]::new(16)
+    $card.Margin = [System.Windows.Thickness]::new(0, 0, 0, 14)
+    $content.Children.Add($card) | Out-Null
+
+    $cardStack = [System.Windows.Controls.StackPanel]::new()
+    $card.Child = $cardStack
+
+    # 1. Target VPS Server
+    $cardStack.Children.Add((New-UIElement-Label 'TARGET VPS SERVER' 11 $p.TextMuted $true)) | Out-Null
+    $serverCombo = [System.Windows.Controls.ComboBox]::new()
+    $serverCombo.Height = 32
+    $serverCombo.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+    $serverCombo.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $serverCombo.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $cardStack.Children.Add($serverCombo) | Out-Null
+
+    $vpsAccounts = if (Get-Command 'Get-AgentVpsAccounts' -ErrorAction SilentlyContinue) { @(Get-AgentVpsAccounts) } else { @() }
+    $accTagMap = @{}
+    foreach ($a in $vpsAccounts) {
+        $label = if ($a.DisplayName) { [string]$a.DisplayName } else { "VPS ($($a.Id))" }
+        $idx = $serverCombo.Items.Add($label)
+        $accTagMap[$idx] = [string]$a.Id
+    }
+
+    if ($serverCombo.Items.Count -gt 0) {
+        $serverCombo.SelectedIndex = 0
+    } else {
+        [void]$serverCombo.Items.Add('No configured VPS server found (Add Linux VPS first)')
+        $serverCombo.SelectedIndex = 0
+        $serverCombo.IsEnabled = $false
+        $startTransferBtn.IsEnabled = $false
+    }
+
+    # 2. Transfer Direction
+    $cardStack.Children.Add((New-UIElement-Label 'TRANSFER DIRECTION' 11 $p.TextMuted $true)) | Out-Null
+    $dirRow = [System.Windows.Controls.StackPanel]::new()
+    $dirRow.Orientation = 'Horizontal'
+    $dirRow.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+    $cardStack.Children.Add($dirRow) | Out-Null
+
+    $rbPush = [System.Windows.Controls.RadioButton]::new()
+    $rbPush.Content = ('Push: Device ' + [char]0x2192 + ' VPS (Send to Agent)')
+    $rbPush.IsChecked = $true
+    $rbPush.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $rbPush.Margin = [System.Windows.Thickness]::new(0, 0, 20, 0)
+    $dirRow.Children.Add($rbPush) | Out-Null
+
+    $rbPull = [System.Windows.Controls.RadioButton]::new()
+    $rbPull.Content = ('Pull: VPS ' + [char]0x2192 + ' Device (Fetch from Agent)')
+    $rbPull.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $dirRow.Children.Add($rbPull) | Out-Null
+
+    # 3. Local Path Picker
+    $cardStack.Children.Add((New-UIElement-Label 'LOCAL WORKSTATION PATH' 11 $p.TextMuted $true)) | Out-Null
+    $localRow = [System.Windows.Controls.DockPanel]::new()
+    $localRow.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+    $cardStack.Children.Add($localRow) | Out-Null
+
+    $browseFolderBtn = [System.Windows.Controls.Button]::new()
+    $browseFolderBtn.Content = 'Folder...'
+    $browseFolderBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+    $browseFolderBtn.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+    $browseFolderBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $browseFolderBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $browseFolderBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $browseFolderBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.DockPanel]::SetDock($browseFolderBtn, 'Right')
+    $localRow.Children.Add($browseFolderBtn) | Out-Null
+
+    $browseFileBtn = [System.Windows.Controls.Button]::new()
+    $browseFileBtn.Content = 'File...'
+    $browseFileBtn.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+    $browseFileBtn.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+    $browseFileBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $browseFileBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
+    $browseFileBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $browseFileBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.DockPanel]::SetDock($browseFileBtn, 'Right')
+    $localRow.Children.Add($browseFileBtn) | Out-Null
+
+    $localPathBox = [System.Windows.Controls.TextBox]::new()
+    $localPathBox.Height = 28
+    $localPathBox.VerticalContentAlignment = 'Center'
+    $localPathBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $localPathBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $localPathBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $localRow.Children.Add($localPathBox) | Out-Null
+
+    $browseFileBtn.Add_Click({
+        $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+        $dlg.Title = 'Select File for Agent Transfer'
+        if ($dlg.ShowDialog($win)) {
+            $localPathBox.Text = $dlg.FileName
+        }
+    })
+
+    $browseFolderBtn.Add_Click({
+        $fbd = [System.Windows.Forms.FolderBrowserDialog]::new()
+        $fbd.Description = 'Select Local Directory for Agent Transfer'
+        if ($fbd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $localPathBox.Text = $fbd.SelectedPath
+        }
+    })
+
+    # 4. Remote VPS Path
+    $cardStack.Children.Add((New-UIElement-Label 'REMOTE AGENT / VPS PATH' 11 $p.TextMuted $true)) | Out-Null
+    $remotePathBox = [System.Windows.Controls.TextBox]::new()
+    $remotePathBox.Height = 28
+    $remotePathBox.Text = '/workspace'
+    $remotePathBox.Margin = [System.Windows.Thickness]::new(0, 4, 0, 12)
+    $remotePathBox.VerticalContentAlignment = 'Center'
+    $remotePathBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBg)
+    $remotePathBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $remotePathBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.InputBorder)
+    $cardStack.Children.Add($remotePathBox) | Out-Null
+
+    # 5. Options Checkbox
+    $optChk = [System.Windows.Controls.CheckBox]::new()
+    $optChk.Content = 'Huge File Multi-Stream Acceleration (SFTP 256k chunks, 64M buffer, 4 streams)'
+    $optChk.IsChecked = $true
+    $optChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $optChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
+    $cardStack.Children.Add($optChk) | Out-Null
+
+    # Live Transfer Telemetry Section
+    $statusCard = [System.Windows.Controls.Border]::new()
+    $statusCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
+    $statusCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
+    $statusCard.BorderThickness = [System.Windows.Thickness]::new(1)
+    $statusCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
+    $statusCard.Padding = [System.Windows.Thickness]::new(14)
+    $statusCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+    $content.Children.Add($statusCard) | Out-Null
+
+    $statusStack = [System.Windows.Controls.StackPanel]::new()
+    $statusCard.Child = $statusStack
+
+    $statusTitleRow = [System.Windows.Controls.DockPanel]::new()
+    $statusTitleRow.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+    $statusStack.Children.Add($statusTitleRow) | Out-Null
+
+    $speedLabel = New-UIElement-Label 'Idle' 12 $p.TextMuted
+    [System.Windows.Controls.DockPanel]::SetDock($speedLabel, 'Right')
+    $statusTitleRow.Children.Add($speedLabel) | Out-Null
+
+    $stateLabel = New-UIElement-Label 'Ready to transfer' 12 $p.TextPrimary $true
+    $statusTitleRow.Children.Add($stateLabel) | Out-Null
+
+    $progressBar = [System.Windows.Controls.ProgressBar]::new()
+    $progressBar.Height = 8
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = 100
+    $progressBar.Value = 0
+    $progressBar.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6366F1')
+    $progressBar.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBg)
+    $progressBar.BorderThickness = [System.Windows.Thickness]::new(0)
+    $statusStack.Children.Add($progressBar) | Out-Null
+
+    # Copy CLI Command Handler
+    $copyCliBtn.Add_Click({
+        $dir = if ($rbPush.IsChecked) { 'Push' } else { 'Pull' }
+        $lp = $localPathBox.Text.Trim()
+        $rp = $remotePathBox.Text.Trim()
+        $selIdx = $serverCombo.SelectedIndex
+        $accId = if ($accTagMap.ContainsKey($selIdx)) { $accTagMap[$selIdx] } else { '' }
+
+        $cmdStr = "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-AgentTransfer.ps1 -Direction $dir"
+        if ($accId) { $cmdStr += " -AccountId `"$accId`"" }
+        if ($lp) { $cmdStr += " -LocalPath `"$lp`"" }
+        if ($rp) { $cmdStr += " -RemotePath `"$rp`"" }
+        if ($optChk.IsChecked) { $cmdStr += " -HugeFileMode `$true" }
+
+        try {
+            [System.Windows.Clipboard]::SetText($cmdStr)
+            $stateLabel.Text = ('Command copied to clipboard! ' + [char]0x2713)
+            $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#10B981')
+        } catch { }
+    })
+
+    # Start Transfer Handler
+    $startTransferBtn.Add_Click({
+        $dir = if ($rbPush.IsChecked) { 'Push' } else { 'Pull' }
+        $lp = $localPathBox.Text.Trim()
+        $rp = $remotePathBox.Text.Trim()
+        $selIdx = $serverCombo.SelectedIndex
+        $accId = if ($accTagMap.ContainsKey($selIdx)) { $accTagMap[$selIdx] } else { '' }
+
+        if ([string]::IsNullOrWhiteSpace($lp)) {
+            $stateLabel.Text = 'Please specify a local file or folder path.'
+            $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+            return
+        }
+
+        if ($dir -eq 'Push' -and -not (Test-Path -LiteralPath $lp)) {
+            $stateLabel.Text = 'Local path does not exist.'
+            $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+            return
+        }
+
+        $startTransferBtn.IsEnabled = $false
+        $copyCliBtn.IsEnabled = $false
+        $progressBar.Value = 0
+        $stateLabel.Text = 'Starting high-speed agent transfer...'
+        $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#6366F1')
+        $speedLabel.Text = 'Connecting...'
+
+        # Background transfer via dedicated MTA Runspace and DispatcherTimer (Runspace safety compliant)
+        $isHuge = [bool]$optChk.IsChecked
+        $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $rs.Open()
+        $ps = [System.Management.Automation.PowerShell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript({
+            param($bPath, $aId, $direction, $local, $remote, $huge)
+            if (Test-Path -LiteralPath $bPath) { . $bPath }
+            Start-AgentFileTransfer -AccountId $aId -Direction $direction -LocalPath $local -RemotePath $remote -HugeFileMode:$huge
+        }).AddArgument($bridgeScript).AddArgument($accId).AddArgument($dir).AddArgument($lp).AddArgument($rp).AddArgument($isHuge)
+
+        $asyncHandle = $ps.BeginInvoke()
+        $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
+        $pollTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+        $pollTimer.Add_Tick({
+            if ($asyncHandle.IsCompleted) {
+                $pollTimer.Stop()
+                try {
+                    $res = $ps.EndInvoke($asyncHandle)
+                    $progressBar.Value = 100
+                    $durSec = if ($res -and $res.Count -gt 0 -and $res[0].DurationSec) { "$($res[0].DurationSec)s" } else { 'Complete' }
+                    $stateLabel.Text = ('Transfer completed successfully! ' + [char]0x2713)
+                    $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#10B981')
+                    $speedLabel.Text = "Done in $durSec"
+                } catch {
+                    $stateLabel.Text = "Transfer error: $($_.Exception.Message)"
+                    $stateLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+                    $speedLabel.Text = 'Failed'
+                } finally {
+                    $startTransferBtn.IsEnabled = $true
+                    $copyCliBtn.IsEnabled = $true
+                    try { $ps.Dispose() } catch { }
+                    try { $rs.Dispose() } catch { }
+                }
+            } else {
+                if ($progressBar.Value -ge 95) { $progressBar.Value = 15 } else { $progressBar.Value += 8 }
+                $speedLabel.Text = 'Streaming...'
+            }
+        })
+        $pollTimer.Start()
+    })
+
+    [void](Enable-ModalGlassBackdrop $win)
+    [void]$win.ShowDialog()
+}
