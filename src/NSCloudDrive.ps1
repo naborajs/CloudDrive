@@ -104,6 +104,7 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
 . (Join-Path $PSScriptRoot 'services\ExplorerIntegration.ps1')
 . (Join-Path $PSScriptRoot 'services\AgentTransferBridge.ps1')
+. (Join-Path $PSScriptRoot 'services\AgentWebhookServer.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
@@ -8440,6 +8441,7 @@ $trayMenu.Items.Add($snoozeSubMenu) | Out-Null
 $menuExit = $trayMenu.Items.Add('Exit NS Cloud Drive')
 $menuExit.Add_Click({
     $script:IsExiting = $true
+    try { if (Get-Command 'Stop-AgentWebhookServer' -ErrorAction SilentlyContinue) { Stop-AgentWebhookServer | Out-Null } } catch { }
     Stop-VirtualDriveMount | Out-Null
     Remove-NSCloudDriveOwnedExplorerIcons
     $notifyIcon.Visible = $false
@@ -8495,6 +8497,7 @@ $window.Add_Closing({
             $notifyIcon.ShowBalloonTip(2000, 'NS Cloud Drive', 'Running in background. Double-click tray icon to open.', [System.Windows.Forms.ToolTipIcon]::Info)
         } else {
             $script:IsExiting = $true
+            try { if (Get-Command 'Stop-AgentWebhookServer' -ErrorAction SilentlyContinue) { Stop-AgentWebhookServer | Out-Null } } catch { }
             Stop-VirtualDriveMount | Out-Null
             Remove-NSCloudDriveOwnedExplorerIcons
             $notifyIcon.Visible = $false
@@ -9290,6 +9293,11 @@ function Start-ApplicationStartupSequence {
     # reports the running mount's actual disk cache root. Until then the scanner
     # keeps every historical staged file visible without guessing a hash-root target.
     try { Load-TransferNotificationHistory } catch { }
+    try {
+        if (Get-Command 'Start-AgentWebhookServer' -ErrorAction SilentlyContinue) {
+            Start-AgentWebhookServer -Port 5998 | Out-Null
+        }
+    } catch { }
     Update-AllUIState
 
     if ($script:Settings.AutoMountDrives) {
