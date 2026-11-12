@@ -101,6 +101,24 @@ function Get-CloudProviderContract {
                 'Get-ProtonDriveRcloneEnvironment',
                 'Get-ProtonDriveFileList'
             )
+            mega    = @(
+                'Get-MegaProviderInfo',
+                'Test-MegaBackendSession',
+                'Save-MegaSession',
+                'Get-MegaStoredSession',
+                'Remove-MegaSession',
+                'Get-MegaRcloneEnvironment',
+                'Get-MegaFileList'
+            )
+            s3      = @(
+                'Get-S3ProviderInfo',
+                'Test-S3BackendSession',
+                'Save-S3Session',
+                'Get-S3StoredSession',
+                'Remove-S3Session',
+                'Get-S3RcloneEnvironment',
+                'Get-S3FileList'
+            )
         }
 
         # Mount semantics:
@@ -129,6 +147,8 @@ function Test-ProviderContract {
 
     if ($ProviderId -eq 'proton') { $word = 'Proton Drive' }
     elseif ($ProviderId -eq 'vps') { $word = 'VPS / Remote Server' }
+    elseif ($ProviderId -eq 'mega') { $word = 'MEGA' }
+    elseif ($ProviderId -eq 's3') { $word = 'S3 / Metal' }
     elseif ($contract.RequiredNames.Contains($ProviderId)) { $word = $ProviderId }
     else { return [ordered]@{ ProviderId = $ProviderId; Satisfied = $false; Missing = @('Unknown provider id: unsupported ids cannot be wired into the account UI.'); Word = $ProviderId } }
 
@@ -159,7 +179,7 @@ function Get-CloudProviderContractSummary {
     # Registry of wired provider ids (must match known ids above). Future
     # providers join this list ONLY together with a real implementation.
     $summary = @()
-    foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton')) {
+    foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) {
         $check = Test-ProviderContract -ProviderId $providerId
         $summary += $check
     }
