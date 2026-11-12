@@ -94,6 +94,8 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot 'providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot 'providers\GoogleDriveProvider.ps1')
+. (Join-Path $PSScriptRoot 'providers\VpsProvider.ps1')
+. (Join-Path $PSScriptRoot 'providers\ProtonDriveProvider.ps1')
 . (Join-Path $PSScriptRoot 'services\SettingsManager.ps1')
 . (Join-Path $PSScriptRoot 'services\VirtualDriveManager.ps1')
 . (Join-Path $PSScriptRoot 'services\CloudTransferManager.ps1')
@@ -757,6 +759,8 @@ function New-AccountDiskIcon([string]$ProviderId) {
     $provLogoPath = switch ([string]$ProviderId) {
         'gdrive' { Join-Path $PSScriptRoot '..\assets\logos\googledrive.png'; break }
         'terabox' { Join-Path $PSScriptRoot '..\assets\logos\terabox.png'; break }
+        'vps' { Join-Path $PSScriptRoot '..\assets\logos\vps.png'; break }
+        'proton' { Join-Path $PSScriptRoot '..\assets\logos\protondrive.png'; break }
         default { $null }
     }
     $provBmp = if ($provLogoPath) { Get-WpfBitmapImage $provLogoPath } else { $null }
@@ -1011,7 +1015,7 @@ $addDiskBtn.Cursor = [System.Windows.Input.Cursors]::Hand
 $addDiskBtn.Add_Click({
     Show-AddCloudDiskModal -Owner $window -Theme $script:Settings.Theme -OnProviderSelected {
         param($selected)
-        if ($selected -in @('gdrive', 'terabox')) {
+        if ($selected -in @('gdrive', 'terabox', 'vps', 'proton')) {
             $created = Connect-NewCloudAccount -Owner $window -ProviderId $selected
             if ($created) {
                 try {
@@ -3256,6 +3260,8 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
             . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
             . (Join-Path $sourceRoot 'providers\GoogleDriveProvider.ps1')
             . (Join-Path $sourceRoot 'providers\TeraBoxProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\VpsProvider.ps1')
+            . (Join-Path $sourceRoot 'providers\ProtonDriveProvider.ps1')
 
             $records = [System.Collections.Generic.List[object]]::new()
             $errors = [System.Collections.Generic.List[string]]::new()
@@ -3265,7 +3271,9 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
             if ($accounts.Count -eq 0) {
                 $accounts = @(
                     [pscustomobject]@{ Id = ''; ProviderId = 'gdrive'; DisplayName = 'Google Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'gdrive') },
-                    [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') }
+                    [pscustomobject]@{ Id = ''; ProviderId = 'terabox'; DisplayName = 'TeraBox'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'terabox') },
+                    [pscustomobject]@{ Id = ''; ProviderId = 'vps'; DisplayName = 'VPS Remote'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'vps') },
+                    [pscustomobject]@{ Id = ''; ProviderId = 'proton'; DisplayName = 'Proton Drive'; AccountEmail = ''; DriveLetter = (Get-PreferredDriveLetter 'proton') }
                 )
             }
             foreach ($account in $accounts) {
@@ -3275,6 +3283,10 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
                         Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
                     } elseif ($account.ProviderId -eq 'terabox') {
                         Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
+                    } elseif ($account.ProviderId -eq 'vps') {
+                        Test-VpsBackendSession -AccountId ([string]$account.Id)
+                    } elseif ($account.ProviderId -eq 'proton') {
+                        Test-ProtonDriveBackendSession -AccountId ([string]$account.Id)
                     } else { $null }
                     $responseTimer.Stop()
                     if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
@@ -3283,7 +3295,13 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
                     $total = [int64](Get-SafeProperty $check.UserInfo 'QuotaTotal' (Get-SafeProperty $check.UserInfo 'QuotaTotalBytes' 0))
                     $used = [int64](Get-SafeProperty $check.UserInfo 'QuotaUsed' (Get-SafeProperty $check.UserInfo 'QuotaUsedBytes' -1))
                     if ($total -le 0 -or $used -lt 0) { continue }
-                    $providerName = if ($account.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+                    $providerName = switch ([string]$account.ProviderId) {
+                        'gdrive' { 'Google Drive' }
+                        'terabox' { 'TeraBox' }
+                        'vps' { 'VPS Remote' }
+                        'proton' { 'Proton Drive' }
+                        default { [string]$account.ProviderId }
+                    }
                     $verifiedName = if ($account.ProviderId -eq 'gdrive') {
                         [string](Get-SafeProperty $check.UserInfo 'DisplayName' '')
                     } else {
@@ -3350,7 +3368,7 @@ function Update-AnalyticsMetrics {
                 }
             }
         }
-        foreach ($providerId in @('gdrive', 'terabox')) {
+        foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton')) {
             $status = Get-CachedUiDriveStatus -ProviderId $providerId
             $letter = ([string]$status.DriveLetter).TrimEnd(':').TrimEnd('\')
             if ($status -and $status.IsMounted -and $letter) {
@@ -4322,7 +4340,13 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
         if ($accounts -and $accounts.Count -gt 0) {
             foreach ($acc in $accounts) {
                 $st = Get-VirtualDriveStatus -AccountId $acc.Id -ProviderId $acc.ProviderId
-                $providerName = if ($acc.ProviderId -eq 'gdrive') { 'Google Drive' } else { 'TeraBox' }
+                $providerName = switch ([string]$acc.ProviderId) {
+                    'gdrive' { 'Google Drive' }
+                    'terabox' { 'TeraBox' }
+                    'vps' { 'VPS Remote' }
+                    'proton' { 'Proton Drive' }
+                    default { [string]$acc.ProviderId }
+                }
                 $accKey = "$providerName - $($acc.DisplayName)"
                 if ($st -and $st.IsMounted) {
                     $mountInfo[$accKey] = "[OK] Mounted on $($st.DriveLetter):"
