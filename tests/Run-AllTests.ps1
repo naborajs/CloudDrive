@@ -18,6 +18,8 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-TeraBoxProvider.ps1'),
     (Join-Path $PSScriptRoot 'Test-TeraBoxBridgeManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-GoogleDriveProvider.ps1'),
+    (Join-Path $PSScriptRoot 'Test-VpsProvider.ps1'),
+    (Join-Path $PSScriptRoot 'Test-ProtonDriveProvider.ps1'),
     (Join-Path $PSScriptRoot 'Test-VirtualDriveManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-SettingsManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-AccountCreationSaveFlow.ps1'),
