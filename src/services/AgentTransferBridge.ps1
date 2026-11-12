@@ -78,6 +78,9 @@ function Start-AgentFileTransfer {
         [switch]$Checksum,
 
         [Parameter(Mandatory = $false)]
+        [switch]$Compress,
+
+        [Parameter(Mandatory = $false)]
         [scriptblock]$ProgressCallback = $null,
 
         [Parameter(Mandatory = $false)]
@@ -247,6 +250,10 @@ function Start-AgentFileTransfer {
 
     if ($Checksum) {
         $argsList.Add('--checksum')
+    }
+
+    if ($Compress) {
+        $argsList.Add('--sftp-compress')
     }
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
