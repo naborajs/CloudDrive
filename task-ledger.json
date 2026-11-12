@@ -20,9 +20,33 @@
     "orchestra-tester",
     "orchestra-reviewer"
   ],
-  "status": "in_progress",
+  "status": "completed",
   "filesChanged": [
     "docs/ROADMAP-v2.md",
+    "src/providers/VpsProvider.ps1",
+    "tests/Test-VpsProvider.ps1",
+    "src/providers/ProtonDriveProvider.ps1",
+    "tests/Test-ProtonDriveProvider.ps1",
+    "src/providers/ProviderContract.ps1",
+    "tests/Test-ProviderContracts.ps1",
+    "src/services/SettingsManager.ps1",
+    "src/services/VirtualDriveManager.ps1",
+    "src/services/CloudTransferManager.ps1",
+    "assets/logos/vps.png",
+    "assets/logos/protondrive.png",
+    "src/services/AgentTransferBridge.ps1",
+    "scripts/Invoke-AgentTransfer.ps1",
+    "tests/Test-AgentTransferBridge.ps1",
+    "src/ui/ProviderConnectionWindow.ps1",
+    "src/NSCloudDrive.ps1",
+    "README.md",
+    "docs/USER_GUIDE.md",
+    "src/launcher/AssemblyInfo.cs",
+    "NSCloudDrive.exe.sha256",
+    "NSCloudDrive.exe",
+    "scripts/Package-Release.ps1",
+    "tests/Test-InteractiveAppButtons.ps1",
+    "tests/Run-AllTests.ps1",
     "task-ledger.json"
   ],
   "decisions": [
@@ -45,11 +69,21 @@
       "date": "2026-11-12",
       "decision": "Pre-flight baseline test suite verification completed: 41 test suites executed with 41 passed, 0 failed.",
       "rationale": "Establishes a rock-solid verified baseline before introducing any v2.0 code changes."
+    },
+    {
+      "date": "2026-11-12",
+      "decision": "Implement dedicated AgentTransferBridge and Invoke-AgentTransfer.ps1 CLI for autonomous agent large-file sync.",
+      "rationale": "Enables both headless CLI execution for agents on Linux VPS/local workstation and interactive UI fast transfers with live progress and SFTP multi-stream acceleration."
+    },
+    {
+      "date": "2026-11-12",
+      "decision": "Author line-by-line and button-by-button automated UI verification harness (tests/Test-InteractiveAppButtons.ps1).",
+      "rationale": "Verifies all navigation views (Disks, Options, Analytics, Logs, Help), toolbar buttons, theme selectors, checkboxes, and modal dialogs programmatically in STA mode."
     }
   ],
   "reviewFindings": [],
   "testResults": [
-    { "suite": "tests/Run-AllTests.ps1", "status": "passed", "exitCode": 0, "total": 41, "passed": 41, "failed": 0 }
+    { "suite": "tests/Run-AllTests.ps1", "status": "passed", "exitCode": 0, "total": 45, "passed": 45, "failed": 0 }
   ],
   "securityFindings": [],
   "commitRefs": [],
