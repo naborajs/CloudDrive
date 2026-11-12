@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Packages NS Cloud Drive v1.0.0 for GitHub Release distribution.
+    Packages NS Cloud Drive v2.0.0 for GitHub Release distribution.
 .DESCRIPTION
     Creates a clean, production-ready release directory and zip archive containing:
       - NSCloudDrive.exe (native 64-bit Windows executable)
@@ -12,7 +12,7 @@
       - docs/
 #>
 param(
-    [string]$Version = '1.0.0'
+    [string]$Version = '2.0.0'
 )
 
 Set-StrictMode -Version Latest
