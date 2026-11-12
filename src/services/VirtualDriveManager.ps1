@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 . (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\MegaProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\S3Provider.ps1')
 
 $script:DefaultDriveLetter = 'T'
 $script:DefaultCacheDirectory = 'D:\CloudCache'
@@ -686,6 +688,30 @@ function Start-VirtualDriveMount(
         }
     }
 
+    # If MEGA is being mounted, configure mega rclone remote
+    if ($RemoteName -match '(?i)^mega' -or $resolvedProvider -eq 'mega') {
+        try {
+            $megaEnv = Get-MegaRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
+            foreach ($k in $megaEnv.Keys) {
+                $EnvironmentVariables[$k] = $megaEnv[$k]
+            }
+        } catch {
+            throw "Failed to configure MEGA mount: $($_.Exception.Message)"
+        }
+    }
+
+    # If S3 / Metal is being mounted, configure s3 rclone remote
+    if ($RemoteName -match '(?i)^s3' -or $resolvedProvider -eq 's3') {
+        try {
+            $s3Env = Get-S3RcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
+            foreach ($k in $s3Env.Keys) {
+                $EnvironmentVariables[$k] = $s3Env[$k]
+            }
+        } catch {
+            throw "Failed to configure S3 / Metal mount: $($_.Exception.Message)"
+        }
+    }
+
     $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
     $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if (-not (Test-DriveLetterAvailable $cleanLetter)) {
@@ -707,6 +733,10 @@ function Start-VirtualDriveMount(
         'VPS Remote'
     } elseif ($resolvedProvider -eq 'proton') {
         'Proton Drive'
+    } elseif ($resolvedProvider -eq 'mega') {
+        'MEGA'
+    } elseif ($resolvedProvider -eq 's3') {
+        'S3 Storage'
     } else {
         'NS Cloud Drive'
     }
@@ -2249,7 +2279,7 @@ function Get-VirtualDrivePendingUploads {
                     $parentDir = [System.IO.Path]::GetDirectoryName($vfsDir)
                     if ($parentDir) {
                         $parentName = [System.IO.Path]::GetFileName($parentDir)
-                        if ($parentName -match '^(gdrive|terabox|vps|proton)(?:_(.+))?$') {
+                        if ($parentName -match '^(gdrive|terabox|vps|proton|mega|s3)(?:_(.+))?$') {
                             $provId = $Matches[1]
                             $accId = $parentName
                         } else {
@@ -2258,6 +2288,8 @@ function Get-VirtualDrivePendingUploads {
                             elseif ($parentName -match 'terabox') { $provId = 'terabox' }
                             elseif ($parentName -match 'vps') { $provId = 'vps' }
                             elseif ($parentName -match 'proton') { $provId = 'proton' }
+                            elseif ($parentName -match 'mega') { $provId = 'mega' }
+                            elseif ($parentName -match 's3') { $provId = 's3' }
                         }
                     }
 
