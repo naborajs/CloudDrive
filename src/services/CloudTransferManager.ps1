@@ -22,6 +22,8 @@ Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\MegaProvider.ps1')
+. (Join-Path $PSScriptRoot '..\providers\S3Provider.ps1')
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 . (Join-Path $PSScriptRoot 'VirtualDriveManager.ps1')
 
@@ -638,6 +640,12 @@ function Get-CloudAccountTransferRemoteEnvironment {
     } elseif ($providerId -eq 'proton') {
         $protonEnv = Get-ProtonDriveRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
         return $protonEnv
+    } elseif ($providerId -eq 'mega') {
+        $megaEnv = Get-MegaRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
+        return $megaEnv
+    } elseif ($providerId -eq 's3') {
+        $s3Env = Get-S3RcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
+        return $s3Env
     } else {
         throw "Unsupported provider for cloud transfer: $providerId"
     }
@@ -1015,8 +1023,8 @@ function Test-RemoteCloudFileVerification {
                 }
             }
             $verificationType = 'SizeAndModTime'
-        } elseif ($providerId -in @('vps', 'proton')) {
-            # VPS and Proton verify file presence and exact size match
+        } elseif ($providerId -in @('vps', 'proton', 'mega', 's3')) {
+            # VPS, Proton, MEGA, and S3 verify file presence and exact size match
             $verificationType = 'SizeAndPresence'
         } else {
             $verificationType = 'SizeAndPresence'
@@ -3418,6 +3426,8 @@ function Process-CloudTransferQueue {
                 'gdrive' { $gdActiveCount++ }
                 'vps' { $otherActiveCount++ }
                 'proton' { $otherActiveCount++ }
+                'mega' { $otherActiveCount++ }
+                's3' { $otherActiveCount++ }
                 default { $otherActiveCount++ }
             }
         }
