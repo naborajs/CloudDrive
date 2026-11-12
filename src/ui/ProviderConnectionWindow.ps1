@@ -2734,6 +2734,13 @@ function Show-AgentTransferDialog(
     $optChk.Margin = [System.Windows.Thickness]::new(0, 0, 0, 4)
     $cardStack.Children.Add($optChk) | Out-Null
 
+    $compressChk = [System.Windows.Controls.CheckBox]::new()
+    $compressChk.Content = 'Enable On-The-Fly Stream Compression (Reduces payload for code, text & datasets)'
+    $compressChk.IsChecked = $true
+    $compressChk.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
+    $compressChk.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
+    $cardStack.Children.Add($compressChk) | Out-Null
+
     # Live Transfer Telemetry Section
     $statusCard = [System.Windows.Controls.Border]::new()
     $statusCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBg)
@@ -2781,6 +2788,7 @@ function Show-AgentTransferDialog(
         if ($lp) { $cmdStr += " -LocalPath `"$lp`"" }
         if ($rp) { $cmdStr += " -RemotePath `"$rp`"" }
         if ($optChk.IsChecked) { $cmdStr += " -HugeFileMode `$true" }
+        if ($compressChk.IsChecked) { $cmdStr += " -Compress" }
 
         try {
             [System.Windows.Clipboard]::SetText($cmdStr)
@@ -2818,16 +2826,17 @@ function Show-AgentTransferDialog(
 
         # Background transfer via dedicated MTA Runspace and DispatcherTimer (Runspace safety compliant)
         $isHuge = [bool]$optChk.IsChecked
+        $isCompress = [bool]$compressChk.IsChecked
         $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
         $rs.Open()
         $ps = [System.Management.Automation.PowerShell]::Create()
         $ps.Runspace = $rs
         [void]$ps.AddScript({
-            param($bPath, $aId, $direction, $local, $remote, $huge)
+            param($bPath, $aId, $direction, $local, $remote, $huge, $comp)
             if (Test-Path -LiteralPath $bPath) { . $bPath }
-            Start-AgentFileTransfer -AccountId $aId -Direction $direction -LocalPath $local -RemotePath $remote -HugeFileMode:$huge
-        }).AddArgument($bridgeScript).AddArgument($accId).AddArgument($dir).AddArgument($lp).AddArgument($rp).AddArgument($isHuge)
+            Start-AgentFileTransfer -AccountId $aId -Direction $direction -LocalPath $local -RemotePath $remote -HugeFileMode:$huge -Compress:$comp
+        }).AddArgument($bridgeScript).AddArgument($accId).AddArgument($dir).AddArgument($lp).AddArgument($rp).AddArgument($isHuge).AddArgument($isCompress)
 
         $asyncHandle = $ps.BeginInvoke()
         $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
