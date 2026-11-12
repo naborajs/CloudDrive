@@ -42,3 +42,22 @@ TeraBox's [official integration docs](https://www.terabox.com/integrations/docs/
 - [Official rclone PR #8508](https://github.com/rclone/rclone/pull/8508)
 - [rclone Windows mount docs](https://rclone.org/commands/rclone_mount/)
 - [WinFsp](https://winfsp.dev/)
+
+---
+
+## NS Cloud Drive v2.0 Provider Compatibility Matrix
+
+| Provider | Backend Type | Auth Method | WinFsp Mount | Large File Streaming | Encryption At Rest | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Google Drive** | `drive` | OAuth 2.0 PKCE / Loopback | Full (`G:\`) | Chunked (32MB) | DPAPI tokens | **Production Ready** |
+| **TeraBox** | `terabox` / WebDAV | Web-session / CPX Bridge | Full (`T:\`) | Bounded (2 streams) | DPAPI cookies | **Production Ready** |
+| **Linux VPS** | `sftp` | SSH Password / PEM Keys | Full (`V:\`) | Accelerated (256k / 64M) | DPAPI private keys | **Production Ready (v2.0)** |
+| **Proton Drive** | `protondrive` | SRP + TOTP + Mailbox Key | Full (`P:\`) | Streamed | DPAPI sessions | **Production Ready (v2.0)** |
+| **Autonomous Agent CLI** | SFTP Bridge | Dynamic Environment | Headless CLI / Modal | High-Throughput (4x) | DPAPI zero-leak | **Production Ready (v2.0)** |
+
+### Candidate Providers for Future v2.x Releases:
+- **MEGA**: rclone `mega` backend — 20GB free end-to-end encrypted storage.
+- **Microsoft OneDrive**: rclone `onedrive` backend — Personal and business/SharePoint integration.
+- **WebDAV / Nextcloud / ownCloud**: rclone `webdav` backend — Direct private NAS / self-hosted storage.
+- **S3-Compatible / Metal Object Storage**: rclone `s3` backend — Backblaze B2, Cloudflare R2, MinIO, Wasabi.
+- **Cross-Platform Linux Daemon**: Native background FUSE mount daemon for Debian/Ubuntu/Fedora/Arch.
