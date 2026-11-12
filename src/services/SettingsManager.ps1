@@ -48,6 +48,8 @@ function Get-DefaultSettings {
             terabox = 'T'
             vps = 'V'
             proton = 'P'
+            mega = 'M'
+            s3 = 'S'
         }
         EnableNotifications = $true
         NotifyOnUploadStart = $true
@@ -210,6 +212,8 @@ function Get-PreferredDriveLetter([string]$ProviderId) {
     if ($ProviderId -eq 'terabox') { return 'T' }
     if ($ProviderId -eq 'vps') { return 'V' }
     if ($ProviderId -eq 'proton') { return 'P' }
+    if ($ProviderId -eq 'mega') { return 'M' }
+    if ($ProviderId -eq 's3') { return 'S' }
     return 'Z'
 }
 
