@@ -103,6 +103,7 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
 . (Join-Path $PSScriptRoot 'services\ExplorerIntegration.ps1')
+. (Join-Path $PSScriptRoot 'services\AgentTransferBridge.ps1')
 . (Join-Path $PSScriptRoot 'ui\EmbeddedBrowserWindow.ps1')
 . (Join-Path $PSScriptRoot 'ui\ProviderConnectionWindow.ps1')
 
@@ -964,6 +965,23 @@ $rightToolbar = [System.Windows.Controls.StackPanel]::new()
 $rightToolbar.Orientation = 'Horizontal'
 [System.Windows.Controls.DockPanel]::SetDock($rightToolbar, 'Right')
 $toolbar.Children.Add($rightToolbar) | Out-Null
+
+$agentTransferBtn = [System.Windows.Controls.Button]::new()
+$agentTransferBtn.Content = [string][char]0x21C5 + ' Agent'
+$agentTransferBtn.Padding = [System.Windows.Thickness]::new(14, 6, 14, 6)
+$agentTransferBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+$agentTransferBtn.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBg)
+$agentTransferBtn.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.ButtonBorder)
+$agentTransferBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+$agentTransferBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+$agentTransferBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$agentTransferBtn.ToolTip = 'Autonomous Agent Fast Transfer (Local <-> VPS)'
+$agentTransferBtn.Add_Click({
+    if (Get-Command 'Show-AgentTransferDialog' -ErrorAction SilentlyContinue) {
+        Show-AgentTransferDialog -Owner $window -Theme $script:Settings.Theme
+    }
+})
+$rightToolbar.Children.Add($agentTransferBtn) | Out-Null
 
 $transfersBtn = [System.Windows.Controls.Button]::new()
 $transfersBtn.Content = [string][char]0x21C4 + ' Transfers'
@@ -8028,6 +8046,18 @@ function Update-AllUIState {
                 if ($selectedAccount) { Show-UploadDialog -DriveLetter $selectedAccount.DriveLetter -ParentWindow $window }
             })
             $aActionRow.Children.Add($aUpBtn) | Out-Null
+
+            if ($acc.ProviderId -eq 'vps') {
+                $aAgentBtn = New-QuickIconButton ([string][char]0x21C5) 'Agent Fast Transfer (Local <-> VPS)'
+                $aAgentBtn.Tag = [string]$acc.Id
+                $aAgentBtn.Add_Click({
+                    param($sender, $eventArgs)
+                    if (Get-Command 'Show-AgentTransferDialog' -ErrorAction SilentlyContinue) {
+                        Show-AgentTransferDialog -Owner $window -InitialAccountId ([string]$sender.Tag) -Theme $script:Settings.Theme
+                    }
+                })
+                $aActionRow.Children.Add($aAgentBtn) | Out-Null
+            }
 
             $aRemBtn = New-QuickIconButton ([string][char]0x2715) 'Disconnect and Remove'
             $aRemBtn.Tag = [string]$acc.Id
