@@ -9,16 +9,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'SettingsManager.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProviderContract.ps1')
 
 function Get-SafeFieldValue($Item, [string]$Name) {
-    if ($null -eq $Item) { return $null }
-    if ($Item -is [System.Collections.IDictionary]) {
-        if ($Item.Contains($Name)) { return $Item[$Name] }
-        return $null
-    }
-    $prop = $Item.PSObject.Properties[$Name]
-    if ($prop) { return $prop.Value }
-    return $null
+    return (Get-CloudProviderFieldValue $Item $Name $null)
 }
 
 $script:DedupLedgerCache = [hashtable]::Synchronized(@{})
