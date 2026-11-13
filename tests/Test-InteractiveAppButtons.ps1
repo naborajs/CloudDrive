@@ -156,6 +156,8 @@ if (-not (Get-Command 'Show-AddCloudDiskModal' -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command 'Show-CloudAccountSetupModal' -ErrorAction SilentlyContinue)) { throw 'Show-CloudAccountSetupModal missing' }
 if (-not (Get-Command 'Show-VpsSetupDialog' -ErrorAction SilentlyContinue)) { throw 'Show-VpsSetupDialog missing' }
 if (-not (Get-Command 'Show-ProtonDriveSetupDialog' -ErrorAction SilentlyContinue)) { throw 'Show-ProtonDriveSetupDialog missing' }
+if (-not (Get-Command 'Show-MegaSetupDialog' -ErrorAction SilentlyContinue)) { throw 'Show-MegaSetupDialog missing' }
+if (-not (Get-Command 'Show-S3SetupDialog' -ErrorAction SilentlyContinue)) { throw 'Show-S3SetupDialog missing' }
 if (-not (Get-Command 'Show-AgentTransferDialog' -ErrorAction SilentlyContinue)) { throw 'Show-AgentTransferDialog missing' }
 if (-not (Get-Command 'Show-CloudTransferModal' -ErrorAction SilentlyContinue)) { throw 'Show-CloudTransferModal missing' }
 Write-Output 'MODAL_DIALOGS_OK'
