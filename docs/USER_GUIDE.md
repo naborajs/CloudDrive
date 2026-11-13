@@ -117,7 +117,7 @@ The **Logs** view offers full transparency into application events, provider ses
 
 ---
 
-## 7. Remote VPS & Proton Drive Setup Guides
+## 7. Cloud Storage & VPS Provider Setup Guides
 
 ### 7.1 Linux VPS / Remote Agent Server (SSH & SFTP)
 Connect remote Linux VPS instances (e.g. cloud servers running AI agents, remote databases, or computational jobs) to mount them directly as Windows drive letters:
@@ -137,9 +137,76 @@ Mount end-to-end encrypted cloud storage without installing heavy desktop client
 4. (Optional) Provide your **Mailbox Password** if your account uses Proton's legacy two-password mode.
 5. Click **Connect & Mount** to assign a drive letter (default `P:`) and mount Proton Drive into Windows File Explorer.
 
+### 7.3 MEGA (20 GB Free End-to-End Encrypted)
+Mount encrypted MEGA storage as a native Windows drive:
+1. Click **+ Add Cloud Disk** and select **MEGA**.
+2. Enter your MEGA account **Email Address** and **Password**.
+3. Credentials are securely encrypted on disk using Windows DPAPI.
+4. Assign an available drive letter (default `M:`) and click **Connect & Mount**.
+
+### 7.4 S3 / Metal Object Storage (AWS, Cloudflare R2, MinIO, Wasabi, Metal)
+Mount high-performance object storage buckets as local drives:
+1. Click **+ Add Cloud Disk** and select **S3 / Metal Object Storage**.
+2. Choose your provider template (AWS, Cloudflare R2, MinIO, Wasabi, or Custom S3 / Metal).
+3. Specify the **Endpoint URL** (e.g. `https://<accountid>.r2.cloudflarestorage.com`, leave blank for AWS S3).
+4. Enter your **Region** (e.g. `us-east-1`, `auto`).
+5. Enter your **Access Key ID** and **Secret Access Key**.
+6. (Optional) Enter the specific **Bucket Name** to mount.
+7. Assign an available drive letter (default `S:`) and click **Connect & Mount**.
+
 ---
 
-## 8. Community Discussion & Support
+## 8. Intelligent Pre-Transfer Deduplication & Delta Classifier
+
+When moving hundreds or thousands of files to the cloud, NS Cloud Drive ensures you never waste time or bandwidth re-uploading files that already exist on your drive:
+
+### 8.1 How Pre-Transfer Deduplication Works
+1. **Remote Cloud Inspection**: Before scheduling an upload, NS Cloud Drive rapidly inspects the destination directory in cloud storage (via local mount cache or direct API query).
+2. **Format Verification**: Checks whether the file extension/format matches (e.g. `.png` vs `.png`, `.jpg` vs `.jpg`). If the local file has been converted (for example, from PNG to JPG), it is flagged as a format mismatch and queued for transfer.
+3. **Exact Size Match**: Verifies exact byte sizes between local and cloud files. If sizes differ, the file is recognized as modified and queued for re-upload.
+4. **Instant Skip**: If the remote file exists with the exact same format and byte count, it is classified as `AlreadyInCloud` and marked complete in milliseconds without touching your network connection!
+5. **Durable Ledger Across Restarts**: Verified files are recorded in `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`. When restarting your PC or re-adding folders, the system remembers previous confirmations instantly—eliminating hours of redundant re-uploads.
+
+### 8.2 Command-Line Deduplication Inspection
+You can test and inspect file deduplication before uploading using the CLI tool:
+```powershell
+.\scripts\Invoke-CloudDeduplication.ps1 -SourcePath "D:\Photos" -ProviderId gdrive -DestinationPath "Backups/Photos" -Detailed
+```
+
+---
+
+## 9. Autonomous AI Agent Integration & Sync Pairs
+
+NS Cloud Drive provides a dedicated toolset for developers running autonomous AI agents on remote servers or local machines:
+
+### 9.1 High-Speed Bidirectional Agent Transfers
+Transfer large files or complete agent workspaces with optional stream compression:
+```powershell
+.\scripts\Invoke-AgentTransfer.ps1 -Direction Push -LocalPath "C:\Data\Models" -RemotePath "/home/agent/workspace" -Compress
+```
+
+### 9.2 Remote Agent Reverse Webhooks & Toast Alerts
+Autonomous AI agents running on a VPS can notify the Windows desktop upon task completion by posting a lightweight JSON payload to the local webhook listener:
+```bash
+curl -X POST http://<windows-host-ip>:5998/agent-notify \
+  -H "Content-Type: application/json" \
+  -d '{"eventType":"task_completed","agentName":"Orchestra Coder","message":"Build succeeded and test suite passed.","status":"success"}'
+```
+This triggers a native Windows desktop toast alert and records the notification in `%LOCALAPPDATA%\NSCloudDrive\logs\agent-notifications.jsonl`.
+
+### 9.3 Automated Sync Pairs & File Watchers
+Establish automated continuous synchronization between local folders and remote agent directories:
+```powershell
+# Add a new sync pair with automatic filesystem watcher
+.\scripts\Invoke-SyncPair.ps1 -Action Add -Name "Agent Workspace" -LocalPath "C:\Agent\Workspace" -RemotePath "/home/agent/workspace" -ProviderId vps -Watch
+
+# Run a sync pair on demand
+.\scripts\Invoke-SyncPair.ps1 -Action Run -SyncPairId sync_12345
+```
+
+---
+
+## 10. Community Discussion & Support
 
 Have questions about setup, configuration, or want to suggest new features for future releases?
 - **Community Discussion Hub**: [https://github.com/naborajs/CloudDrive/discussions/1](https://github.com/naborajs/CloudDrive/discussions/1)
