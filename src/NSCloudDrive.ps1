@@ -3306,19 +3306,7 @@ function Start-AnalyticsStorageWorker([switch]$Force) {
             foreach ($account in $accounts) {
                 try {
                     $responseTimer = [System.Diagnostics.Stopwatch]::StartNew()
-                    $check = if ($account.ProviderId -eq 'gdrive') {
-                        Test-GoogleDriveBackendSession -AccountId ([string]$account.Id)
-                    } elseif ($account.ProviderId -eq 'terabox') {
-                        Test-TeraBoxBackendSession -AccountId ([string]$account.Id)
-                    } elseif ($account.ProviderId -eq 'vps') {
-                        Test-VpsBackendSession -AccountId ([string]$account.Id)
-                    } elseif ($account.ProviderId -eq 'proton') {
-                        Test-ProtonDriveBackendSession -AccountId ([string]$account.Id)
-                    } elseif ($account.ProviderId -eq 'mega') {
-                        Test-MegaBackendSession -AccountId ([string]$account.Id)
-                    } elseif ($account.ProviderId -eq 's3') {
-                        Test-S3BackendSession -AccountId ([string]$account.Id)
-                    } else { $null }
+                    $check = Test-CloudProviderBackendSession -ProviderId $account.ProviderId -AccountId ([string]$account.Id)
                     $responseTimer.Stop()
                     if (-not $check -or -not $check.IsValid -or -not $check.UserInfo) { continue }
                     if ($account.ProviderId -eq 'gdrive' -and -not (Get-SafeProperty $check 'IdentityVerified' $false)) { continue }
@@ -6526,11 +6514,7 @@ function Complete-AvailableDriveDisconnectWorkers {
                 if (-not (Remove-CloudAccount -AccountId $request.AccountId)) {
                     throw 'The saved account could not be removed after its drive disconnected.'
                 }
-                if ($request.ProviderId -eq 'gdrive') {
-                    Remove-GoogleDriveSession -AccountId $request.AccountId
-                } elseif ($request.ProviderId -eq 'terabox') {
-                    Remove-TeraBoxSession -AccountId $request.AccountId
-                }
+                Remove-CloudProviderSession -ProviderId $request.ProviderId -AccountId $request.AccountId
                 Remove-Item -LiteralPath (Join-Path $request.CacheDirectory $request.AccountId) -Recurse -Force -ErrorAction SilentlyContinue
                 if ($request.ProviderId -eq 'terabox') {
                     Remove-Item -LiteralPath (Get-TeraBoxBridgeHomeDirectory -AccountId $request.AccountId) -Recurse -Force -ErrorAction SilentlyContinue
@@ -8907,6 +8891,19 @@ function Invoke-AutoReconnectWatchdog {
                         $environment = if ($key -like '__*') { Get-TeraBoxRcloneEnvironment } else { Get-TeraBoxRcloneEnvironment -AccountId $account.Id }
                         if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
                         Start-VirtualDriveMount -RemoteName 'terabox' -ProviderId 'terabox' -AccountId $account.Id `
+                            -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
+                            -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
+                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
+                    } elseif ((Get-VerifiedRclonePath)) {
+                        if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Validating $($account.ProviderId) session" }
+                        $check = Test-CloudProviderBackendSession -ProviderId $account.ProviderId -AccountId $account.Id -Force
+                        if (-not $check.IsValid) {
+                            [pscustomobject]@{ WorkerKey = $key; State = 'AuthRequired'; FailureCount = 0; NextAllowed = $null; Error = (Format-SanitizedDiagnosticMessage ([string]$check.Error)); DriveLetter = $account.DriveLetter }
+                            continue
+                        }
+                        $environment = Get-CloudProviderRcloneEnvironment -ProviderId $account.ProviderId -AccountId $account.Id -RemoteName $account.ProviderId
+                        if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
+                        Start-VirtualDriveMount -RemoteName $account.ProviderId -ProviderId $account.ProviderId -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
                             -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
