@@ -26,6 +26,7 @@ Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
 . (Join-Path $PSScriptRoot '..\providers\S3Provider.ps1')
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 . (Join-Path $PSScriptRoot 'VirtualDriveManager.ps1')
+. (Join-Path $PSScriptRoot 'CloudDeduplicationService.ps1')
 
 $script:ActiveTransferJobs = @{}
 $script:CloudTransferQueue = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
@@ -1029,6 +1030,16 @@ function Test-RemoteCloudFileVerification {
         } else {
             $verificationType = 'SizeAndPresence'
         }
+
+        try {
+            $recAccId = [string](Get-CloudTransferFieldValue $Account 'Id')
+            Record-CloudDedupVerifiedFile `
+                -AccountId $recAccId `
+                -ProviderId $providerId `
+                -RemotePath $cleanPath `
+                -SizeBytes $remoteSize `
+                -RemoteHash $remoteHash
+        } catch { }
 
         return [ordered]@{
             Verified = $true
@@ -2046,6 +2057,10 @@ function Add-CloudTransferFolderBatch {
     $totalBatchBytes = 0L
     $totalFilesScanned = 0
     $alreadyTrackedCount = 0
+    $alreadyPresentCount = 0
+    $alreadyPresentBytes = 0L
+
+    $remoteInventory = Get-RemoteFileInventoryMap -DestinationAccount $DestinationAccount -DestinationFolderPath $DestinationFolderPath
 
     foreach ($filePath in $filesEnumerate) {
         $fi = [System.IO.FileInfo]::new($filePath)
@@ -2088,50 +2103,115 @@ function Add-CloudTransferFolderBatch {
         }
 
         $jobId = "job_$transferKey"
-        $jobItem = [hashtable]::Synchronized(@{
-            JobId = $jobId
-            QueueId = $jobId
-            TransferKey = $transferKey
-            SourceLastWriteUtc = $sourceLastWriteUtc
-            BatchId = $batchId
-            BatchName = $batchName
-            AccountId = $dstAccId
-            ProviderId = $dstProvId
-            SourceAccount = $SourceAccount
-            DestinationAccount = $DestinationAccount
-            SourcePath = $filePath
-            DestinationPath = $destDir
-            DestinationFilePath = $cleanDest
-            DestinationDirectory = $destDir
-            RelativePath = $relPath
-            ConflictAction = $ConflictAction
-            IsMove = [bool]$IsMove
-            Status = 'Queued'
-            RetryCount = 0
-            VerificationRetryCount = 0
-            MaxRetries = 3
-            NextRetryUtc = [DateTime]::MinValue
-            EnqueuedUtc = [DateTime]::UtcNow
-            StartedUtc = $null
-            CompletedUtc = $null
-            LastProgressUtc = $null
-            WorkerPid = 0
-            WorkerLeaseUtc = $null
-            LastError = ''
-            FileName = $fileName
-            FileSizeBytes = $fileSize
-            BytesTransferred = 0L
-            Percentage = 0.0
-            SmoothedSpeed = 0.0
-            EtaSeconds = $null
-            BandwidthLimit = $BandwidthLimit
-            RemoteHash = ''
-            VerificationType = ''
-        })
+
+        # Rapid deduplication & format check against cloud storage
+        $dedupStatus = 'New'
+        $isAlreadyInCloud = $false
+        if ($ConflictAction -eq 'Skip' -and $null -ne $remoteInventory) {
+            $classification = Classify-TransferCandidate `
+                -LocalFilePath $filePath `
+                -DestinationRelativePath $cleanDest `
+                -RemoteInventoryMap $remoteInventory
+            $dedupStatus = [string]$classification.Status
+            if ($dedupStatus -eq 'AlreadyInCloud') {
+                $isAlreadyInCloud = $true
+                $alreadyPresentCount++
+                $alreadyPresentBytes += $fileSize
+            }
+        }
+
+        if ($isAlreadyInCloud) {
+            $jobItem = [hashtable]::Synchronized(@{
+                JobId = $jobId
+                QueueId = $jobId
+                TransferKey = $transferKey
+                SourceLastWriteUtc = $sourceLastWriteUtc
+                BatchId = $batchId
+                BatchName = $batchName
+                AccountId = $dstAccId
+                ProviderId = $dstProvId
+                SourceAccount = $SourceAccount
+                DestinationAccount = $DestinationAccount
+                SourcePath = $filePath
+                DestinationPath = $destDir
+                DestinationFilePath = $cleanDest
+                DestinationDirectory = $destDir
+                RelativePath = $relPath
+                ConflictAction = $ConflictAction
+                IsMove = [bool]$IsMove
+                Status = 'Completed and remotely confirmed'
+                RetryCount = 0
+                VerificationRetryCount = 0
+                MaxRetries = 3
+                NextRetryUtc = [DateTime]::MinValue
+                EnqueuedUtc = [DateTime]::UtcNow
+                StartedUtc = [DateTime]::UtcNow
+                CompletedUtc = [DateTime]::UtcNow
+                LastProgressUtc = [DateTime]::UtcNow
+                WorkerPid = 0
+                WorkerLeaseUtc = $null
+                LastError = 'Skipped: file already present in cloud with identical format and size.'
+                FileName = $fileName
+                FileSizeBytes = $fileSize
+                BytesTransferred = $fileSize
+                Percentage = 100.0
+                SmoothedSpeed = 0.0
+                EtaSeconds = 0
+                BandwidthLimit = $BandwidthLimit
+                RemoteHash = ''
+                VerificationType = 'PreTransferDeduplication'
+                DeduplicationStatus = 'AlreadyInCloud'
+            })
+            Record-CloudDedupVerifiedFile -AccountId $dstAccId -ProviderId $dstProvId -RemotePath $cleanDest -SizeBytes $fileSize -SkipPersist
+        } else {
+            $jobItem = [hashtable]::Synchronized(@{
+                JobId = $jobId
+                QueueId = $jobId
+                TransferKey = $transferKey
+                SourceLastWriteUtc = $sourceLastWriteUtc
+                BatchId = $batchId
+                BatchName = $batchName
+                AccountId = $dstAccId
+                ProviderId = $dstProvId
+                SourceAccount = $SourceAccount
+                DestinationAccount = $DestinationAccount
+                SourcePath = $filePath
+                DestinationPath = $destDir
+                DestinationFilePath = $cleanDest
+                DestinationDirectory = $destDir
+                RelativePath = $relPath
+                ConflictAction = $ConflictAction
+                IsMove = [bool]$IsMove
+                Status = 'Queued'
+                RetryCount = 0
+                VerificationRetryCount = 0
+                MaxRetries = 3
+                NextRetryUtc = [DateTime]::MinValue
+                EnqueuedUtc = [DateTime]::UtcNow
+                StartedUtc = $null
+                CompletedUtc = $null
+                LastProgressUtc = $null
+                WorkerPid = 0
+                WorkerLeaseUtc = $null
+                LastError = ''
+                FileName = $fileName
+                FileSizeBytes = $fileSize
+                BytesTransferred = 0L
+                Percentage = 0.0
+                SmoothedSpeed = 0.0
+                EtaSeconds = $null
+                BandwidthLimit = $BandwidthLimit
+                RemoteHash = ''
+                VerificationType = ''
+                DeduplicationStatus = $dedupStatus
+            })
+        }
 
         [void]$script:CloudTransferQueue.Add($jobItem)
         $createdJobs.Add($jobItem)
     }
+
+    try { Save-CloudDedupLedger } catch { }
 
     # Persist the complete batch before returning confirmation. If persistence fails,
     # remove only the new in-memory records; the local source files remain untouched.
@@ -2148,6 +2228,8 @@ function Add-CloudTransferFolderBatch {
         TotalFiles = $totalFilesScanned
         NewlyQueuedFiles = $createdJobs.Count
         AlreadyTrackedFiles = $alreadyTrackedCount
+        AlreadyPresentInCloudCount = $alreadyPresentCount
+        SkippedBytes = $alreadyPresentBytes
         TotalBytes = $totalBatchBytes
         Jobs = $createdJobs.ToArray()
     }
@@ -3500,6 +3582,32 @@ function Process-CloudTransferQueue {
                     $stateChanged = $true
                     continue
                 }
+            }
+
+            # Rapid pre-transfer deduplication check:
+            # If the file is already present in cloud storage with identical format and size,
+            # skip sending it again to save bandwidth and time.
+            if ($eligibleOperation.OperationType -eq 'Upload' -and ($eligible['ConflictAction'] -eq 'Skip' -or -not $eligible.ContainsKey('ConflictAction'))) {
+                $destAcc = $eligible['DestinationAccount']
+                $srcPath = [string]$eligible['SourcePath']
+                $destFileRel = [string](if ($eligible.ContainsKey('DestinationFilePath') -and $eligible['DestinationFilePath']) { $eligible['DestinationFilePath'] } else { $eligible['FileName'] })
+
+                try {
+                    $remoteInv = Get-RemoteFileInventoryMap -DestinationAccount $destAcc
+                    $dedupCheck = Classify-TransferCandidate -LocalFilePath $srcPath -DestinationRelativePath $destFileRel -RemoteInventoryMap $remoteInv
+
+                    if ($dedupCheck.Status -eq 'AlreadyInCloud') {
+                        $eligible['Status'] = 'Completed and remotely confirmed'
+                        $eligible['Percentage'] = 100.0
+                        $eligible['BytesTransferred'] = [int64]$eligible['FileSizeBytes']
+                        $eligible['CompletedUtc'] = [DateTime]::UtcNow
+                        $eligible['WorkerPid'] = 0
+                        $eligible['VerificationType'] = 'PreTransferDeduplication'
+                        $eligible['LastError'] = "Already present in cloud with identical format and size ($([int64]$eligible['FileSizeBytes']) bytes). Skipped upload."
+                        $stateChanged = $true
+                        continue
+                    }
+                } catch { }
             }
 
             # Launch transfer for eligible item
