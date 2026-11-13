@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\scripts\CachePathSafety.ps1')
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot 'SettingsManager.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProviderContract.ps1')
 . (Join-Path $PSScriptRoot 'TeraBoxBridgeManager.ps1')
 . (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\ProtonDriveProvider.ps1')
@@ -664,51 +665,23 @@ function Start-VirtualDriveMount(
         }
     }
 
-    # If VPS is being mounted, configure SFTP rclone remote
-    if ($RemoteName -match '(?i)^vps' -or $resolvedProvider -eq 'vps') {
-        try {
-            $vpsEnv = Get-VpsRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
-            foreach ($k in $vpsEnv.Keys) {
-                $EnvironmentVariables[$k] = $vpsEnv[$k]
-            }
-        } catch {
-            throw "Failed to configure VPS SFTP mount: $($_.Exception.Message)"
-        }
+    # Configure provider-specific rclone remote environment for external providers
+    $extProvider = if ($resolvedProvider -and $resolvedProvider -ne 'gdrive' -and $resolvedProvider -ne 'terabox') {
+        $resolvedProvider
+    } elseif ($RemoteName -match '(?i)^(vps|proton|mega|s3)') {
+        $matches[1].ToLowerInvariant()
+    } else {
+        $null
     }
 
-    # If Proton Drive is being mounted, configure protondrive rclone remote
-    if ($RemoteName -match '(?i)^proton' -or $resolvedProvider -eq 'proton') {
+    if ($extProvider) {
         try {
-            $protonEnv = Get-ProtonDriveRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
-            foreach ($k in $protonEnv.Keys) {
-                $EnvironmentVariables[$k] = $protonEnv[$k]
+            $provEnv = Get-CloudProviderRcloneEnvironment -ProviderId $extProvider -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
+            foreach ($k in $provEnv.Keys) {
+                $EnvironmentVariables[$k] = $provEnv[$k]
             }
         } catch {
-            throw "Failed to configure Proton Drive mount: $($_.Exception.Message)"
-        }
-    }
-
-    # If MEGA is being mounted, configure mega rclone remote
-    if ($RemoteName -match '(?i)^mega' -or $resolvedProvider -eq 'mega') {
-        try {
-            $megaEnv = Get-MegaRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
-            foreach ($k in $megaEnv.Keys) {
-                $EnvironmentVariables[$k] = $megaEnv[$k]
-            }
-        } catch {
-            throw "Failed to configure MEGA mount: $($_.Exception.Message)"
-        }
-    }
-
-    # If S3 / Metal is being mounted, configure s3 rclone remote
-    if ($RemoteName -match '(?i)^s3' -or $resolvedProvider -eq 's3') {
-        try {
-            $s3Env = Get-S3RcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $rclonePath
-            foreach ($k in $s3Env.Keys) {
-                $EnvironmentVariables[$k] = $s3Env[$k]
-            }
-        } catch {
-            throw "Failed to configure S3 / Metal mount: $($_.Exception.Message)"
+            throw "Failed to configure $extProvider mount: $($_.Exception.Message)"
         }
     }
 
