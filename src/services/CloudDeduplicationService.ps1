@@ -10,6 +10,17 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'SettingsManager.ps1')
 
+function Get-SafeFieldValue($Item, [string]$Name) {
+    if ($null -eq $Item) { return $null }
+    if ($Item -is [System.Collections.IDictionary]) {
+        if ($Item.Contains($Name)) { return $Item[$Name] }
+        return $null
+    }
+    $prop = $Item.PSObject.Properties[$Name]
+    if ($prop) { return $prop.Value }
+    return $null
+}
+
 $script:DedupLedgerCache = [hashtable]::Synchronized(@{})
 $script:DedupLedgerPathOverride = $null
 $script:DedupLedgerLoaded = $false
@@ -203,8 +214,8 @@ function Get-RemoteFileInventoryMap {
     )
 
     $inventory = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $accId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
-    $provId = [string](Get-CloudTransferFieldValue $DestinationAccount 'ProviderId')
+    $accId = [string](Get-SafeFieldValue $DestinationAccount 'Id')
+    $provId = [string](Get-SafeFieldValue $DestinationAccount 'ProviderId')
     if (-not $provId) { $provId = 'gdrive' }
 
     $cleanFolder = if ($DestinationFolderPath) { $DestinationFolderPath.Trim().Replace('\', '/').TrimStart('/').TrimEnd('/') } else { '' }
