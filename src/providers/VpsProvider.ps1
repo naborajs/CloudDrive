@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
+. (Join-Path $PSScriptRoot 'ProviderContract.ps1')
 
 function Get-VpsCredentialDirectory {
     return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
@@ -17,45 +18,7 @@ function Get-VpsCredentialFilePath([string]$AccountId = '') {
 }
 
 function Set-StrictVpsCredentialAcl([string]$Path) {
-    try {
-        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
-        $acl = if ($isDir) {
-            [System.IO.Directory]::GetAccessControl($Path)
-        } else {
-            [System.IO.File]::GetAccessControl($Path)
-        }
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($existingRule in @($acl.Access)) {
-            [void]$acl.RemoveAccessRuleSpecific($existingRule)
-        }
-        foreach ($sid in @($userSid, $systemSid)) {
-            $rule = if ($isDir) {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            } else {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            }
-            [void]$acl.SetAccessRule($rule)
-        }
-        if ($isDir) {
-            [System.IO.Directory]::SetAccessControl($Path, $acl)
-        } else {
-            [System.IO.File]::SetAccessControl($Path, $acl)
-        }
-    } catch {
-        throw "Unable to restrict permissions on VPS credential path '$Path': $($_.Exception.Message)"
-    }
+    Set-CloudCredentialAcl -Path $Path
 }
 
 function Get-VpsProviderInfo {
@@ -106,19 +69,7 @@ function Obscure-VpsPassword([string]$PlainText, [string]$RcloneBinary = $null) 
 }
 
 function Get-VpsFieldValue([object]$Dict, [string]$Key, [object]$DefaultValue = $null) {
-    if ($null -eq $Dict) { return $DefaultValue }
-    if ($Dict -is [System.Collections.IDictionary]) {
-        if ($Dict.Contains($Key)) {
-            $val = $Dict[$Key]
-            if ($null -ne $val) { return $val }
-        }
-        return $DefaultValue
-    }
-    if ($Dict.PSObject -and $Dict.PSObject.Properties[$Key]) {
-        $val = $Dict.PSObject.Properties[$Key].Value
-        if ($null -ne $val) { return $val }
-    }
-    return $DefaultValue
+    return (Get-CloudProviderFieldValue $Dict $Key $DefaultValue)
 }
 
 function Save-VpsSession([object]$SessionData, [string]$AccountId = '') {
