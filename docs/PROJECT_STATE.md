@@ -19,14 +19,23 @@ NS Cloud Drive is a high-performance Windows desktop application that mounts rem
    - **TeraBox (`terabox`)**: Direct web-session token authorization, local CPX WebDAV bridge, bounded concurrency ceiling (2 workers max).
    - **Linux VPS / Remote Server (`vps`)**: Direct SSH/SFTP filesystem mount (`V:\`), PEM/OpenSSH private key and password authentication, DPAPI key storage.
    - **Proton Drive (`proton`)**: Zero-knowledge end-to-end encrypted storage via SRP (Secure Remote Password) authentication, TOTP 2FA, and dual-password mailbox security.
+   - **MEGA (`mega`)**: 20 GB free end-to-end encrypted cloud storage via rclone native MEGA backend, DPAPI credential security (`M:\`).
+   - **S3 / Metal Object Storage (`s3`)**: High-performance object storage buckets (AWS S3, Cloudflare R2, MinIO, Wasabi, Metal) with customizable endpoints (`S:\`).
 2. **Autonomous AI Agent File Transfer System**:
    - **Bridge Service (`src/services/AgentTransferBridge.ps1`)**: High-throughput bidirectional streaming between local device and remote Linux VPS where AI agents run.
-   - **Autonomous CLI (`scripts/Invoke-AgentTransfer.ps1`)**: Headless tool for agents to Push, Pull, List, and Sync files with multi-stream acceleration (`--sftp-chunk-size 256k`, `--buffer-size 64M`, 4 parallel streams) and JSON machine-readable output.
-   - **Interactive Fast Transfer Modal**: In-app UI (`Show-AgentTransferDialog`) accessible via Disks toolbar (`⇅ Agent`) and VPS disk cards.
-3. **Resilient Transfer Queue & Cloud Transfer Engine (`src/services/CloudTransferManager.ps1`)**: Durable JSON queue (`transfer-jobs.json`), streaming directory ingestion, bounded concurrency, worker lease watchdogs, exponential retry backoff, and remote cloud verification.
-4. **Adaptive Bandwidth & Cache Management (`src/services/AdaptiveBandwidthManager.ps1`, `src/services/CacheManager.ps1`)**: Inactivity-based TTL eviction, in-use and dirty file lock protection, and user-configurable bandwidth throttling.
-5. **Native C# Launcher (`src/launcher/Program.cs`)**: Single-instance mutex enforcement, STA runspace hosting, PerMonitorV2 High-DPI scaling, minimize-to-tray lifecycle, and memory working set trimming.
-6. **Automated Verification Harness**: 45 automated test suites spanning unit, provider contract, security, cache reconciliation, and STA interactive UI button tests (**45 Passed, 0 Failed**).
+   - **Stream Compression**: Pre-transfer on-the-fly streaming compression (`-Compress` / `--sftp-compress`) for maximum throughput.
+   - **Reverse Webhook Server (`src/services/AgentWebhookServer.ps1`)**: Local HTTP listener on port 5998 enabling remote VPS agents to trigger native Windows desktop toast alerts.
+   - **Automated Sync Pairs & Watchers (`src/services/SyncPairManager.ps1`)**: Continuous folder synchronization with debounced `FileSystemWatcher` triggers.
+   - **Autonomous CLI (`scripts/Invoke-AgentTransfer.ps1`, `scripts/Invoke-SyncPair.ps1`)**: Headless tools for agents to Push, Pull, List, and Sync files with multi-stream acceleration.
+3. **Intelligent Cloud Deduplication & Delta Classifier (`src/services/CloudDeduplicationService.ps1`)**:
+   - Rapid pre-transfer verification preventing re-uploading files already present in the cloud with identical size and format.
+   - Accurately discriminates format differences (e.g. PNG vs JPG) and size mismatches to ensure altered files are always re-sent.
+   - Fast inventory mapping utilizing local VFS mount fast-path or single recursive rclone lsjson batch queries.
+   - Durable cloud deduplication ledger (`%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`) persisting across device restarts.
+4. **Resilient Transfer Queue & Cloud Transfer Engine (`src/services/CloudTransferManager.ps1`)**: Durable JSON queue (`transfer-jobs.json`), streaming directory ingestion, bounded concurrency, worker lease watchdogs, exponential retry backoff, and remote cloud verification.
+5. **Adaptive Bandwidth & Cache Management (`src/services/AdaptiveBandwidthManager.ps1`, `src/services/CacheManager.ps1`)**: Inactivity-based TTL eviction, in-use and dirty file lock protection, and user-configurable bandwidth throttling.
+6. **Native C# Launcher (`src/launcher/Program.cs`)**: Single-instance mutex enforcement, STA runspace hosting, PerMonitorV2 High-DPI scaling, minimize-to-tray lifecycle, and memory working set trimming.
+7. **Automated Verification Harness**: 50 automated test suites spanning unit, provider contract, security, cache reconciliation, deduplication, and STA interactive UI button tests (**50 Passed, 0 Failed**).
 
 ---
 
@@ -34,9 +43,9 @@ NS Cloud Drive is a high-performance Windows desktop application that mounts rem
 
 ### 2.1 Git Status & Architecture Summary
 - **Branch:** `main` (synchronized with `origin/main`).
-- **Installed Providers:** `gdrive`, `terabox`, `vps`, `proton`.
+- **Installed Providers:** `gdrive`, `terabox`, `vps`, `proton`, `mega`, `s3`.
 - **Packaging:** `scripts/Package-Release.ps1` builds `dist/NSCloudDrive-v2.0.0-Windows-x64.zip` (2.12 MB, SHA-256 verified).
-- **Automated Tests:** 45 automated test suites in `tests/` passing with exit code 0.
+- **Automated Tests:** 50 automated test suites in `tests/` passing with exit code 0.
 
 ### 2.2 System & Runtime Dependencies
 - **PowerShell Version:** 5.1 (Desktop Edition) running under `Set-StrictMode -Version Latest`.
@@ -96,10 +105,15 @@ NS Cloud Drive is a high-performance Windows desktop application that mounts rem
 | **10. Honest Progress & Completion** | Implemented ("Awaiting remote confirmation...") | UI ASCII & regex audit passed | Verified |
 | **11. Linux VPS SSH / SFTP Mount** | Implemented (`VpsProvider.ps1`, DPAPI keys) | `Test-VpsProvider.ps1` passed | Verified |
 | **12. Proton Drive Integration** | Implemented (`ProtonDriveProvider.ps1`, SRP auth) | `Test-ProtonDriveProvider.ps1` passed | Verified |
-| **13. Autonomous Agent File Transfer** | Implemented (`AgentTransferBridge.ps1`, `Invoke-AgentTransfer.ps1`) | `Test-AgentTransferBridge.ps1` passed | Verified |
-| **14. Interactive UI Button Testing** | Implemented (`Test-InteractiveAppButtons.ps1` in STA) | All views, buttons, dialogs passed | Verified |
-| **15. Regression Test Coverage** | 45 test suites (45 passed, 0 failed) | `tests/Run-AllTests.ps1` exit code 0 | Verified |
-| **16. Documentation Integrity** | Maintained across `docs/`, `README.md`, `task-ledger.json` | 1:1 GitHub commit/push enforced | Verified |
+| **13. MEGA E2EE Storage Provider** | Implemented (`MegaProvider.ps1`, 20 GB free) | `Test-MegaProvider.ps1` passed | Verified |
+| **14. S3 / Metal Object Storage** | Implemented (`S3Provider.ps1`, AWS/R2/MinIO) | `Test-S3Provider.ps1` passed | Verified |
+| **15. Autonomous Agent Webhook Server** | Implemented (`AgentWebhookServer.ps1`, port 5998) | `Test-AgentWebhookServer.ps1` passed | Verified |
+| **16. Pre-Transfer Stream Compression** | Implemented (`-Compress` in agent transfer & UI) | `Test-AgentTransferBridge.ps1` passed | Verified |
+| **17. Automated Sync Pairs & Watchers** | Implemented (`SyncPairManager.ps1`, CLI runner) | `Test-SyncPairManager.ps1` passed | Verified |
+| **18. Intelligent Cloud Deduplication** | Implemented (`CloudDeduplicationService.ps1`) | `Test-CloudDeduplicationService.ps1` passed | Verified |
+| **19. Interactive UI Button Testing** | Implemented (`Test-InteractiveAppButtons.ps1` in STA) | All views, buttons, dialogs passed | Verified |
+| **20. Regression Test Coverage** | 50 test suites (50 passed, 0 failed) | `tests/Run-AllTests.ps1` exit code 0 | Verified |
+| **21. Documentation Integrity** | Maintained across `docs/`, `README.md`, `task-ledger.json` | 1:1 GitHub commit/push enforced | Verified |
 
 ---
 
