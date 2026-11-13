@@ -85,9 +85,9 @@ Issue Tracker: [https://github.com/naborajs/CloudDrive/issues/new](https://githu
 
 ## Overview
 
-**NS Cloud Drive** transforms your cloud storage accounts (**Google Drive**, **TeraBox**, and **Proton Drive**) and remote servers (**Linux VPS via SSH/SFTP**) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
+**NS Cloud Drive** transforms your cloud storage accounts (**Google Drive**, **TeraBox**, **Proton Drive**, **MEGA**, and **S3 / Metal Object Storage**) and remote servers (**Linux VPS via SSH/SFTP**) into native Windows virtual drives visible directly in File Explorer. Files appear and behave just like native local hard drives—complete with volume capacity bars, instant folder browsing, drag-and-drop transfers, and on-demand streaming.
 
-With **Version 2.0**, NS Cloud Drive introduces first-class **VPS & Remote Agent Integration**, allowing you to mount your remote VPS filesystems (such as where remote AI coding agents or server workloads run) directly as Windows drive letters (e.g. `V:`). You can seamlessly move massive gigabyte or terabyte files between your local workstation, remote agents, and cloud drives via direct streaming and resilient background queues.
+With **Version 2.0**, NS Cloud Drive introduces first-class **VPS & Autonomous AI Agent Integration**, **Automated Sync Pairs & File Watchers**, and an **Intelligent Cloud Deduplication & Delta Classifier Engine**. When transferring batches of files, NS Cloud Drive instantly inspects the destination in the cloud: files already present with identical format and byte size are skipped immediately, saving time, bandwidth, and API quotas. If format (e.g. PNG vs JPG) or file size differs, the file is automatically recognized as modified and re-sent. The deduplication ledger persists across device restarts so you never have to re-upload previously transferred files from scratch.
 
 Unlike sync clients that mirror entire cloud storage repositories to expensive local hard drives, NS Cloud Drive uses a high-speed SSD staging and read-ahead cache. Files stream seamlessly when opened, and newly written files are safely staged locally before uploading to the cloud or VPS in the background.
 
@@ -121,15 +121,21 @@ Unlike sync clients that mirror entire cloud storage repositories to expensive l
 ## Key Features
 
 - **Native Windows Explorer Disks**: Drives mount under **Devices and drives** as native `Local Disk` volumes with active storage capacity bars showing real free and total gigabytes.
-- **Multi-Cloud & Remote Server Isolation**: Mount and manage multiple accounts across Google Drive, TeraBox, Linux VPS (SSH/SFTP), and Proton Drive simultaneously (e.g., `G:`, `T:`, `V:`, `P:`) with independent DPAPI-encrypted credentials and non-conflicting mount letters.
+- **6 Supported Cloud & Remote Storage Providers**: Mount and manage accounts across **Google Drive**, **TeraBox**, **Linux VPS (SSH/SFTP)**, **Proton Drive**, **MEGA (20 GB E2EE)**, and **S3 / Metal Object Storage (AWS, Cloudflare R2, MinIO, Wasabi, Metal)** simultaneously with non-conflicting mount letters (`G:`, `T:`, `V:`, `P:`, `M:`, `S:`).
+- **Intelligent Cloud Deduplication & Delta Classifier**: Rapid pre-transfer verification preventing re-uploading files already present in the cloud with identical size and format. Distinguishes format changes (e.g. PNG vs JPG) and size mismatches to ensure altered files are always re-sent. Deduplication ledger persists across device restarts so restarts never re-queue duplicate files.
 - **Remote Agent & VPS Workstation Pipeline**: Mount remote VPS environments (hosting AI agents, background batch runners, or application servers) as native Windows drive letters (e.g., `V:`), enabling effortless bidirectional streaming and massive multi-gigabyte file transfers.
+- **Remote Agent Reverse Webhook & Windows Alerts**: Built-in HTTP listener on port 5998 enabling autonomous AI agents on Linux VPS or localhost to trigger native Windows desktop toast notifications upon task completion.
+- **Pre-Transfer Stream Compression**: Integrated on-the-fly streaming compression (`-Compress`) for high-speed agent and VPS transfers over low-bandwidth or metered links.
+- **Automated Sync Pairs & File Watchers**: Persistent directory sync pairs with scheduled intervals and debounced `FileSystemWatcher` triggers for real-time synchronization between local folders and remote agent workspaces.
 - **Proton Drive Zero-Knowledge Storage**: Native end-to-end encrypted storage mounting via Proton SRP authentication and isolated DPAPI session encryption.
+- **MEGA End-to-End Encrypted Storage**: Full 20 GB free E2EE cloud drive mounting via rclone native MEGA backend and DPAPI credential protection.
+- **S3 & Metal Object Storage Engine**: Direct mounting for AWS S3, Cloudflare R2, MinIO, Wasabi, and Metal object storage buckets with customizable endpoints and access keys.
 - **Drag & Drop Drive Reordering**: Effortlessly customize the order of your cloud drives on the dashboard using intuitive drag handles (`⋮⋮`) or keyboard Up/Down shortcuts; settings persist across restarts via `CardDisplayOrder`.
 - **Adaptive Bandwidth Throttling**: Automatically adjusts cloud upload/download speeds based on real-time network latency probes, with automatic backoff when gaming, streaming, or video conferencing processes are active.
 - **Smart Notification Engine**: Intelligently groups folder uploads to prevent balloon tip spam, eliminates false 0 B background sync notifications, and supports customizable snooze timers (15m, 1h, 4h).
 - **Inactivity Cache TTL & Safe Eviction**: 6-step safe cache cleanup with size-dependent inactivity eviction rules (5m for <1GB, 20m for 1-3GB, 45m for >3GB) and strict file-lock protection (`Test-FileInUse`).
 - **On-Demand Analytics Dashboard**: Hardware resource snapshots, per-account storage quotas, and transfer performance graphs collected strictly on-demand—zero idle background CPU polling when closed.
-- **Triple-Engine Theme Design**: Built-in support for **Pure Black** (high-contrast OLED), **Translucent Liquid Glass** (Windows DWM acrylic), and **Pure White** (crisp high-contrast light mode). (Note: The desktop Options interface provides one-click switching between Pure Black and Pure White, with Translucent Liquid Glass fully configurable via settings).
+- **Triple-Engine Theme Design**: Built-in support for **Pure Black** (high-contrast OLED), **Translucent Liquid Glass** (Windows DWM acrylic), and **Pure White** (crisp high-contrast light mode).
 - **Ultra-Low Memory Footprint**: Background tray mode operates with minimal RAM usage, employing periodic Win32 `EmptyWorkingSet` memory trimming and suspended UI dispatcher cycles.
 
 ---
@@ -159,6 +165,8 @@ flowchart TD
         TB["TeraBox WebDAV Bridge\n(cpx.exe Daemon + Cookie Auth)"]
         VPS["VPS / Remote Server\n(SSH & SFTP / Key & Pass Auth)"]
         PD["Proton Drive\n(Zero-Knowledge SRP / Encryption)"]
+        MG["MEGA Storage\n(20 GB E2EE / rclone mega backend)"]
+        S3["S3 / Metal Storage\n(AWS, R2, MinIO, Wasabi, Metal)"]
     end
 
     subgraph WindowsShell ["Windows OS & Shell"]
@@ -181,8 +189,16 @@ flowchart TD
 
     VFS --> GD
     VFS --> TB
+    VFS --> VPS
+    VFS --> PD
+    VFS --> MG
+    VFS --> S3
     Transfer --> GD
     Transfer --> TB
+    Transfer --> VPS
+    Transfer --> PD
+    Transfer --> MG
+    Transfer --> S3
 ```
 
 ### Component Breakdown
