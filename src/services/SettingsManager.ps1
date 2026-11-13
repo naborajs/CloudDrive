@@ -133,12 +133,17 @@ function Get-NSCloudDriveSettings {
             CacheMaxGigabytes = if ($json.PSObject.Properties['CacheMaxGigabytes'] -and $null -ne $json.CacheMaxGigabytes) { [int]$json.CacheMaxGigabytes } else { $defaults.CacheMaxGigabytes }
             DiagnosticLogging = if ($json.PSObject.Properties['DiagnosticLogging'] -and -not [string]::IsNullOrEmpty($json.DiagnosticLogging)) { [string]$json.DiagnosticLogging } else { $defaults.DiagnosticLogging }
             HealthCheckIntervalSec = if ($json.PSObject.Properties['HealthCheckIntervalSec'] -and $null -ne $json.HealthCheckIntervalSec) { [int]$json.HealthCheckIntervalSec } else { $defaults.HealthCheckIntervalSec }
-            ProviderDriveLetters = [ordered]@{
-                gdrive = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['gdrive']) { [string]$json.ProviderDriveLetters.gdrive } else { 'G' }
-                terabox = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['terabox']) { [string]$json.ProviderDriveLetters.terabox } else { 'T' }
-                vps = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['vps']) { [string]$json.ProviderDriveLetters.vps } else { 'V' }
-                proton = if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties['proton']) { [string]$json.ProviderDriveLetters.proton } else { 'P' }
-            }
+            ProviderDriveLetters = $(
+                $pdl = [ordered]@{}
+                foreach ($pk in $defaults.ProviderDriveLetters.Keys) {
+                    $val = $null
+                    if ($json.PSObject.Properties['ProviderDriveLetters'] -and $json.ProviderDriveLetters -and $json.ProviderDriveLetters.PSObject.Properties[$pk]) {
+                        $val = [string]$json.ProviderDriveLetters.PSObject.Properties[$pk].Value
+                    }
+                    $pdl[$pk] = if (-not [string]::IsNullOrWhiteSpace($val)) { $val } else { [string]$defaults.ProviderDriveLetters[$pk] }
+                }
+                $pdl
+            )
             EnableNotifications = if ($json.PSObject.Properties['EnableNotifications'] -and $null -ne $json.EnableNotifications) { [bool]$json.EnableNotifications } else { $defaults.EnableNotifications }
             NotifyOnUploadStart = if ($json.PSObject.Properties['NotifyOnUploadStart'] -and $null -ne $json.NotifyOnUploadStart) { [bool]$json.NotifyOnUploadStart } else { $defaults.NotifyOnUploadStart }
             NotifyOnUploadComplete = if ($json.PSObject.Properties['NotifyOnUploadComplete'] -and $null -ne $json.NotifyOnUploadComplete) { [bool]$json.NotifyOnUploadComplete } else { $defaults.NotifyOnUploadComplete }
