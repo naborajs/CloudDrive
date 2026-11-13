@@ -1,23 +1,19 @@
 {
-  "taskId": "TASK-014",
-  "goal": "NS Cloud Drive v2.0 — Architecture Specification & Autonomous Expansion (VPS SSH Connection, Remote Agent File Sync, Proton Drive, MEGA, S3/Metal, Reverse Webhook, Sync Pairs, and Intelligent Cloud Deduplication)",
+  "taskId": "TASK-015",
+  "goal": "Untangle Codebase & First-Principles Architecture Refactoring (ProviderContract Dispatchers, Generic Auto-Mount, ACL Consolidation, Strict Mode Safe Field Access, and Zero Redundancy)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Author comprehensive Version 2.0 Engineering Roadmap (docs/ROADMAP-v2.md) detailing VPS SSH/SFTP integration, remote agent large-file sync, Proton Drive, MEGA, S3/Metal, and multi-platform expansion.",
-    "2. Implement VPS / Remote Server provider engine (src/providers/VpsProvider.ps1) supporting SSH/SFTP keys, password auth, DPAPI storage, and full ProviderContract compliance.",
-    "3. Implement Proton Drive provider engine (src/providers/ProtonDriveProvider.ps1) adhering strictly to all 7 ProviderContract functions.",
-    "4. Implement MEGA (20 GB E2EE) and S3 / Metal object storage provider engines (src/providers/MegaProvider.ps1, src/providers/S3Provider.ps1) with DPAPI protection.",
-    "5. Register all 6 providers in src/providers/ProviderContract.ps1 and author comprehensive test suites verifying contract satisfaction and security.",
-    "6. Build high-concurrency HTTP reverse webhook server (src/services/AgentWebhookServer.ps1) on port 5998 with MTA Runspace for remote agent alerts.",
-    "7. Implement on-the-fly pre-transfer stream compression in AgentTransferBridge.ps1, Invoke-AgentTransfer.ps1, and ProviderConnectionWindow.ps1.",
-    "8. Implement automated folder synchronization pairs (src/services/SyncPairManager.ps1, scripts/Invoke-SyncPair.ps1) with debounced FileSystemWatcher.",
-    "9. Implement intelligent cloud deduplication and restart-durable delta classifier (src/services/CloudDeduplicationService.ps1, scripts/Invoke-CloudDeduplication.ps1) preventing redundant uploads across all providers.",
-    "10. Wire all providers, webhooks, sync pairs, and deduplication into SettingsManager.ps1, VirtualDriveManager.ps1, CloudTransferManager.ps1, ProviderConnectionWindow.ps1, and NSCloudDrive.ps1.",
-    "11. Recompile native x64 Windows executable NSCloudDrive.exe (v2.0.0.0) with .NET 4.8 csc.exe and recompute SHA-256 checksum.",
-    "12. Update full documentation suite (README.md, docs/USER_GUIDE.md, docs/ROADMAP-v2.md, docs/PROJECT_STATE.md, docs/COMPATIBILITY-MATRIX.md, docs/engineering/ARCHITECTURE.md, docs/engineering/INCIDENTS_AND_FIXES.md, .agents/architecture/ISSUE_TRACKER.md).",
-    "13. Execute all 50 automated regression test suites ensuring 100% pass rate (50 passed, 0 failed).",
-    "14. Maintain strict 1:1 granular commit and push protocol for every changed file per explicit owner directive."
+    "1. Run comprehensive untangle-codebase architectural analysis identifying hidden links, needless coupling, and special cases.",
+    "2. Author untangle-decision-log.md artifact documenting catalog of problems and first-principles redesign solutions.",
+    "3. Implement unified provider contract dispatchers in ProviderContract.ps1 (Get-CloudProviderFieldValue, Set-CloudCredentialAcl, Get-CloudProviderInfo, Test-CloudProviderBackendSession, Get-CloudProviderRcloneEnvironment, Remove-CloudProviderSession).",
+    "4. Refactor all providers (VpsProvider.ps1, ProtonDriveProvider.ps1, MegaProvider.ps1, S3Provider.ps1) to delegate ACL lockdowns and field access to ProviderContract.",
+    "5. Refactor VirtualDriveManager.ps1 and CloudTransferManager.ps1 to eliminate manual provider switching and use unified rclone environment dispatchers.",
+    "6. Refactor NSCloudDrive.ps1 to make startup auto-mount and account session removal provider-generic across all 6 providers.",
+    "7. Fix SettingsManager.ps1 ProviderDriveLetters deserialization to dynamically cover all registered cloud providers.",
+    "8. Recompile native x64 binary NSCloudDrive.exe v2.0.0.0 and update SHA-256 hash.",
+    "9. Run all 50 automated test suites with 100% pass rate (50 passed, 0 failed).",
+    "10. Maintain 1:1 granular commit and push protocol for every changed file."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -29,38 +25,22 @@
   ],
   "status": "completed",
   "filesChanged": [
-    "src/services/AgentWebhookServer.ps1",
-    "tests/Test-AgentWebhookServer.ps1",
-    "src/services/AgentTransferBridge.ps1",
-    "scripts/Invoke-AgentTransfer.ps1",
-    "src/providers/MegaProvider.ps1",
-    "tests/Test-MegaProvider.ps1",
-    "src/providers/S3Provider.ps1",
-    "tests/Test-S3Provider.ps1",
+    ".agents/skills/untangle-codebase/SKILL.md",
+    "skills-lock.json",
     "src/providers/ProviderContract.ps1",
-    "tests/Test-ProviderContracts.ps1",
+    "src/providers/VpsProvider.ps1",
+    "src/providers/ProtonDriveProvider.ps1",
+    "src/providers/MegaProvider.ps1",
+    "src/providers/S3Provider.ps1",
+    "src/services/CloudDeduplicationService.ps1",
     "src/services/SettingsManager.ps1",
     "src/services/VirtualDriveManager.ps1",
     "src/services/CloudTransferManager.ps1",
-    "assets/logos/mega.png",
-    "assets/logos/s3.png",
+    "src/services/AgentWebhookServer.ps1",
     "src/ui/ProviderConnectionWindow.ps1",
     "src/NSCloudDrive.ps1",
-    "src/services/SyncPairManager.ps1",
-    "scripts/Invoke-SyncPair.ps1",
-    "tests/Test-SyncPairManager.ps1",
-    "src/services/CloudDeduplicationService.ps1",
-    "tests/Test-CloudDeduplicationService.ps1",
-    "scripts/Invoke-CloudDeduplication.ps1",
-    "tests/Test-InteractiveAppButtons.ps1",
-    "tests/Run-AllTests.ps1",
-    "NSCloudDrive.exe.sha256",
     "NSCloudDrive.exe",
-    "README.md",
-    "docs/USER_GUIDE.md",
-    "docs/ROADMAP-v2.md",
-    "docs/PROJECT_STATE.md",
-    "docs/COMPATIBILITY-MATRIX.md",
+    "NSCloudDrive.exe.sha256",
     "docs/engineering/ARCHITECTURE.md",
     "docs/engineering/INCIDENTS_AND_FIXES.md",
     ".agents/architecture/ISSUE_TRACKER.md",
@@ -69,34 +49,29 @@
   "decisions": [
     {
       "date": "2026-11-13",
-      "decision": "Implement pre-transfer format discrimination and exact byte-size matching in CloudDeduplicationService.ps1.",
-      "rationale": "Prevents redundant re-upload of files already in the cloud while ensuring converted formats (e.g. .png vs .jpg) or edited contents are correctly flagged and re-sent."
+      "decision": "Consolidate duplicate Windows ACL lockdown functions across 6 providers into Set-CloudCredentialAcl in ProviderContract.ps1.",
+      "rationale": "Eliminates ~200 lines of verbatim duplicate permission logic and establishes a single security enforcement boundary for DPAPI credential files."
     },
     {
       "date": "2026-11-13",
-      "decision": "Persist cloud deduplication inventory to %LOCALAPPDATA%\\NSCloudDrive\\cache\\cloud-dedup-ledger.json across device restarts.",
-      "rationale": "Eliminates user wait times after rebooting their computer or re-adding large folders to the transfer queue."
+      "decision": "Introduce Get-CloudProviderFieldValue in ProviderContract.ps1 to replace 6 duplicate safe field access helper implementations.",
+      "rationale": "Provides a single, strict-mode safe dictionary/property accessor that prevents PSInvalidOperationException without code duplication."
     },
     {
       "date": "2026-11-13",
-      "decision": "Utilize local WinFsp virtual drive roots for ultra-fast deduplication inventory indexing.",
-      "rationale": "Indexes tens of thousands of remote files in under 30 ms without consuming cloud API calls or network round trips."
+      "decision": "Replace hardcoded provider switching in VirtualDriveManager.ps1, CloudTransferManager.ps1, and NSCloudDrive.ps1 with dynamic ProviderContract dispatchers.",
+      "rationale": "Allows adding new cloud providers in the future without modifying core mounting, transfer, or UI lifecycle loops."
     },
     {
       "date": "2026-11-13",
-      "decision": "Deploy background MTA Runspace HttpListener for reverse remote agent webhooks on port 5998.",
-      "rationale": "Allows remote AI agents on VPS to notify the desktop app of build completions and transfer progress without blocking WPF UI dispatcher thread."
-    },
-    {
-      "date": "2026-11-13",
-      "decision": "Expand provider registry to 6 storage backends: Google Drive, TeraBox, Linux VPS, Proton Drive, MEGA (20 GB E2EE), and S3/Metal object storage.",
-      "rationale": "Delivers universal cloud drive mounting capabilities across major zero-knowledge, public cloud, and object storage ecosystems."
+      "decision": "Refactor NSCloudDrive.ps1 startup auto-mount loop to be provider-agnostic.",
+      "rationale": "Ensures that VPS, Proton Drive, MEGA, and S3 / Metal accounts with AutoMount=true are mounted reliably on application launch."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "finding": "Verified zero non-ASCII bytes in src/NSCloudDrive.ps1 and 100% strict-mode compliance across all 50 PowerShell modules.",
+      "finding": "Verified that all 50 automated test suites pass (exit code 0), 100% strict-mode compliance is preserved, and zero raw non-ASCII bytes exist in NSCloudDrive.ps1.",
       "status": "approved"
     }
   ],
@@ -113,7 +88,7 @@
   "securityFindings": [
     {
       "auditor": "ns-security",
-      "finding": "All MEGA, S3, VPS, and Proton credentials encrypted using Windows DPAPI with exclusive user/SYSTEM ACLs. Zero secrets exposed in logs or console output.",
+      "finding": "Verified Set-CloudCredentialAcl protects all provider credentials under Windows DPAPI with exclusive User and SYSTEM SIDs.",
       "status": "passed"
     }
   ],
