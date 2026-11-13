@@ -3590,7 +3590,12 @@ function Process-CloudTransferQueue {
             if ($eligibleOperation.OperationType -eq 'Upload' -and ($eligible['ConflictAction'] -eq 'Skip' -or -not $eligible.ContainsKey('ConflictAction'))) {
                 $destAcc = $eligible['DestinationAccount']
                 $srcPath = [string]$eligible['SourcePath']
-                $destFileRel = [string](if ($eligible.ContainsKey('DestinationFilePath') -and $eligible['DestinationFilePath']) { $eligible['DestinationFilePath'] } else { $eligible['FileName'] })
+                $destFileRel = ''
+                if ($eligible.ContainsKey('DestinationFilePath') -and $eligible['DestinationFilePath']) {
+                    $destFileRel = [string]$eligible['DestinationFilePath']
+                } else {
+                    $destFileRel = [string]$eligible['FileName']
+                }
 
                 try {
                     $remoteInv = Get-RemoteFileInventoryMap -DestinationAccount $destAcc
