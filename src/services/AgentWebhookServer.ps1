@@ -122,6 +122,19 @@ function Start-AgentWebhookServer {
                     continue
                 }
 
+                if ($path -eq '/shutdown') {
+                    $payload = '{"status":"shutting_down","success":true}'
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+                    $resp.ContentType = 'application/json'
+                    $resp.ContentLength64 = $bytes.Length
+                    $resp.KeepAlive = $false
+                    $resp.StatusCode = 200
+                    $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+                    $resp.Close()
+                    try { $listener.Stop() } catch { }
+                    break
+                }
+
                 if ($path -eq '/agent-notify') {
                     $bodyText = ''
                     if ($req.HasEntityBody) {
@@ -187,7 +200,7 @@ function Stop-AgentWebhookServer {
     if ($null -ne $script:AgentWebhookPowerShell) {
         try {
             $wc = [System.Net.WebClient]::new()
-            try { $wc.DownloadString("http://127.0.0.1:$($script:AgentWebhookPort)/health") | Out-Null } catch { }
+            try { $wc.DownloadString("http://127.0.0.1:$($script:AgentWebhookPort)/shutdown") | Out-Null } catch { }
             $wc.Dispose()
         } catch { }
         try { $script:AgentWebhookPowerShell.Stop() } catch { }
