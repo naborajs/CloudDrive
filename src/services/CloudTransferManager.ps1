@@ -18,6 +18,7 @@ public static class Win32ProcessControl {
 Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
+. (Join-Path $PSScriptRoot '..\providers\ProviderContract.ps1')
 . (Join-Path $PSScriptRoot '..\providers\TeraBoxProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\GoogleDriveProvider.ps1')
 . (Join-Path $PSScriptRoot '..\providers\VpsProvider.ps1')
@@ -47,14 +48,7 @@ function Get-CloudTransferFieldValue {
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    if ($null -eq $Item) { return $null }
-    if ($Item -is [System.Collections.IDictionary]) {
-        if ($Item.Contains($Name)) { return $Item[$Name] }
-        return $null
-    }
-    $prop = $Item.PSObject.Properties[$Name]
-    if ($prop) { return $prop.Value }
-    return $null
+    return (Get-CloudProviderFieldValue $Item $Name $null)
 }
 
 function Get-CloudTransferSettledStagedEntry {
@@ -621,9 +615,6 @@ function Get-CloudAccountTransferRemoteEnvironment {
 
     if ($providerId -eq 'local') {
         return @{}
-    } elseif ($providerId -eq 'gdrive') {
-        $gEnv = Get-GoogleDriveRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias
-        return $gEnv
     } elseif ($providerId -eq 'terabox') {
         # Dictionary-style access: the bridge status is an ordered dictionary
         # and carries no 'Error' key on the success path, so StrictMode
@@ -635,20 +626,8 @@ function Get-CloudAccountTransferRemoteEnvironment {
         }
         $tbEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus['Password'] -Port $bridgeStatus['Port'] -RcloneBinary $rclonePath -RemoteName $RemoteAlias
         return $tbEnv
-    } elseif ($providerId -eq 'vps') {
-        $vpsEnv = Get-VpsRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
-        return $vpsEnv
-    } elseif ($providerId -eq 'proton') {
-        $protonEnv = Get-ProtonDriveRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
-        return $protonEnv
-    } elseif ($providerId -eq 'mega') {
-        $megaEnv = Get-MegaRcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
-        return $megaEnv
-    } elseif ($providerId -eq 's3') {
-        $s3Env = Get-S3RcloneEnvironment -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath
-        return $s3Env
     } else {
-        throw "Unsupported provider for cloud transfer: $providerId"
+        return (Get-CloudProviderRcloneEnvironment -ProviderId $providerId -AccountId $accountId -RemoteName $RemoteAlias -RcloneBinary $rclonePath)
     }
 }
 
