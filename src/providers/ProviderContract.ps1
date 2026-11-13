@@ -175,13 +175,224 @@ function Test-ProviderContract {
     }
 }
 
+function Get-RegisteredCloudProviders {
+    return @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')
+}
+
 function Get-CloudProviderContractSummary {
     # Registry of wired provider ids (must match known ids above). Future
     # providers join this list ONLY together with a real implementation.
     $summary = @()
-    foreach ($providerId in @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) {
+    foreach ($providerId in (Get-RegisteredCloudProviders)) {
         $check = Test-ProviderContract -ProviderId $providerId
         $summary += $check
     }
     return $summary
+}
+
+# ==============================================================================
+# UNIFIED PROVIDER DISPATCHERS & INFRASTRUCTURE
+# ==============================================================================
+
+function Get-CloudProviderFieldValue([object]$Object, [string]$Field, [object]$DefaultValue = $null) {
+    if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($Field)) { return $DefaultValue }
+
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Field)) {
+            $val = $Object[$Field]
+            if ($null -ne $val) { return $val }
+            return $DefaultValue
+        }
+        return $DefaultValue
+    }
+
+    if ($Object.PSObject -and $Object.PSObject.Properties) {
+        $prop = $Object.PSObject.Properties[$Field]
+        if ($null -ne $prop -and $null -ne $prop.Value) {
+            return $prop.Value
+        }
+    }
+
+    return $DefaultValue
+}
+
+function Set-CloudCredentialAcl([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
+        $acl = if ($isDir) {
+            [System.IO.Directory]::GetAccessControl($Path)
+        } else {
+            [System.IO.File]::GetAccessControl($Path)
+        }
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($existingRule in @($acl.Access)) {
+            [void]$acl.RemoveAccessRuleSpecific($existingRule)
+        }
+        foreach ($sid in @($userSid, $systemSid)) {
+            $rule = if ($isDir) {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                    [System.Security.AccessControl.PropagationFlags]::None,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            } else {
+                [System.Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid,
+                    [System.Security.AccessControl.FileSystemRights]::FullControl,
+                    [System.Security.AccessControl.AccessControlType]::Allow
+                )
+            }
+            [void]$acl.SetAccessRule($rule)
+        }
+        if ($isDir) {
+            [System.IO.Directory]::SetAccessControl($Path, $acl)
+        } else {
+            [System.IO.File]::SetAccessControl($Path, $acl)
+        }
+    } catch {
+        throw "Unable to restrict permissions on credential path '$Path': $($_.Exception.Message)"
+    }
+}
+
+function Get-CloudProviderInfo([string]$ProviderId) {
+    if ([string]::IsNullOrWhiteSpace($ProviderId)) { return $null }
+    $func = switch ($ProviderId.ToLowerInvariant()) {
+        'gdrive'  { 'Get-GoogleDriveProviderInfo' }
+        'terabox' { 'Get-TeraBoxProviderInfo' }
+        'vps'     { 'Get-VpsProviderInfo' }
+        'proton'  { 'Get-ProtonDriveProviderInfo' }
+        'mega'    { 'Get-MegaProviderInfo' }
+        's3'      { 'Get-S3ProviderInfo' }
+        default   { $null }
+    }
+    if ($func -and (Get-Command $func -ErrorAction SilentlyContinue)) {
+        return (& $func)
+    }
+    return $null
+}
+
+function Test-CloudProviderBackendSession {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProviderId,
+        [Parameter(Mandatory = $false)]
+        [hashtable]$SessionOverride = $null,
+        [Parameter(Mandatory = $false)]
+        [string]$AccountId = '',
+        [Parameter(Mandatory = $false)]
+        [switch]$Force = $false
+    )
+
+    switch ($ProviderId.ToLowerInvariant()) {
+        'gdrive' {
+            if ($null -ne $SessionOverride) {
+                return (Test-GoogleDriveBackendSession -TokensOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-GoogleDriveBackendSession -AccountId $AccountId -Force:$Force)
+        }
+        'terabox' {
+            if ($null -ne $SessionOverride) {
+                return (Test-TeraBoxBackendSession -SessionOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-TeraBoxBackendSession -AccountId $AccountId -Force:$Force)
+        }
+        'vps' {
+            if ($null -ne $SessionOverride) {
+                return (Test-VpsBackendSession -SessionOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-VpsBackendSession -AccountId $AccountId -Force:$Force)
+        }
+        'proton' {
+            if ($null -ne $SessionOverride) {
+                return (Test-ProtonDriveBackendSession -SessionOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-ProtonDriveBackendSession -AccountId $AccountId -Force:$Force)
+        }
+        'mega' {
+            if ($null -ne $SessionOverride) {
+                return (Test-MegaBackendSession -SessionOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-MegaBackendSession -AccountId $AccountId -Force:$Force)
+        }
+        's3' {
+            if ($null -ne $SessionOverride) {
+                return (Test-S3BackendSession -SessionOverride $SessionOverride -AccountId $AccountId -Force:$Force)
+            }
+            return (Test-S3BackendSession -AccountId $AccountId -Force:$Force)
+        }
+        default {
+            return [ordered]@{
+                IsValid = $false
+                State = 'Disconnected'
+                Error = "Unsupported provider '$ProviderId'"
+            }
+        }
+    }
+}
+
+function Get-CloudProviderRcloneEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProviderId,
+        [Parameter(Mandatory = $false)]
+        [string]$AccountId = '',
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteName,
+        [Parameter(Mandatory = $false)]
+        [string]$RcloneBinary = ''
+    )
+
+    switch ($ProviderId.ToLowerInvariant()) {
+        'gdrive' {
+            return (Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName)
+        }
+        'terabox' {
+            if ($null -ne (Get-Command 'Get-TeraBoxRcloneEnvironment' -ErrorAction SilentlyContinue)) {
+                return (Get-TeraBoxRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName)
+            }
+            return @{}
+        }
+        'vps' {
+            return (Get-VpsRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $RcloneBinary)
+        }
+        'proton' {
+            return (Get-ProtonDriveRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $RcloneBinary)
+        }
+        'mega' {
+            return (Get-MegaRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $RcloneBinary)
+        }
+        's3' {
+            return (Get-S3RcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName -RcloneBinary $RcloneBinary)
+        }
+        default {
+            throw "Unsupported provider for rclone environment: '$ProviderId'"
+        }
+    }
+}
+
+function Remove-CloudProviderSession {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProviderId,
+        [Parameter(Mandatory = $false)]
+        [string]$AccountId = ''
+    )
+
+    switch ($ProviderId.ToLowerInvariant()) {
+        'gdrive'  { Remove-GoogleDriveSession -AccountId $AccountId }
+        'terabox' { Remove-TeraBoxSession -AccountId $AccountId }
+        'vps'     { Remove-VpsSession -AccountId $AccountId }
+        'proton'  { Remove-ProtonDriveSession -AccountId $AccountId }
+        'mega'    { Remove-MegaSession -AccountId $AccountId }
+        's3'      { Remove-S3Session -AccountId $AccountId }
+        default   { }
+    }
 }
