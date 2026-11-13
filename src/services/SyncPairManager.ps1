@@ -50,11 +50,10 @@ function Save-SyncPairs([array]$SyncPairs) {
     $tmp = "$path.tmp.$([Guid]::NewGuid().ToString('N'))"
     [System.IO.File]::WriteAllText($tmp, $json, [System.Text.Encoding]::UTF8)
 
-    # Atomic rename/replace
-    if (Test-Path -LiteralPath $path) {
-        [System.IO.File]::Replace($tmp, $path, $null)
-    } else {
-        [System.IO.File]::Move($tmp, $path)
+    # Safe atomic copy and remove temp
+    [System.IO.File]::Copy($tmp, $path, $true)
+    if (Test-Path -LiteralPath $tmp) {
+        try { [System.IO.File]::Delete($tmp) } catch { }
     }
 }
 
