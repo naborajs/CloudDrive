@@ -53,11 +53,14 @@ TeraBox's [official integration docs](https://www.terabox.com/integrations/docs/
 | **TeraBox** | `terabox` / WebDAV | Web-session / CPX Bridge | Full (`T:\`) | Bounded (2 streams) | DPAPI cookies | **Production Ready** |
 | **Linux VPS** | `sftp` | SSH Password / PEM Keys | Full (`V:\`) | Accelerated (256k / 64M) | DPAPI private keys | **Production Ready (v2.0)** |
 | **Proton Drive** | `protondrive` | SRP + TOTP + Mailbox Key | Full (`P:\`) | Streamed | DPAPI sessions | **Production Ready (v2.0)** |
-| **Autonomous Agent CLI** | SFTP Bridge | Dynamic Environment | Headless CLI / Modal | High-Throughput (4x) | DPAPI zero-leak | **Production Ready (v2.0)** |
+| **MEGA** | `mega` | Account Email & Password | Full (`M:\`) | Streamed E2EE (20 GB) | DPAPI sessions | **Production Ready (v2.0)** |
+| **S3 / Metal Object Storage** | `s3` | AccessKey / SecretKey / Endpoint | Full (`S:\`) | High-Throughput Multipart | DPAPI secrets | **Production Ready (v2.0)** |
+| **Autonomous Agent CLI** | SFTP Bridge | Dynamic Environment | Headless CLI / Modal | Multi-Stream + Compress | DPAPI zero-leak | **Production Ready (v2.0)** |
+| **Remote Agent Webhook** | HTTP Listener | Localhost / LAN (Port 5998) | Native Toast Alerts | JSON Event Stream | In-Memory / Local Log | **Production Ready (v2.0)** |
+| **Sync Pair Watchers** | FileSystemWatcher | Directory Event Bus | Real-time Debounced Sync | Automatic Background | Config File | **Production Ready (v2.0)** |
+| **Cloud Deduplication** | Inventory Map | Size & Format Discrimination | Instant Zero-Network Skip | Microsecond Check | Durable Local Ledger | **Production Ready (v2.0)** |
 
 ### Candidate Providers for Future v2.x Releases:
-- **MEGA**: rclone `mega` backend — 20GB free end-to-end encrypted storage.
 - **Microsoft OneDrive**: rclone `onedrive` backend — Personal and business/SharePoint integration.
 - **WebDAV / Nextcloud / ownCloud**: rclone `webdav` backend — Direct private NAS / self-hosted storage.
-- **S3-Compatible / Metal Object Storage**: rclone `s3` backend — Backblaze B2, Cloudflare R2, MinIO, Wasabi.
 - **Cross-Platform Linux Daemon**: Native background FUSE mount daemon for Debian/Ubuntu/Fedora/Arch.
