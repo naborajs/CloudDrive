@@ -8902,11 +8902,12 @@ function Invoke-AutoReconnectWatchdog {
                             continue
                         }
                         $environment = Get-CloudProviderRcloneEnvironment -ProviderId $account.ProviderId -AccountId $account.Id -RemoteName $account.ProviderId
+                        $isMountReadOnly = [bool]$account.ReadOnly
                         if ($mountProgress.AccountId -eq $key) { $mountProgress.Stage = "Starting and verifying $($account.DriveLetter): mount" }
                         Start-VirtualDriveMount -RemoteName $account.ProviderId -ProviderId $account.ProviderId -AccountId $account.Id `
                             -DriveLetter $account.DriveLetter -VolumeLabel $account.DisplayName `
                             -CacheDirectory $accountCacheDirectory -CacheMaxGigabytes $accountCacheMaxGigabytes -EnvironmentVariables $environment `
-                            -ReadOnly:$([bool]$account.ReadOnly) | Out-Null
+                            -ReadOnly:$isMountReadOnly | Out-Null
                     } else {
                         continue
                     }
