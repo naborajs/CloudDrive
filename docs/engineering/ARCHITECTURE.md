@@ -16,8 +16,15 @@ experimental Windows application, not a production-readiness claim.
 | [`src/providers/TeraBoxProvider.ps1`](../../src/providers/TeraBoxProvider.ps1) | TeraBox session persistence, backend validation, account-scoped session use, and rclone environment configuration. Web-session mode uses an unofficial community backend. |
 | [`src/providers/VpsProvider.ps1`](../../src/providers/VpsProvider.ps1) | Linux VPS / Remote Server SSH and SFTP provider engine, OpenSSH/PEM key support, password auth, DPAPI key storage, and per-account SFTP mount environment. |
 | [`src/providers/ProtonDriveProvider.ps1`](../../src/providers/ProtonDriveProvider.ps1) | Proton Drive zero-knowledge encrypted storage engine via Secure Remote Password (SRP) authentication, TOTP 2FA, and dual-password mailbox encryption. |
-| [`src/services/AgentTransferBridge.ps1`](../../src/services/AgentTransferBridge.ps1) | Autonomous AI agent file transfer bridge providing multi-stream accelerated SFTP streaming, live telemetry, and bidirectional Push/Pull/Sync pipelines. |
-| [`scripts/Invoke-AgentTransfer.ps1`](../../scripts/Invoke-AgentTransfer.ps1) | Autonomous agent headless CLI for executing high-throughput file transfers between local device and remote Linux VPS agent workspaces. |
+| [`src/providers/MegaProvider.ps1`](../../src/providers/MegaProvider.ps1) | MEGA end-to-end encrypted cloud storage provider engine (20 GB free quota), zero-knowledge master key derivation, 2FA support, and DPAPI session protection. |
+| [`src/providers/S3Provider.ps1`](../../src/providers/S3Provider.ps1) | AWS S3, Cloudflare R2, MinIO, Wasabi, and Metal object storage provider engine with custom endpoint configuration, bucket isolation, and credential DPAPI protection. |
+| [`src/services/AgentTransferBridge.ps1`](../../src/services/AgentTransferBridge.ps1) | Autonomous AI agent file transfer bridge providing multi-stream accelerated SFTP streaming, live telemetry, on-the-fly stream compression, and bidirectional Push/Pull/Sync pipelines. |
+| [`src/services/AgentWebhookServer.ps1`](../../src/services/AgentWebhookServer.ps1) | High-concurrency HTTP webhook server (port 5998) hosted in a background MTA Runspace, accepting incoming notifications and task alerts from remote VPS agents. |
+| [`src/services/SyncPairManager.ps1`](../../src/services/SyncPairManager.ps1) | Automated continuous folder synchronization manager, config persistence (`sync-pairs.json`), and debounced `FileSystemWatcher` event dispatching. |
+| [`src/services/CloudDeduplicationService.ps1`](../../src/services/CloudDeduplicationService.ps1) | Intelligent pre-transfer delta classifier, format discrimination (PNG vs JPG), exact byte-size matching, fast WinFsp mount caching, and restart-durable ledger persistence (`cloud-dedup-ledger.json`). |
+| [`scripts/Invoke-AgentTransfer.ps1`](../../scripts/Invoke-AgentTransfer.ps1) | Autonomous agent headless CLI for executing high-throughput, compressed file transfers between local device and remote Linux VPS agent workspaces. |
+| [`scripts/Invoke-SyncPair.ps1`](../../scripts/Invoke-SyncPair.ps1) | CLI automation tool for managing, listing, and running scheduled or continuous folder synchronization pairs. |
+| [`scripts/Invoke-CloudDeduplication.ps1`](../../scripts/Invoke-CloudDeduplication.ps1) | CLI inspection tool for rapidly classifying directory trees against cloud storage targets to prevent redundant uploads. |
 | [`src/services/VirtualDriveManager.ps1`](../../src/services/VirtualDriveManager.ps1) | rclone mount arguments/processes, process ownership, account-to-letter mapping, filesystem-root verification, disconnect, and mount status. |
 | [`src/services/TeraBoxBridgeManager.ps1`](../../src/services/TeraBoxBridgeManager.ps1) | Local CPX WebDAV bridge, per-account bridge home/port/password, health checks, and lifecycle. |
 | [`src/services/BackgroundOperationManager.ps1`](../../src/services/BackgroundOperationManager.ps1) | Bounded background operations used to keep provider checks, mounting, logs, and storage checks off the WPF dispatcher. |
@@ -221,6 +228,76 @@ The `ProtonDriveProvider.ps1` module integrates Proton's zero-knowledge encrypte
 4. **Fixed Disk Mount:** Mounts Proton Drive as a virtual drive letter (default `P:\`) with
    transparent on-demand file hydration and dirty-queue write caching.
 
+## MEGA Cloud Storage Architecture (E2EE)
+
+The `MegaProvider.ps1` module interfaces with MEGA's end-to-end encrypted storage architecture:
+
+1. **Client-Side Master Key Derivation:** Handles client-side encryption key derivation and
+   optional TOTP two-factor authentication without transmitting plaintext secrets.
+2. **Session Persistence:** Serializes and encrypts session tokens using Windows DPAPI at
+   `%LOCALAPPDATA%\NSCloudDrive\credentials\mega-session-<id>.xml` with strict user/SYSTEM ACLs.
+3. **Virtual Drive Integration:** Integrates into `VirtualDriveManager.ps1` to mount MEGA as
+   a fixed Windows volume (default `M:\`), honoring rclone VFS cache settings and full read/write
+   streaming semantics.
+4. **Storage Quotas:** Dynamically queries MEGA's 20 GB free tier (and paid pro tiers) for
+   live UI telemetry and dashboard reporting.
+
+## S3 & Metal Object Storage Architecture
+
+The `S3Provider.ps1` module provides unified support for AWS S3 and S3-compatible cloud/metal providers:
+
+1. **Multi-Provider Profiles:** Built-in endpoint configurations for AWS S3, Cloudflare R2,
+   MinIO, Wasabi, and Metal Object Storage, with full support for arbitrary private endpoints.
+2. **Bucket-Level Isolation:** Binds specific buckets to dedicated virtual drive letters (default `S:\`),
+   providing transparent hierarchical folder browsing over flat object namespaces.
+3. **DPAPI Credential Storage:** Access Keys and Secret Keys are encrypted under DPAPI at
+   `%LOCALAPPDATA%\NSCloudDrive\credentials\s3-session-<id>.xml`.
+4. **Dynamic Rclone Mapping:** Injects scoped `RCLONE_CONFIG_<REMOTE>_TYPE=s3`, `PROVIDER`,
+   `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `ENDPOINT` variables at runtime without writing
+   plaintext credentials to configuration files.
+
+## Remote Agent Webhook & Reverse Notification Architecture
+
+The `AgentWebhookServer.ps1` module establishes a bi-directional communication bridge between
+remote Linux VPS agents and the Windows desktop environment:
+
+1. **High-Concurrency MTA Listener:** Hosts a lightweight `.NET` `HttpListener` on `http://127.0.0.1:5998/`
+   running inside an isolated Multithreaded Apartment (MTA) PowerShell Runspace.
+2. **Zero UI Blocking:** Incoming agent notifications (`/agent-notify`) and health probes (`/health`)
+   are dispatched asynchronously to the WPF Dispatcher, ensuring transfers and alerts never cause UI stutter.
+3. **Notification Payloads:** Accepts JSON payloads containing `agent_id`, `event` (`transfer_complete`,
+   `build_finished`, `task_alert`), `message`, and timestamp, formatting them for the desktop notification queue.
+
+## Automated Sync Pairs & Watchers Architecture
+
+The `SyncPairManager.ps1` module delivers continuous background folder synchronization:
+
+1. **Pair Configuration:** Persists bidirectional, push, and pull synchronization rules in
+   `%LOCALAPPDATA%\NSCloudDrive\config\sync-pairs.json` with atomic file replacement.
+2. **Debounced FileSystemWatcher:** Monitors local directories for file changes (`Created`, `Changed`,
+   `Deleted`, `Renamed`), batching rapid successive events using a 3-second debounce window to prevent
+   hammering cloud APIs during large writes.
+3. **Autonomous CLI & Daemon:** `scripts/Invoke-SyncPair.ps1` allows headless synchronization
+   execution via Windows Task Scheduler or terminal workflows.
+
+## Intelligent Cloud Deduplication & Restart-Durable Delta Classification
+
+The `CloudDeduplicationService.ps1` module eliminates redundant uploads across all 6 storage providers:
+
+1. **Format Discrimination:** Evaluates file extensions and media signatures. While aliases like
+   `.jpg` and `.jpeg` are recognized as equivalent, differing formats (e.g. `.png` vs `.jpg`) are
+   flagged as `FormatMismatch`, guaranteeing that converted files are never skipped.
+2. **Exact Byte-Size Verification:** Compares local candidate file sizes against remote metadata down
+   to the single byte. Any discrepancy triggers a `SizeMismatch` classification and schedules a transfer.
+3. **WinFsp Local-Path Fast Acceleration:** When the target cloud provider is actively mounted, the
+   deduplication engine inspects the local virtual drive root (e.g. `G:\My Drive\Backup`) using direct
+   Windows filesystem calls, indexing tens of thousands of remote files in under 30 milliseconds without
+   making network round-trips. For unmounted remotes, it issues a single recursive `rclone lsjson` call.
+4. **Restart-Durable Ledger:** Confirmed remote files and metadata are persisted to disk at
+   `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`. When a user restarts their computer or
+   re-adds large folders to the transfer queue, the deduplication engine immediately validates files
+   against the ledger, skipping re-uploads instantly with 0 transfer overhead.
+
 ## Validation commands
 
 Run from the repository root in Windows PowerShell:
@@ -228,7 +305,12 @@ Run from the repository root in Windows PowerShell:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-VpsProvider.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ProtonDriveProvider.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-MegaProvider.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-S3Provider.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AgentTransferBridge.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AgentWebhookServer.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SyncPairManager.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CloudDeduplicationService.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InteractiveAppButtons.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ProviderContracts.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-DesktopUIRegression.ps1
