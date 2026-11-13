@@ -1858,7 +1858,7 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
         }
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'vps' -InitialAccount $initData
-        if (-not $saved) { Remove-VpsSession -AccountId $accId }
+        if (-not $saved) { Remove-CloudProviderSession -ProviderId 'vps' -AccountId $accId }
         return $saved
 
     } elseif ($ProviderId -eq 'proton') {
@@ -1879,7 +1879,7 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
         }
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'proton' -InitialAccount $initData
-        if (-not $saved) { Remove-ProtonDriveSession -AccountId $accId }
+        if (-not $saved) { Remove-CloudProviderSession -ProviderId 'proton' -AccountId $accId }
         return $saved
 
     } elseif ($ProviderId -eq 'mega') {
@@ -1900,7 +1900,7 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
         }
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 'mega' -InitialAccount $initData
-        if (-not $saved) { Remove-MegaSession -AccountId $accId }
+        if (-not $saved) { Remove-CloudProviderSession -ProviderId 'mega' -AccountId $accId }
         return $saved
 
     } elseif ($ProviderId -eq 's3') {
@@ -1921,7 +1921,7 @@ function New-CloudAccountRecord([System.Windows.Window]$Owner = $null, [string]$
         }
 
         $saved = Show-CloudAccountSetupModal -Owner $Owner -ProviderId 's3' -InitialAccount $initData
-        if (-not $saved) { Remove-S3Session -AccountId $accId }
+        if (-not $saved) { Remove-CloudProviderSession -ProviderId 's3' -AccountId $accId }
         return $saved
     }
 
@@ -2308,32 +2308,23 @@ function Show-ProviderConnectionWindow(
     $disconnectBtn.Padding = [System.Windows.Thickness]::new(12, 6, 12, 6)
     $disconnectBtn.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
     $disconnectBtn.Add_Click({
-        if ($ProviderId -eq 'terabox') {
-            Remove-TeraBoxSession
-        } else {
-            Remove-GoogleDriveSession
-        }
+        Remove-CloudProviderSession -ProviderId $ProviderId
         & $UpdateState 'Disconnected' 'Account disconnected.'
     })
     $btnRow.Children.Add($disconnectBtn) | Out-Null
 
     # Initial check
-    if ($ProviderId -eq 'terabox') {
-        $c = Test-TeraBoxBackendSession
-        if ($c.IsValid) {
-            $uName = if ($c.UserInfo) { [string](Get-SafeProperty $c.UserInfo 'UserName' 'TeraBox User') } else { 'TeraBox User' }
-            & $UpdateState 'Connected' "Connected as $uName"
+    $c = Test-CloudProviderBackendSession -ProviderId $ProviderId
+    if ($c.IsValid) {
+        $uName = if ($c.UserInfo) {
+            $prop = Get-CloudProviderFieldValue $c.UserInfo 'DisplayName' (Get-CloudProviderFieldValue $c.UserInfo 'UserName' (Get-CloudProviderFieldValue $c.UserInfo 'EmailAddress' "$ProviderId User"))
+            [string]$prop
         } else {
-            & $UpdateState 'Disconnected' 'No account connected.'
+            "$ProviderId User"
         }
+        & $UpdateState 'Connected' "Connected as $uName"
     } else {
-        $c = Test-GoogleDriveBackendSession
-        if ($c.IsValid) {
-            $uDisp = if ($c.UserInfo) { [string](Get-SafeProperty $c.UserInfo 'DisplayName' (Get-SafeProperty $c.UserInfo 'EmailAddress' 'Google Drive User')) } else { 'Google Drive User' }
-            & $UpdateState 'Connected' "Connected as $uDisp"
-        } else {
-            & $UpdateState 'Disconnected' 'No account connected.'
-        }
+        & $UpdateState 'Disconnected' 'No account connected.'
     }
 
     [void](Enable-ModalGlassBackdrop $win)
