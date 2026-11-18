@@ -2214,6 +2214,195 @@ function Add-CloudTransferFolderBatch {
     }
 }
 
+function Add-CloudTransferDroppedItems {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$DestinationAccount,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$DroppedPaths,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DestinationFolderPath = '',
+
+        [ValidateSet('Overwrite', 'Skip', 'Rename')]
+        [string]$ConflictAction = 'Skip',
+
+        [Parameter(Mandatory = $false)]
+        [string]$BatchName = '',
+
+        [Parameter(Mandatory = $false)]
+        [string]$BandwidthLimit = ''
+    )
+
+    if (-not $DroppedPaths -or $DroppedPaths.Count -eq 0) {
+        return [ordered]@{
+            TotalDropped   = 0
+            SkippedCount   = 0
+            SkippedBytes   = 0L
+            QueuedCount    = 0
+            QueuedBytes    = 0L
+            BatchId        = ''
+            BatchName      = ''
+            SkippedFiles   = @()
+            QueuedJobs     = @()
+        }
+    }
+
+    $localSourceAccount = @{
+        Id = 'local'
+        ProviderId = 'local'
+        Email = 'local'
+    }
+
+    $dstAccId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
+    $dstProvId = Get-CloudTransferProviderId $DestinationAccount
+    if (-not $dstProvId) { $dstProvId = 'gdrive' }
+
+    $batchId = "drop_" + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $bName = if ($BatchName) { $BatchName } else { "Drop_$(Get-Date -Format 'yyyyMMdd_HHmmss')" }
+
+    # Expand any dropped directories recursively into individual files
+    $expandedItems = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($dropPath in $DroppedPaths) {
+        if ([string]::IsNullOrWhiteSpace($dropPath)) { continue }
+        if (-not (Test-Path -LiteralPath $dropPath)) { continue }
+
+        if (Test-Path -LiteralPath $dropPath -PathType Container) {
+            $containerDir = $dropPath.TrimEnd('\', '/')
+            $containerName = [System.IO.Path]::GetFileName($containerDir)
+            $containerLen = $containerDir.Length
+            $enumOptions = [System.IO.SearchOption]::AllDirectories
+            $innerFiles = [System.IO.Directory]::EnumerateFiles($containerDir, '*', $enumOptions)
+            foreach ($inf in $innerFiles) {
+                $subRel = $inf.Substring($containerLen).TrimStart('\', '/').Replace('\', '/')
+                $fullRel = if ($containerName) { "$containerName/$subRel" } else { $subRel }
+                $expandedItems.Add(@{
+                    FilePath     = $inf
+                    RelativePath = $fullRel
+                })
+            }
+        } elseif (Test-Path -LiteralPath $dropPath -PathType Leaf) {
+            $fName = [System.IO.Path]::GetFileName($dropPath)
+            $expandedItems.Add(@{
+                FilePath     = $dropPath
+                RelativePath = $fName
+            })
+        }
+    }
+
+    if ($expandedItems.Count -eq 0) {
+        return [ordered]@{
+            TotalDropped   = 0
+            SkippedCount   = 0
+            SkippedBytes   = 0L
+            QueuedCount    = 0
+            QueuedBytes    = 0L
+            BatchId        = $batchId
+            BatchName      = $bName
+            SkippedFiles   = @()
+            QueuedJobs     = @()
+        }
+    }
+
+    # Retrieve remote inventory (durable ledger + mounted drive)
+    $remoteInventory = Get-RemoteFileInventoryMap -DestinationAccount $DestinationAccount -DestinationFolderPath $DestinationFolderPath
+
+    $skippedFiles = [System.Collections.Generic.List[hashtable]]::new()
+    $queuedJobs = [System.Collections.Generic.List[hashtable]]::new()
+    $skippedBytes = 0L
+    $queuedBytes = 0L
+
+    foreach ($item in $expandedItems) {
+        $fp = [string]$item['FilePath']
+        $rel = [string]$item['RelativePath']
+        $fi = [System.IO.FileInfo]::new($fp)
+        $fSize = [int64]$fi.Length
+
+        # Destination relative path in the cloud
+        $destRel = if ($DestinationFolderPath) {
+            $cleanDestDir = $DestinationFolderPath.Trim().Replace('\', '/').TrimStart('/').TrimEnd('/')
+            "$cleanDestDir/$rel"
+        } else {
+            $rel
+        }
+        $destRel = Normalize-CloudPath -Path $destRel
+        $destParentDir = if ($destRel.Contains('/')) { $destRel.Substring(0, $destRel.LastIndexOf('/')) } else { '' }
+
+        # Check deduplication: Name, File Location, and exact File Size / Format
+        $classification = Classify-TransferCandidate `
+            -LocalFilePath $fp `
+            -DestinationRelativePath $destRel `
+            -RemoteInventoryMap $remoteInventory
+
+        if ($classification.Status -eq 'AlreadyInCloud') {
+            # File is ALREADY present in the cloud with matching name, location, and exact size/format!
+            # LEAVE that file without transferring again!
+            $skippedBytes += $fSize
+            $skippedFiles.Add([ordered]@{
+                FilePath     = $fp
+                RelativePath = $destRel
+                SizeBytes    = $fSize
+                Status       = 'AlreadyInCloud'
+                Reason       = $classification.Reason
+            })
+
+            # Ensure durable ledger records verification
+            Record-CloudDedupVerifiedFile `
+                -AccountId $dstAccId `
+                -ProviderId $dstProvId `
+                -RemotePath $destRel `
+                -SizeBytes $fSize `
+                -Format ([string]$classification.LocalFormat) `
+                -SkipPersist
+        } else {
+            # File is either:
+            # 1) New (not present in cloud),
+            # 2) FormatMismatch (e.g. local is PNG but cloud had JPG),
+            # 3) SizeMismatch (file was modified).
+            # These files MUST be transferred!
+            $queuedBytes += $fSize
+            $job = Add-CloudTransferQueueItem `
+                -SourceAccount $localSourceAccount `
+                -SourcePath $fp `
+                -DestinationAccount $DestinationAccount `
+                -DestinationPath $destParentDir `
+                -ConflictAction $ConflictAction `
+                -MaxRetries 3 `
+                -FileSizeBytes $fSize `
+                -BatchId $batchId `
+                -BatchName $bName `
+                -RelativePath $rel `
+                -OperationType 'Upload' `
+                -Origin 'UserDrop' `
+                -BandwidthLimit $BandwidthLimit `
+                -SkipPersist
+
+            if ($null -ne $job) {
+                $job['DeduplicationStatus'] = [string]$classification.Status
+                $queuedJobs.Add($job)
+            }
+        }
+    }
+
+    # Persist durable queue and deduplication ledger once for the whole batch
+    Save-DurableTransferQueue | Out-Null
+    Save-CloudDedupLedger
+
+    return [ordered]@{
+        TotalDropped   = $expandedItems.Count
+        SkippedCount   = $skippedFiles.Count
+        SkippedBytes   = $skippedBytes
+        QueuedCount    = $queuedJobs.Count
+        QueuedBytes    = $queuedBytes
+        BatchId        = $batchId
+        BatchName      = $bName
+        SkippedFiles   = @($skippedFiles.ToArray())
+        QueuedJobs     = @($queuedJobs.ToArray())
+    }
+}
+
 # ==============================================================================
 # BATCH TELEMETRY & SUMMARY
 # ==============================================================================
@@ -2893,6 +3082,17 @@ function Import-StagedVfsFilesToTransferQueue {
             }
         }
 
+        # Check durable deduplication ledger before adoption:
+        # If the file is already confirmed in the cloud with identical relative path and size, skip re-adoption.
+        if (Get-Command Test-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
+            try {
+                if (Test-CloudDedupVerifiedFile -AccountId $accountId -RemotePath $relativePath -SizeBytes $length) {
+                    $result.AlreadySettledCount++
+                    continue
+                }
+            } catch { }
+        }
+
         # One logical staged path has at most one non-terminal job. A newer staged
         # revision replaces an older queued job, but never interrupts bytes that are
         # already in flight.
@@ -3372,6 +3572,23 @@ function Process-CloudTransferQueue {
                             $item['VerificationType'] = [string]$jobStatus.VerificationType
                         }
                         $stateChanged = $true
+
+                        # Record remote confirmation to durable deduplication ledger
+                        if (Get-Command Record-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
+                            try {
+                                $remTarget = if ($item.ContainsKey('DestinationFilePath') -and $item['DestinationFilePath']) { [string]$item['DestinationFilePath'] } else { [string]$item['FileName'] }
+                                $remFmt = if ($item.ContainsKey('Format') -and $item['Format']) { [string]$item['Format'] } else { '' }
+                                $remHash = if ($item.ContainsKey('RemoteHash') -and $item['RemoteHash']) { [string]$item['RemoteHash'] } else { '' }
+                                Record-CloudDedupVerifiedFile `
+                                    -AccountId ([string]$item['AccountId']) `
+                                    -ProviderId ([string]$item['ProviderId']) `
+                                    -RemotePath $remTarget `
+                                    -SizeBytes ([int64]$item['FileSizeBytes']) `
+                                    -Format $remFmt `
+                                    -RemoteHash $remHash `
+                                    -SkipPersist
+                            } catch { }
+                        }
                     } elseif ($jobStatus.Status -eq 'Verifying remote file' -or $jobStatus.VerificationStatus -eq 'Verifying remote file') {
                         $item['Status'] = 'Awaiting remote confirmation'
                         $item['NextRetryUtc'] = $now.AddSeconds(2)
@@ -3436,6 +3653,23 @@ function Process-CloudTransferQueue {
                         $item['VerificationType'] = [string]$vRes['VerificationType']
                     }
                     $stateChanged = $true
+
+                    # Record remote confirmation to durable deduplication ledger
+                    if (Get-Command Record-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
+                        try {
+                            $remTarget = if ($item.ContainsKey('DestinationFilePath') -and $item['DestinationFilePath']) { [string]$item['DestinationFilePath'] } else { [string]$item['FileName'] }
+                            $remFmt = if ($item.ContainsKey('Format') -and $item['Format']) { [string]$item['Format'] } else { '' }
+                            $remHash = if ($item.ContainsKey('RemoteHash') -and $item['RemoteHash']) { [string]$item['RemoteHash'] } else { '' }
+                            Record-CloudDedupVerifiedFile `
+                                -AccountId ([string]$item['AccountId']) `
+                                -ProviderId ([string]$item['ProviderId']) `
+                                -RemotePath $remTarget `
+                                -SizeBytes ([int64]$item['FileSizeBytes']) `
+                                -Format $remFmt `
+                                -RemoteHash $remHash `
+                                -SkipPersist
+                        } catch { }
+                    }
                 } elseif ($vRes -and $vRes['Status'] -eq 'Failed' -and [string]$vRes['Reason'] -match '(?i)(not found|size mismatch)') {
                     $retries = [int]$item['RetryCount']
                     $maxR = [int]$item['MaxRetries']
@@ -3566,7 +3800,7 @@ function Process-CloudTransferQueue {
             # Rapid pre-transfer deduplication check:
             # If the file is already present in cloud storage with identical format and size,
             # skip sending it again to save bandwidth and time.
-            if ($eligibleOperation.OperationType -eq 'Upload' -and ($eligible['ConflictAction'] -eq 'Skip' -or -not $eligible.ContainsKey('ConflictAction'))) {
+            if ($eligibleOperation.OperationType -eq 'Upload') {
                 $destAcc = $eligible['DestinationAccount']
                 $srcPath = [string]$eligible['SourcePath']
                 $destFileRel = ''
@@ -3656,6 +3890,9 @@ function Process-CloudTransferQueue {
 
         if ($stateChanged) {
             Save-DurableTransferQueue | Out-Null
+            if (Get-Command Save-CloudDedupLedger -ErrorAction SilentlyContinue) {
+                try { Save-CloudDedupLedger } catch { }
+            }
         }
 
         return (Get-CloudTransferQueue)
