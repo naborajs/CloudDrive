@@ -285,7 +285,11 @@ Verified Release Hash:
 
 ## Transfer Engine & Telemetry
 
-The NS Cloud Drive transfer engine provides real-time streaming telemetry and comprehensive transfer isolation:
+The NS Cloud Drive transfer engine provides real-time streaming telemetry, post-restart resilience, and comprehensive transfer isolation:
+- **Intelligent Pre-Transfer Deduplication**: Compares candidate files against the remote cloud storage inventory by **Name, File Location, and exact single-byte Size & Format**. Identical files already present in the cloud are skipped instantly with 0 byte transfer overhead.
+- **Post-Restart Interruption Resilience**: If a large batch transfer (e.g. 100 files) is interrupted after 85 files because your PC turned off, rebooted, or the connection broke, NS Cloud Drive saves every remote confirmation to a durable on-disk ledger (`cloud-dedup-ledger.json`). When you restart your PC and drag & drop all 100 files again, the system recognizes the 85 completed files in <10ms, skips them entirely, and uploads only the 15 remaining unsent files.
+- **Format & Size Modification Sensitivity**: Detects format differences (e.g. `.png` vs `.jpg` with identical base names) and byte-size modifications, ensuring modified files are always re-transferred.
+- **Native UI Drag-and-Drop Ingestion**: Drag files or folders directly onto any cloud drive card in the UI or into mounted Explorer drives. Drive cards highlight with accent borders and trigger automatic directory expansion and deduplication.
 - **Exponential Moving Average (EMA)**: Instantaneous transfer speeds fluctuate wildly due to cloud chunking. NS Cloud Drive applies an EMA filter ($\alpha = 0.25$) to calculate smooth, jitter-free speeds and dependable ETAs.
 - **Multi-Transfer Registry (`TransferRegistry`)**: Each active file is tracked by its unique composite identifier (`$drive:$remotePath`). Transferring multiple files simultaneously will never cause UI name collisions or misplaced progress bars.
 - **Live Transfer Queue**: The Disks dashboard features a live queue monitor displaying active uploads, pending staged items, and queued background synchronizations.
