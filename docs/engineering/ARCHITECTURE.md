@@ -298,6 +298,32 @@ The `CloudDeduplicationService.ps1` module eliminates redundant uploads across a
    re-adds large folders to the transfer queue, the deduplication engine immediately validates files
    against the ledger, skipping re-uploads instantly with 0 transfer overhead.
 
+### Post-Restart Resilient Deduplication & Drag-Drop Delta Classification
+
+The system guarantees zero redundant bandwidth consumption during multi-file batch transfers interrupted by sudden system reboots, connection breaks, or device power-offs:
+
+1. **The Deduplication Identity Triple:** Every candidate file is evaluated against three non-negotiable criteria before initiating a network transfer:
+   - **Name:** Exact filename including extension (`report.pdf`).
+   - **File Location:** Destination relative path within the target cloud account (`Backups/2026/report.pdf`).
+   - **Byte Size & Format Category:** Exact byte-for-byte size matching down to a single byte, accompanied by format category equivalence (ensuring `.png` and `.jpg` variants with identical base names are treated as distinct files requiring upload).
+
+2. **Durable Ledger Write-Through Pipeline:** As files in a transfer batch finish uploading and transition to `'Completed and remotely confirmed'`, `Process-CloudTransferQueue` immediately calls `Record-CloudDedupVerifiedFile` to persist their verification records to `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`. Volatile memory loss during a sudden PC shutdown does not compromise this durable ledger.
+
+3. **Interruption & Restart Recovery Workflow:**
+   - **Scenario:** A user initiates a 100-file transfer batch. After 85 files successfully upload, the user's PC loses power, network connectivity drops, or the machine restarts.
+   - **Restart State:** Upon reboot, volatile memory is clean, but `cloud-dedup-ledger.json` retains the verified records for all 85 completed files.
+   - **Re-Ingestion via Drag & Drop:** When the user subsequently drags and drops all 100 original files onto the drive card or into the mounted drive folder:
+     - `Add-CloudTransferDroppedItems` expands any folders recursively and invokes `Classify-TransferBatch` against the durable ledger and live drive inventory.
+     - **85 Files Skipped:** The 85 files already confirmed in the cloud are classified as `AlreadyInCloud`. They are bypassed immediately with **0 bytes transmitted** and 0 network delays.
+     - **15 Files Queued:** Only the 15 remaining unconfirmed files are enqueued for background upload.
+     - **User Feedback:** A system tray balloon notification confirms the delta ingestion: `"Deduplication: 85 file(s) already in cloud (skipped). 15 remaining file(s) queued for transfer."`
+
+4. **Multi-Channel Ingestion Support:**
+   - **UI Drive Card Drops:** Interactive WPF drive cards in `src/NSCloudDrive.ps1` support native `AllowDrop = $true`, visually highlighting with `AccentPrimary` borders on drag-over and dispatching dropped files directly to `Add-CloudTransferDroppedItems`.
+   - **Mounted Explorer Drops:** Files dropped directly into virtual drives (e.g. `G:\`) are scanned by `Import-StagedVfsFilesToTransferQueue`, which tests candidate files against `Test-CloudDedupVerifiedFile` before adoption, preventing duplicate queuing.
+
+5. **Modification Sensitivity:** If an existing file's size changes by even a single byte (`SizeMismatch`) or if its format changes (`FormatMismatch`), the deduplication engine bypasses the skip rule and enqueues the modified file for re-transfer, guaranteeing data integrity.
+
 ## Validation commands
 
 Run from the repository root in Windows PowerShell:
@@ -311,6 +337,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AgentTransf
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-AgentWebhookServer.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-SyncPairManager.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CloudDeduplicationService.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PostRestartDropDeduplication.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-InteractiveAppButtons.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ProviderContracts.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-DesktopUIRegression.ps1
