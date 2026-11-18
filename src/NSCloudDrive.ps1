@@ -7528,6 +7528,7 @@ function Update-AllUIState {
         foreach ($acc in $orderedAccounts) {
             $aCard = [System.Windows.Controls.Border]::new()
             $aCard.Tag = [string]$acc.Id
+            $aCard.AllowDrop = $true
             $accountCardFill = if ($script:GlassState.Active -and $p.Name -eq 'Translucent') { $p.CardGlassBg } else { $p.CardBg }
             $aCard.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($accountCardFill)
             $aCard.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.CardBorder)
@@ -7535,6 +7536,74 @@ function Update-AllUIState {
             $aCard.CornerRadius = [System.Windows.CornerRadius]::new(8)
             $aCard.Padding = [System.Windows.Thickness]::new(10, 12, 14, 12)
             $aCard.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+
+            $aCard.Add_DragEnter({
+                param($s, $e)
+                if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+                    $e.Effects = [System.Windows.DragDropEffects]::Copy
+                    $s.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.AccentPrimary)
+                    $s.BorderThickness = [System.Windows.Thickness]::new(2)
+                    $e.Handled = $true
+                }
+            })
+
+            $aCard.Add_DragOver({
+                param($s, $e)
+                if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+                    $e.Effects = [System.Windows.DragDropEffects]::Copy
+                    $e.Handled = $true
+                }
+            })
+
+            $aCard.Add_DragLeave({
+                param($s, $e)
+                $s.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+                $s.BorderThickness = [System.Windows.Thickness]::new(1)
+            })
+
+            $cardAccountRef = $acc
+            $aCard.Add_Drop({
+                param($s, $e)
+                $s.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.CardBorder)
+                $s.BorderThickness = [System.Windows.Thickness]::new(1)
+
+                if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+                    $droppedFiles = [string[]]$e.Data.GetData([System.Windows.DataFormats]::FileDrop)
+                    if ($droppedFiles -and $droppedFiles.Count -gt 0) {
+                        try {
+                            $dropResult = Add-CloudTransferDroppedItems `
+                                -DestinationAccount $cardAccountRef `
+                                -DroppedPaths $droppedFiles `
+                                -ConflictAction 'Skip'
+
+                            $skipCount = [int]$dropResult.SkippedCount
+                            $queuedCount = [int]$dropResult.QueuedCount
+
+                            $summaryMsg = if ($skipCount -gt 0 -and $queuedCount -gt 0) {
+                                "Deduplication: $skipCount file(s) already in cloud (skipped). $queuedCount remaining file(s) queued for transfer."
+                            } elseif ($skipCount -gt 0 -and $queuedCount -eq 0) {
+                                "Deduplication: All $skipCount file(s) are already confirmed in the cloud. Zero transfers required."
+                            } else {
+                                "Queued $queuedCount file(s) for cloud transfer."
+                            }
+
+                            if ($notifyIcon) {
+                                try {
+                                    $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Drag " + [string][char]0x0026 + " Drop", $summaryMsg, [System.Windows.Forms.ToolTipIcon]::Info)
+                                } catch { }
+                            }
+                            Update-AllUIState
+                        } catch {
+                            if ($notifyIcon) {
+                                try {
+                                    $notifyIcon.ShowBalloonTip(5000, "NS Cloud Drive - Drop Error", $_.Exception.Message, [System.Windows.Forms.ToolTipIcon]::Warning)
+                                } catch { }
+                            }
+                        }
+                    }
+                    $e.Handled = $true
+                }
+            })
 
             $aGrid = [System.Windows.Controls.Grid]::new()
             $aCard.Child = $aGrid
