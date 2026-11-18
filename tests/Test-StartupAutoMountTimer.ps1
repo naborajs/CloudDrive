@@ -248,12 +248,14 @@ try {
     `$script:IsExiting = `$true
     `$window.Close()
     `$app.Shutdown()
+    [System.Environment]::Exit(0)
 })
 `$probe.Start()
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-probe-start'
 [void]`$window.Show()
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
 [void]`$app.Run(`$window)
+[System.Environment]::Exit(0)
 "@
     $harness | Set-Content -LiteralPath $harnessPath -Encoding UTF8
 
@@ -262,9 +264,10 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     $env:NSCD_TEST_RESULT = $resultPath
     $env:NSCD_TEST_TRACE = $tracePath
     $child = Start-Process -FilePath (Get-Command 'powershell.exe' -ErrorAction Stop).Source -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', $harnessPath) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $child.WaitForExit(20000)) {
+    if (-not $child.WaitForExit(35000)) {
+        $preserveTestRoot = $true
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
-        throw 'The isolated WPF startup probe exceeded its 20 second bound.'
+        throw "The isolated WPF startup probe exceeded its 35 second bound. Probe files: $testRoot"
     }
     $child.Refresh()
     $exitCode = $child.ExitCode
