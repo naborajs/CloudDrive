@@ -194,6 +194,103 @@ function Record-CloudDedupVerifiedFile {
     }
 }
 
+function Test-CloudDedupVerifiedFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RemotePath,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$SizeBytes,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Format = ''
+    )
+
+    if (-not $script:DedupLedgerLoaded) {
+        Load-CloudDedupLedger | Out-Null
+    }
+
+    $cleanPath = $RemotePath.Trim().Replace('\', '/').TrimStart('/')
+    $key = Get-CloudDedupLedgerKey -AccountId $AccountId -NormalizedRemotePath $cleanPath
+
+    if (-not $script:DedupLedgerCache.ContainsKey($key)) {
+        return $false
+    }
+
+    $entry = $script:DedupLedgerCache[$key]
+    $recordedSize = [int64]$entry['SizeBytes']
+    if ($recordedSize -ne $SizeBytes) {
+        return $false
+    }
+
+    if ($Format) {
+        $recordedFmt = [string]$entry['Format']
+        if ($recordedFmt -and $recordedFmt -ne $Format) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Sync-CloudDedupInventoryFromDrive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ProviderId = 'gdrive',
+
+        [Parameter(Mandatory = $false)]
+        [string]$DriveRoot = ''
+    )
+
+    $root = $DriveRoot
+    if (-not $root -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
+        try {
+            $status = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $ProviderId
+            if ($status -and $status.IsMounted) {
+                $root = $status.DriveRoot
+            }
+        } catch { }
+    }
+
+    if (-not $root -or -not (Test-Path -LiteralPath $root)) {
+        return 0
+    }
+
+    $enumOptions = [System.IO.SearchOption]::AllDirectories
+    $files = [System.IO.Directory]::EnumerateFiles($root, '*', $enumOptions)
+    $rootLen = $root.TrimEnd('\', '/').Length
+    $count = 0
+
+    foreach ($f in $files) {
+        try {
+            $fi = [System.IO.FileInfo]::new($f)
+            $rel = $f.Substring($rootLen).TrimStart('\', '/').Replace('\', '/')
+            $fmt = Get-FileFormatCategory $fi.Extension
+            Record-CloudDedupVerifiedFile `
+                -AccountId $AccountId `
+                -ProviderId $ProviderId `
+                -RemotePath $rel `
+                -SizeBytes ([int64]$fi.Length) `
+                -Format $fmt `
+                -SkipPersist
+            $count++
+        } catch { }
+    }
+
+    if ($count -gt 0) {
+        Save-CloudDedupLedger
+    }
+    return $count
+}
+
 function Get-RemoteFileInventoryMap {
     [CmdletBinding()]
     param(
@@ -224,19 +321,34 @@ function Get-RemoteFileInventoryMap {
                     $enumOptions = [System.IO.SearchOption]::AllDirectories
                     $files = [System.IO.Directory]::EnumerateFiles($targetDir, '*', $enumOptions)
                     $rootLen = $targetDir.Length
+                    $hasNewMountFiles = $false
                     foreach ($f in $files) {
                         $fi = [System.IO.FileInfo]::new($f)
                         $rel = $f.Substring($rootLen).TrimStart('\', '/').Replace('\', '/')
                         $fullRel = if ($cleanFolder) { "$cleanFolder/$rel" } else { $rel }
                         $normKey = $fullRel.ToLowerInvariant()
+                        $fmt = Get-FileFormatCategory $fi.Extension
                         $inventory[$normKey] = [ordered]@{
                             Name      = $fi.Name
                             RelPath   = $fullRel
                             SizeBytes = [int64]$fi.Length
-                            Format    = Get-FileFormatCategory $fi.Extension
+                            Format    = $fmt
                             Extension = $fi.Extension.ToLowerInvariant()
                             Source    = 'LocalVfsMount'
                         }
+                        if ($accId) {
+                            Record-CloudDedupVerifiedFile `
+                                -AccountId $accId `
+                                -ProviderId $provId `
+                                -RemotePath $fullRel `
+                                -SizeBytes ([int64]$fi.Length) `
+                                -Format $fmt `
+                                -SkipPersist
+                            $hasNewMountFiles = $true
+                        }
+                    }
+                    if ($hasNewMountFiles) {
+                        try { Save-CloudDedupLedger } catch { }
                     }
                     return $inventory
                 }
