@@ -9709,7 +9709,12 @@ function Update-LiveTransferActivity {
             $bProv = if ($bItems[0].ContainsKey('ProviderId') -and $bItems[0]['ProviderId']) { [string]$bItems[0]['ProviderId'] } else { 'Cloud Storage' }
             $bDrive = if ($activeDrive) { $activeDrive } else { 'G' }
             $totalFiles = $bItems.Count
-            $totalSizeBytes = ($bItems | Measure-Object -Property FileSizeBytes -Sum).Sum
+            $totalSizeBytes = 0L
+            foreach ($bi in $bItems) {
+                if ($bi.ContainsKey('FileSizeBytes') -and $bi['FileSizeBytes']) {
+                    $totalSizeBytes += [int64]$bi['FileSizeBytes']
+                }
+            }
             $totalSizeStr = Format-LocalByteSize $totalSizeBytes
 
             $hasActive = ($bItems | Where-Object { $_['Status'] -in @('Uploading', 'Staging', 'Queued', 'Awaiting remote confirmation', 'Verifying remote file') })
