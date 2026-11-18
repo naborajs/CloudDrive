@@ -124,6 +124,24 @@ $script:TransferEventHistory = [System.Collections.Generic.List[hashtable]]::new
 $script:NotifiedEventKeys = [hashtable]::Synchronized(@{})
 $script:LastNotifiedPath = ''
 
+function Get-SafeItemProperty([object]$Item, [string]$Property, [object]$DefaultValue = $null) {
+    if ($null -eq $Item -or [string]::IsNullOrWhiteSpace($Property)) { return $DefaultValue }
+    if ($Item -is [System.Collections.IDictionary]) {
+        if ($Item.Contains($Property)) {
+            $val = $Item[$Property]
+            if ($null -ne $val) { return $val }
+        }
+        return $DefaultValue
+    }
+    if ($Item.PSObject -and $Item.PSObject.Properties) {
+        $p = $Item.PSObject.Properties[$Property]
+        if ($null -ne $p -and $null -ne $p.Value) {
+            return $p.Value
+        }
+    }
+    return $DefaultValue
+}
+
 function Get-TransferHistoryFilePath {
     $dir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
     if (-not (Test-Path -LiteralPath $dir)) {
@@ -5080,19 +5098,21 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
 
         $filtered = @($sourceItems | Where-Object {
             $item = $_
+            $st = [string](Get-SafeItemProperty $item 'Status' '')
+            $reconStatus = [string](Get-SafeItemProperty $item 'ReconciliationStatus' '')
             $matchesMode = switch ($script:CurrentTransferModalFilter) {
                 'All' { $true }
-                'Active' { $item.Status -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation') -or $item.ReconciliationStatus -eq 'Required' -or $item.Status -match '^Needs attention' }
-                'Completed' { $item.Status -in @('Completed and remotely confirmed', 'Completed') }
-                'Failed' { $item.Status -in @('Failed', 'Cancelled') -or $item.ReconciliationStatus -eq 'Required' -or $item.Status -match '^Needs attention' }
+                'Active' { $st -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Awaiting remote confirmation', 'Verifying remote file', 'Upload pending remote confirmation') -or $reconStatus -eq 'Required' -or $st -match '^Needs attention' }
+                'Completed' { $st -in @('Completed and remotely confirmed', 'Completed') }
+                'Failed' { $st -in @('Failed', 'Cancelled') -or $reconStatus -eq 'Required' -or $st -match '^Needs attention' }
                 default { $true }
             }
             if (-not $matchesMode) { return $false }
 
             if ($ft) {
-                $fName = if ($item.FileName) { [string]$item.FileName } else { '' }
-                $pName = if ($item.ProviderName) { [string]$item.ProviderName } else { '' }
-                $bName = if ($item.BatchName) { [string]$item.BatchName } else { '' }
+                $fName = [string](Get-SafeItemProperty $item 'FileName' '')
+                $pName = [string](Get-SafeItemProperty $item 'ProviderName' '')
+                $bName = [string](Get-SafeItemProperty $item 'BatchName' '')
                 if (-not ($fName.ToLowerInvariant().Contains($ft) -or $pName.ToLowerInvariant().Contains($ft) -or $bName.ToLowerInvariant().Contains($ft))) {
                     return $false
                 }
@@ -5134,26 +5154,45 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $rowGrid.ColumnDefinitions.Add($c2) | Out-Null
             $rowGrid.ColumnDefinitions.Add($c3) | Out-Null
 
+            $iFileName = [string](Get-SafeItemProperty $item 'FileName' '')
+            $iDirection = [string](Get-SafeItemProperty $item 'Direction' '')
+            $iSourceProvider = [string](Get-SafeItemProperty $item 'SourceProvider' '')
+            $iDestinationProvider = [string](Get-SafeItemProperty $item 'DestinationProvider' '')
+            $iOrigin = [string](Get-SafeItemProperty $item 'Origin' '')
+            $iDriveLetter = [string](Get-SafeItemProperty $item 'DriveLetter' '')
+            $iBatchName = [string](Get-SafeItemProperty $item 'BatchName' '')
+            $iSourcePath = [string](Get-SafeItemProperty $item 'SourcePath' '')
+            $iDestinationPath = [string](Get-SafeItemProperty $item 'DestinationPath' '')
+            $iSourceAccountId = [string](Get-SafeItemProperty $item 'SourceAccountId' '')
+            $iDestinationAccountId = [string](Get-SafeItemProperty $item 'DestinationAccountId' '')
+            $st = [string](Get-SafeItemProperty $item 'Status' 'Queued')
+            $iReconciliationStatus = [string](Get-SafeItemProperty $item 'ReconciliationStatus' '')
+            $iError = [string](Get-SafeItemProperty $item 'Error' '')
+            $iVerificationType = [string](Get-SafeItemProperty $item 'VerificationType' '')
+            $iFileSizeBytes = [int64](Get-SafeItemProperty $item 'FileSizeBytes' 0L)
+            $iBytesTransferred = [int64](Get-SafeItemProperty $item 'BytesTransferred' 0L)
+            $iJobId = [string](Get-SafeItemProperty $item 'JobId' '')
+
             # Col 0: File Information and Lifecycle / Error Info
             $fInfoSp = [System.Windows.Controls.StackPanel]::new()
             $fInfoSp.VerticalAlignment = 'Center'
 
-            $fNameLabel = New-Label $item.FileName 12 $p.TextPrimary $true
+            $fNameLabel = New-Label $iFileName 12 $p.TextPrimary $true
             $fNameLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
             $fInfoSp.Children.Add($fNameLabel) | Out-Null
 
-            $routeDirection = if ($item.Direction) { [string]$item.Direction } else { 'Unknown' }
-            $srcProvider = if ($item.SourceProvider) { [string]$item.SourceProvider } else { 'unknown source' }
-            $dstProvider = if ($item.DestinationProvider) { [string]$item.DestinationProvider } else { 'unknown destination' }
+            $routeDirection = if ($iDirection) { $iDirection } else { 'Unknown' }
+            $srcProvider = if ($iSourceProvider) { $iSourceProvider } else { 'unknown source' }
+            $dstProvider = if ($iDestinationProvider) { $iDestinationProvider } else { 'unknown destination' }
             $routeInfo = switch ($routeDirection) {
                 'Upload' { "Upload: $srcProvider " + [char]0x2192 + " $dstProvider" }
                 'Download' { "Download: $srcProvider " + [char]0x2192 + " local disk" }
                 'CloudToCloud' { "Cloud copy: $srcProvider " + [char]0x2192 + " $dstProvider" }
-                default { if ($item.Origin -eq 'Legacy') { 'Direction not recorded (legacy history)' } else { 'Direction unresolved ' + [char]0x2014 + ' needs reconciliation' } }
+                default { if ($iOrigin -eq 'Legacy') { 'Direction not recorded (legacy history)' } else { 'Direction unresolved ' + [char]0x2014 + ' needs reconciliation' } }
             }
-            if ($item.DriveLetter) { $routeInfo += " ($($item.DriveLetter):)" }
-            if ($item.Origin -and $item.Origin -ne 'UserRequest' -and $item.Origin -ne 'Legacy') { $routeInfo += " " + [char]0x2022 + " $($item.Origin)" }
-            if ($item.BatchName) { $routeInfo += " " + [char]0x2022 + " Batch: $($item.BatchName)" }
+            if ($iDriveLetter) { $routeInfo += " ($($iDriveLetter):)" }
+            if ($iOrigin -and $iOrigin -ne 'UserRequest' -and $iOrigin -ne 'Legacy') { $routeInfo += " " + [char]0x2022 + " $iOrigin" }
+            if ($iBatchName) { $routeInfo += " " + [char]0x2022 + " Batch: $iBatchName" }
 
             $fRouteLabel = New-Label $routeInfo 10 $p.TextSecondary $false
             $fRouteLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
@@ -5163,12 +5202,12 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             # guessing from a drive letter or a file extension.
             $endpointText = ''
             if ($routeDirection -eq 'Download') {
-                $endpointText = "From: $($item.SourcePath) " + [char]0x2192 + " To: $($item.DestinationPath)"
+                $endpointText = "From: $iSourcePath " + [char]0x2192 + " To: $iDestinationPath"
             } elseif ($routeDirection -in @('Upload', 'CloudCopy')) {
-                $endpointText = "From: $($item.SourcePath) " + [char]0x2192 + " To: $($item.DestinationPath)"
+                $endpointText = "From: $iSourcePath " + [char]0x2192 + " To: $iDestinationPath"
             }
-            if ($item.SourceAccountId -or $item.DestinationAccountId) {
-                $endpointText += " " + [char]0x2022 + " Account: " + $(if ($item.DestinationAccountId) { $item.DestinationAccountId } else { $item.SourceAccountId })
+            if ($iSourceAccountId -or $iDestinationAccountId) {
+                $endpointText += " " + [char]0x2022 + " Account: " + $(if ($iDestinationAccountId) { $iDestinationAccountId } else { $iSourceAccountId })
             }
             if ($endpointText) {
                 $endpointLabel = New-Label $endpointText 10 $p.TextMuted $false
@@ -5176,34 +5215,33 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                 $fInfoSp.Children.Add($endpointLabel) | Out-Null
             }
 
-            $st = [string]$item.Status
-            if ($item.ReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
-                $reconText = if ($item.Error) { [string]$item.Error } else { 'Transfer direction could not be established from persisted endpoints.' }
+            if ($iReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
+                $reconText = if ($iError) { $iError } else { 'Transfer direction could not be established from persisted endpoints.' }
                 $detailLabel = New-Label ([string][char]0x26A0 + " Needs reconciliation: $reconText") 10 '#F59E0B' $false
                 $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
             } elseif ($st -match '^Needs attention') {
-                $errText = if ($item.Error) { [string]$item.Error } else { $st }
+                $errText = if ($iError) { $iError } else { $st }
                 $detailLabel = New-Label ([string][char]0x26A0 + " $errText") 10 '#F59E0B' $false
                 $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
             } elseif ($st -in @('Completed and remotely confirmed', 'Completed')) {
-                $verText = if ($item.VerificationType) { [string]$item.VerificationType } else { 'Remote confirmation verified' }
+                $verText = if ($iVerificationType) { $iVerificationType } else { 'Remote confirmation verified' }
                 $detailLabel = New-Label ([string][char]0x2713 + " $verText") 10 '#10B981' $false
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
             } elseif ($st -eq 'Failed') {
-                $errText = if ($item.Error) { [string]$item.Error } else { 'Transfer failed' }
+                $errText = if ($iError) { $iError } else { 'Transfer failed' }
                 $detailLabel = New-Label ([string][char]0x2717 + " $errText") 10 '#EF4444' $false
                 $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
             } elseif ($st -eq 'Waiting for network/provider') {
-                $errText = if ($item.Error) { [string]$item.Error } else { 'Retrying connection...' }
+                $errText = if ($iError) { $iError } else { 'Retrying connection...' }
                 $detailLabel = New-Label ([string][char]0x21BB + " Retrying: $errText") 10 '#F59E0B' $false
                 $detailLabel.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
                 $fInfoSp.Children.Add($detailLabel) | Out-Null
             } elseif ($st -in @('Uploading', 'Awaiting remote confirmation', 'Verifying remote file', 'Staging')) {
-                $progText = if ($item.FileSizeBytes -gt 0 -and $item.BytesTransferred -gt 0) {
-                    $pct = [Math]::Min(100.0, [Math]::Round(($item.BytesTransferred / [double]$item.FileSizeBytes) * 100.0, 1))
+                $progText = if ($iFileSizeBytes -gt 0 -and $iBytesTransferred -gt 0) {
+                    $pct = [Math]::Min(100.0, [Math]::Round(($iBytesTransferred / [double]$iFileSizeBytes) * 100.0, 1))
                     "$pct% transferred " + [char]0x2022 + " $st"
                 } else {
                     $st
@@ -5216,7 +5254,7 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $rowGrid.Children.Add($fInfoSp) | Out-Null
 
             # Col 1: File Size
-            $sizeFormatted = if ($item.FileSizeBytes -gt 0) { Format-LocalByteSize $item.FileSizeBytes } else { '0 B' }
+            $sizeFormatted = if ($iFileSizeBytes -gt 0) { Format-LocalByteSize $iFileSizeBytes } else { '0 B' }
             $sizeLabel = New-Label $sizeFormatted 11 $p.TextPrimary $true
             $sizeLabel.Margin = [System.Windows.Thickness]::new(10, 0, 12, 0)
             $sizeLabel.VerticalAlignment = 'Center'
@@ -5230,7 +5268,7 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
             $statusBadge.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
             $statusBadge.VerticalAlignment = 'Center'
 
-            if ($item.ReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
+            if ($iReconciliationStatus -eq 'Required' -or $st -match '^Needs reconciliation') {
                 $statusBadge.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#78350F')
                 $statusBadge.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
                 $statusBadge.BorderThickness = [System.Windows.Thickness]::new(1)
@@ -5290,7 +5328,7 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                 $retryBtn.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextPrimary)
                 $retryBtn.FontSize = 11
                 $retryBtn.Cursor = [System.Windows.Input.Cursors]::Hand
-                $targetId = if ($item.JobId) { [string]$item.JobId } else { [string]$item.FileName }
+                $targetId = if ($iJobId) { $iJobId } else { $iFileName }
                 $retryBtn.Add_Click({
                     Resume-CloudTransferQueueItem $targetId | Out-Null
                     if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
