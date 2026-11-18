@@ -167,7 +167,32 @@ When moving hundreds or thousands of files to the cloud, NS Cloud Drive ensures 
 4. **Instant Skip**: If the remote file exists with the exact same format and byte count, it is classified as `AlreadyInCloud` and marked complete in milliseconds without touching your network connection!
 5. **Durable Ledger Across Restarts**: Verified files are recorded in `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`. When restarting your PC or re-adding folders, the system remembers previous confirmations instantly—eliminating hours of redundant re-uploads.
 
-### 8.2 Command-Line Deduplication Inspection
+### 8.2 The Multi-File Restart Scenario (100-File Interruption Recovery)
+Consider a common high-volume workflow:
+- You are transferring **100 large files** into your cloud drive.
+- After **85 files** have transferred, your PC loses power, network connectivity drops, or you shut down the machine.
+- Later, you power on your PC and drag & drop all **100 files** again into your cloud drive or virtual drive folder.
+
+In traditional sync tools, the application blindly re-sends all 100 files from the beginning—wasting hours re-transferring the 85 files that were already safely in the cloud.
+
+With NS Cloud Drive:
+1. **Durable Confirmation Memory**: Every file that completes verification is immediately committed to `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`.
+2. **Instant Triple-Check**: On restart, when you drop the 100 files again, the engine evaluates each file by:
+   - **Name**: e.g., `document_042.pdf`
+   - **File Location**: destination folder in the cloud
+   - **Byte Size & Format**: exact byte-for-byte size and media format
+3. **85 Files Skipped with 0 Overhead**: The 85 previously confirmed files are classified as `AlreadyInCloud` and skipped in <10 milliseconds with **0 bytes transmitted**.
+4. **Only 15 Remaining Files Transferred**: The transfer engine queues and uploads only the 15 remaining unconfirmed files.
+5. **Modification Protection**: If you modified any of the 85 files (different byte size) or changed their format (e.g. from `.png` to `.jpg`), NS Cloud Drive immediately detects the delta and re-sends the updated file.
+
+### 8.3 Native Drag-and-Drop Ingestion on Drive Cards
+You can drag and drop files or complete directory hierarchies directly onto any cloud drive card on the **Disks** view:
+- **Visual Highlight**: Dragging files over a drive card highlights its border in bright accent color.
+- **Automatic Directory Expansion**: Folders are expanded recursively and checked against the cloud deduplication ledger.
+- **Desktop Toast Notification**: Once dropped, a balloon alert notifies you of the exact delta result:
+  `Deduplication: 85 file(s) already in cloud (skipped). 15 remaining file(s) queued for transfer.`
+
+### 8.4 Command-Line Deduplication Inspection
 You can test and inspect file deduplication before uploading using the CLI tool:
 ```powershell
 .\scripts\Invoke-CloudDeduplication.ps1 -SourcePath "D:\Photos" -ProviderId gdrive -DestinationPath "Backups/Photos" -Detailed
