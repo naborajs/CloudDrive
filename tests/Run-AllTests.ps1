@@ -26,6 +26,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-AgentTransferBridge.ps1'),
     (Join-Path $PSScriptRoot 'Test-SyncPairManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-CloudDeduplicationService.ps1'),
+    (Join-Path $PSScriptRoot 'Test-PostRestartDropDeduplication.ps1'),
     (Join-Path $PSScriptRoot 'Test-InteractiveAppButtons.ps1'),
     (Join-Path $PSScriptRoot 'Test-VirtualDriveManager.ps1'),
     (Join-Path $PSScriptRoot 'Test-SettingsManager.ps1'),
