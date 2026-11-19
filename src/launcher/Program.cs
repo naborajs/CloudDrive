@@ -171,6 +171,13 @@ namespace NSCloudDrive.Launcher
                     }
                     catch { }
 
+                    if (appMutex != null)
+                    {
+                        try { appMutex.ReleaseMutex(); } catch { }
+                        appMutex.Close();
+                        appMutex = null;
+                    }
+
                     return RunOutOfProcess(scriptPath, baseDir, args);
                 }
             }
@@ -270,7 +277,7 @@ namespace NSCloudDrive.Launcher
             StringBuilder argBuilder = new StringBuilder();
             argBuilder.Append("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File \"");
             argBuilder.Append(scriptPath);
-            argBuilder.Append("\"");
+            argBuilder.Append("\" -FromLauncher");
 
             if (args != null && args.Length > 0)
             {
@@ -332,17 +339,14 @@ namespace NSCloudDrive.Launcher
 
             try
             {
-                IntPtr hWnd = FindWindow(null, WindowTitle);
-                if (hWnd == IntPtr.Zero)
-                {
-                    // Give the existing instance 150ms to receive the restore event and show its window
-                    Thread.Sleep(150);
-                    hWnd = FindWindow(null, WindowTitle);
-                }
+                IntPtr hWnd = IntPtr.Zero;
+                int currentPid = Process.GetCurrentProcess().Id;
 
-                if (hWnd == IntPtr.Zero)
+                for (int attempt = 0; attempt < 10; attempt++)
                 {
-                    int currentPid = Process.GetCurrentProcess().Id;
+                    hWnd = FindWindow(null, WindowTitle);
+                    if (hWnd != IntPtr.Zero) break;
+
                     Process[] procs = Process.GetProcessesByName("NSCloudDrive");
                     foreach (Process p in procs)
                     {
@@ -352,6 +356,9 @@ namespace NSCloudDrive.Launcher
                             break;
                         }
                     }
+                    if (hWnd != IntPtr.Zero) break;
+
+                    Thread.Sleep(150);
                 }
 
                 if (hWnd != IntPtr.Zero)
