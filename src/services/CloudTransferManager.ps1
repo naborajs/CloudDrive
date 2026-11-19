@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
+Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
 
 # Win32 Process Suspend and Resume for pause/resume transfer support
 $ntdllDef = @"
@@ -16,6 +17,163 @@ public static class Win32ProcessControl {
 }
 "@
 Add-Type -TypeDefinition $ntdllDef -ErrorAction SilentlyContinue
+
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Web.Script.Serialization;
+
+namespace NSCloudDrive
+{
+    public static class QueueFastIO
+    {
+        public static Dictionary<string, object> ReadAndValidateJson(string filePath)
+        {
+            if (!File.Exists(filePath)) return null;
+            string json = File.ReadAllText(filePath, System.Text.Encoding.UTF8);
+            if (string.IsNullOrWhiteSpace(json)) throw new IOException("State file is empty.");
+
+            var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            object raw = serializer.DeserializeObject(json);
+            Dictionary<string, object> dict = raw as Dictionary<string, object>;
+            if (dict == null || !dict.ContainsKey("Jobs"))
+            {
+                throw new InvalidOperationException("State file has no Jobs collection.");
+            }
+            if (!(dict["Jobs"] is IList))
+            {
+                throw new InvalidOperationException("State file Jobs collection is not an array.");
+            }
+            if (dict.ContainsKey("Version"))
+            {
+                string v = Convert.ToString(dict["Version"]);
+                if (v != "1.0" && v != "2.0")
+                {
+                    throw new InvalidOperationException(string.Format("Unsupported transfer-state schema version '{0}'.", v));
+                }
+            }
+            return dict;
+        }
+
+        public static List<Hashtable> ParseJobsFromDictionary(Dictionary<string, object> dict)
+        {
+            if (dict == null || !dict.ContainsKey("Jobs")) return new List<Hashtable>(0);
+            return ParseJobs(dict["Jobs"]);
+        }
+
+        public static List<Hashtable> ParseJobs(object jobsRaw)
+        {
+            if (jobsRaw == null) return new List<Hashtable>(0);
+            IList jobsList = jobsRaw as IList;
+            if (jobsList == null)
+            {
+                if (jobsRaw is IDictionary)
+                {
+                    jobsList = new ArrayList { jobsRaw };
+                }
+                else
+                {
+                    throw new InvalidOperationException("State file Jobs collection is not an array.");
+                }
+            }
+
+            var result = new List<Hashtable>(jobsList.Count);
+            foreach (object item in jobsList)
+            {
+                IDictionary j = item as IDictionary;
+                if (j == null) continue;
+
+                string jId = "";
+                if (j.Contains("JobId") && j["JobId"] != null && !string.IsNullOrEmpty(Convert.ToString(j["JobId"])))
+                    jId = Convert.ToString(j["JobId"]);
+                else if (j.Contains("QueueId") && j["QueueId"] != null && !string.IsNullOrEmpty(Convert.ToString(j["QueueId"])))
+                    jId = Convert.ToString(j["QueueId"]);
+                else
+                    throw new InvalidOperationException("Transfer record has no stable JobId or QueueId.");
+
+                string qId = (j.Contains("QueueId") && j["QueueId"] != null && !string.IsNullOrEmpty(Convert.ToString(j["QueueId"]))) 
+                    ? Convert.ToString(j["QueueId"]) : jId;
+
+                Hashtable ht = new Hashtable(StringComparer.OrdinalIgnoreCase);
+                foreach (DictionaryEntry de in j)
+                {
+                    ht[de.Key] = de.Value;
+                }
+                ht["JobId"] = jId;
+                ht["QueueId"] = qId;
+
+                NormalizeDate(ht, "NextRetryUtc");
+                NormalizeDate(ht, "EnqueuedUtc");
+                NormalizeDate(ht, "StartedUtc");
+                NormalizeDate(ht, "CompletedUtc");
+                NormalizeDate(ht, "LastProgressUtc");
+                NormalizeDate(ht, "WorkerLeaseUtc");
+
+                result.Add(Hashtable.Synchronized(ht));
+            }
+            return result;
+        }
+
+        private static void NormalizeDate(Hashtable ht, string key)
+        {
+            if (ht.ContainsKey(key) && ht[key] != null)
+            {
+                if (ht[key] is DateTime)
+                {
+                    ht[key] = ((DateTime)ht[key]).ToUniversalTime();
+                    return;
+                }
+                string s = Convert.ToString(ht[key]);
+                DateTime dt;
+                if (!string.IsNullOrEmpty(s) && DateTime.TryParse(s, null, DateTimeStyles.RoundtripKind, out dt))
+                {
+                    ht[key] = dt.ToUniversalTime();
+                }
+                else
+                {
+                    ht[key] = (key == "NextRetryUtc") ? (object)DateTime.MinValue : null;
+                }
+            }
+            else
+            {
+                ht[key] = (key == "NextRetryUtc") ? (object)DateTime.MinValue : null;
+            }
+        }
+
+        public static string FastSerialize(object payload)
+        {
+            var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            return serializer.Serialize(payload);
+        }
+
+        public static void PruneBackups(string stateDir, string baseName, int keepCount)
+        {
+            try
+            {
+                if (!Directory.Exists(stateDir)) return;
+                var di = new DirectoryInfo(stateDir);
+                FileInfo[] files = di.GetFiles(baseName + ".bak.*");
+                if (files.Length > keepCount)
+                {
+                    Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                    for (int i = keepCount; i < files.Length; i++)
+                    {
+                        try { files[i].Delete(); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+    }
+}
+"@ -ReferencedAssemblies "System.Web.Extensions.dll" -Language CSharp -ErrorAction SilentlyContinue
+    } catch { }
+}
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\providers\ProviderContract.ps1')
@@ -1763,7 +1921,11 @@ function Save-DurableTransferQueue {
         })
     }
 
-    $json = $payload | ConvertTo-Json -Depth 10
+    $json = if (([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
+        [NSCloudDrive.QueueFastIO]::FastSerialize($payload)
+    } else {
+        $payload | ConvertTo-Json -Depth 10
+    }
 
     # Write in the destination directory so replacement stays on one volume.
     $tmpFile = "$targetFile.$([Guid]::NewGuid().ToString('N')).tmp"
@@ -1807,6 +1969,9 @@ function Save-DurableTransferQueue {
         } else {
             [System.IO.File]::Move($tmpFile, $targetFile)
         }
+        if (([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
+            try { [NSCloudDrive.QueueFastIO]::PruneBackups([System.IO.Path]::GetDirectoryName($targetFile), [System.IO.Path]::GetFileName($targetFile), 3) } catch { }
+        }
         Set-TransferStateInitializedMarker -QueuePath $targetFile | Out-Null
         return $true
     } finally {
@@ -1842,23 +2007,33 @@ function Load-DurableTransferQueue {
     $parsed = $null
     $selectedFile = ''
     $readErrors = [System.Collections.Generic.List[string]]::new()
+    $fastLoadedJobs = $null
     foreach ($candidate in $candidates) {
         try {
-            $jsonText = [System.IO.File]::ReadAllText($candidate, [System.Text.Encoding]::UTF8)
-            if ([string]::IsNullOrWhiteSpace($jsonText)) { throw 'State file is empty.' }
-            $candidatePayload = $jsonText | ConvertFrom-Json -ErrorAction Stop
-            if (-not $candidatePayload -or -not $candidatePayload.PSObject.Properties['Jobs']) {
-                throw 'State file has no Jobs collection.'
+            if (([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
+                $dict = [NSCloudDrive.QueueFastIO]::ReadAndValidateJson($candidate)
+                $fastLoaded = [NSCloudDrive.QueueFastIO]::ParseJobsFromDictionary($dict)
+                $parsed = $dict
+                $fastLoadedJobs = $fastLoaded
+                $selectedFile = $candidate
+                break
+            } else {
+                $jsonText = [System.IO.File]::ReadAllText($candidate, [System.Text.Encoding]::UTF8)
+                if ([string]::IsNullOrWhiteSpace($jsonText)) { throw 'State file is empty.' }
+                $candidatePayload = $jsonText | ConvertFrom-Json -ErrorAction Stop
+                if (-not $candidatePayload -or -not $candidatePayload.PSObject.Properties['Jobs']) {
+                    throw 'State file has no Jobs collection.'
+                }
+                if ($candidatePayload.Jobs -isnot [System.Array] -and $candidatePayload.Jobs -isnot [System.Collections.IList]) {
+                    throw 'State file Jobs collection is not an array.'
+                }
+                if ($candidatePayload.PSObject.Properties['Version'] -and [string]$candidatePayload.Version -notin @('1.0', '2.0')) {
+                    throw "Unsupported transfer-state schema version '$($candidatePayload.Version)'."
+                }
+                $parsed = $candidatePayload
+                $selectedFile = $candidate
+                break
             }
-            if ($candidatePayload.Jobs -isnot [System.Array] -and $candidatePayload.Jobs -isnot [System.Collections.IList]) {
-                throw 'State file Jobs collection is not an array.'
-            }
-            if ($candidatePayload.PSObject.Properties['Version'] -and [string]$candidatePayload.Version -notin @('1.0', '2.0')) {
-                throw "Unsupported transfer-state schema version '$($candidatePayload.Version)'."
-            }
-            $parsed = $candidatePayload
-            $selectedFile = $candidate
-            break
         } catch {
             $readErrors.Add((Split-Path -Leaf $candidate) + ': ' + $_.Exception.Message)
         }
@@ -1874,7 +2049,53 @@ function Load-DurableTransferQueue {
     $loadedItems = [System.Collections.Generic.List[hashtable]]::new()
     $loadedCount = 0
 
-    foreach ($j in @($parsed.Jobs)) {
+    if ($fastLoadedJobs -is [System.Collections.Generic.List[hashtable]]) {
+        foreach ($item in $fastLoadedJobs) {
+            $srcAcc = Get-CloudTransferFieldValue $item 'SourceAccount'
+            $dstAcc = Get-CloudTransferFieldValue $item 'DestinationAccount'
+            if ($srcAcc) { $item['SourceAccount'] = Resolve-TransferAccountSnapshot -Snapshot $srcAcc }
+            if ($dstAcc) { $item['DestinationAccount'] = Resolve-TransferAccountSnapshot -Snapshot $dstAcc }
+
+            $jobOperation = Get-CloudTransferJobOperation -Job $item
+            if ($jobOperation.IsValid) {
+                if ([string]::IsNullOrWhiteSpace([string]$item['OperationType']) -or [string]$item['OperationType'] -eq 'Unknown') {
+                    $item['OperationType'] = [string]$jobOperation.OperationType
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$item['Direction']) -or [string]$item['Direction'] -eq 'Unknown') {
+                    $item['Direction'] = [string]$jobOperation.Direction
+                }
+                if ([string]::IsNullOrWhiteSpace([string]$item['SourceProvider'])) { $item['SourceProvider'] = [string]$jobOperation.SourceProvider }
+                if ([string]::IsNullOrWhiteSpace([string]$item['DestinationProvider'])) { $item['DestinationProvider'] = [string]$jobOperation.DestinationProvider }
+                if ([string]::IsNullOrWhiteSpace([string]$item['SourceAccountId'])) { $item['SourceAccountId'] = [string]$jobOperation.SourceAccountId }
+                if ([string]::IsNullOrWhiteSpace([string]$item['DestinationAccountId'])) { $item['DestinationAccountId'] = [string]$jobOperation.DestinationAccountId }
+                if ([string]$item['ReconciliationStatus'] -eq 'Required' -and [string]$item['StatusBeforeReconciliation']) {
+                    $item['Status'] = [string]$item['StatusBeforeReconciliation']
+                    $item['StatusBeforeReconciliation'] = ''
+                    $item['ReconciliationStatus'] = 'None'
+                    $item['LastError'] = ''
+                }
+            } else {
+                $isBothLocal = [string]$jobOperation.Reason -match '(?i)both local'
+                if (-not $isBothLocal) {
+                    $terminalStatuses = @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')
+                    if ([string]$item['Status'] -notin $terminalStatuses) {
+                        if ([string]::IsNullOrWhiteSpace([string]$item['StatusBeforeReconciliation'])) {
+                            $item['StatusBeforeReconciliation'] = [string]$item['Status']
+                        }
+                        $item['Status'] = 'Needs reconciliation: operation unresolved'
+                        $item['ReconciliationStatus'] = 'Required'
+                        $item['LastError'] = [string]$jobOperation.Reason
+                        $item['WorkerPid'] = 0
+                        $item['WorkerLeaseUtc'] = $null
+                        $item['JobId'] = ''
+                    }
+                }
+            }
+            $loadedItems.Add($item)
+            $loadedCount++
+        }
+    } else {
+        foreach ($j in @($parsed.Jobs)) {
         $jId = if ($j.PSObject.Properties['JobId'] -and $j.JobId) { [string]$j.JobId } elseif ($j.PSObject.Properties['QueueId'] -and $j.QueueId) { [string]$j.QueueId } else { throw 'Transfer record has no stable JobId or QueueId.' }
         $qId = if ($j.PSObject.Properties['QueueId'] -and $j.QueueId) { [string]$j.QueueId } else { $jId }
 
@@ -2027,6 +2248,7 @@ function Load-DurableTransferQueue {
         $loadedItems.Add($item)
         $loadedCount++
     }
+    }
 
     $script:CloudTransferQueue.Clear()
     foreach ($loadedItem in $loadedItems) { [void]$script:CloudTransferQueue.Add($loadedItem) }
@@ -2034,8 +2256,9 @@ function Load-DurableTransferQueue {
     # Settlement evidence is part of durable state; reload it with the jobs so a restart
     # cannot resurrect a preserved staged file that was already verified on the provider.
     $script:CloudTransferSettledStaged.Clear()
-    if ($parsed.PSObject.Properties['SettledStagedRevisions'] -and $parsed.SettledStagedRevisions) {
-        foreach ($entry in @($parsed.SettledStagedRevisions)) {
+    $settledObj = Get-CloudTransferFieldValue $parsed 'SettledStagedRevisions'
+    if ($settledObj) {
+        foreach ($entry in @($settledObj)) {
             if ($null -eq $entry) { continue }
             $entryIdentity = [string](Get-CloudTransferFieldValue $entry 'Identity')
             $entryWrite = [string](Get-CloudTransferFieldValue $entry 'LastWriteUtc')
