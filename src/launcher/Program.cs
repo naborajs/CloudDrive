@@ -99,12 +99,37 @@ namespace NSCloudDrive.Launcher
 
             if (!createdNew)
             {
-                ActivateExistingInstance();
-                if (appMutex != null)
+                // Verify if another instance of NSCloudDrive is ACTUALLY running
+                bool anotherInstanceAlive = false;
+                try
                 {
-                    appMutex.Close();
+                    int currentPid = Process.GetCurrentProcess().Id;
+                    Process[] procs = Process.GetProcessesByName("NSCloudDrive");
+                    foreach (Process p in procs)
+                    {
+                        if (p.Id != currentPid)
+                        {
+                            anotherInstanceAlive = true;
+                            break;
+                        }
+                    }
                 }
-                return 0;
+                catch { }
+
+                if (anotherInstanceAlive)
+                {
+                    ActivateExistingInstance();
+                    if (appMutex != null)
+                    {
+                        appMutex.Close();
+                    }
+                    return 0;
+                }
+                else
+                {
+                    // Stale or orphaned mutex from previous abnormal termination; proceed as primary instance
+                    createdNew = true;
+                }
             }
 
             try
@@ -308,6 +333,27 @@ namespace NSCloudDrive.Launcher
             try
             {
                 IntPtr hWnd = FindWindow(null, WindowTitle);
+                if (hWnd == IntPtr.Zero)
+                {
+                    // Give the existing instance 150ms to receive the restore event and show its window
+                    Thread.Sleep(150);
+                    hWnd = FindWindow(null, WindowTitle);
+                }
+
+                if (hWnd == IntPtr.Zero)
+                {
+                    int currentPid = Process.GetCurrentProcess().Id;
+                    Process[] procs = Process.GetProcessesByName("NSCloudDrive");
+                    foreach (Process p in procs)
+                    {
+                        if (p.Id != currentPid && p.MainWindowHandle != IntPtr.Zero)
+                        {
+                            hWnd = p.MainWindowHandle;
+                            break;
+                        }
+                    }
+                }
+
                 if (hWnd != IntPtr.Zero)
                 {
                     if (IsIconic(hWnd))
