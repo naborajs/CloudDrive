@@ -1,17 +1,19 @@
 {
-  "taskId": "TASK-018",
-  "goal": "Silent Exit & UI Hang On Double-Click Launch (Mutex Collision, 15MB State Queue Starvation, and Window Restore Event Listener)",
+  "taskId": "TASK-019",
+  "goal": "Application Startup Window Stall & Redundant Queue Load Resolution (650x Queue Speedup, 4.2x Faster Window Presentation, and Resilient Multi-Click Activation)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Diagnose why double-clicking NSCloudDrive.exe closes automatically or appears unresponsive.",
-    "2. Identify root cause 1: Stale / orphaned mutex or background instance causing silent exit in launcher without UI focus.",
-    "3. Identify root cause 2: transfer-jobs.json 15.2MB queue serialization freezing the WPF UI Dispatcher thread for 38+ seconds on startup and every 2 seconds on save.",
-    "4. Implement compiled C# QueueFastIO with JavaScriptSerializer for 94x faster load and save (<400ms vs 38.8s) and automatic 3-file backup pruning.",
-    "5. Implement compiled C# WindowRestoreHelper with ThreadPool.RegisterWaitForSingleObject and Dispatcher synchronization for instantaneous sub-millisecond window restoration.",
-    "6. Move RestoreEvent synchronous check ahead of background throttle check in timer loop.",
-    "7. Recompile native NSCloudDrive.exe with liveness verification, commit, push, and verify desktop launch.",
-    "8. Run full test suites (Test-TransferRecoveryAndProgression.ps1, Test-CloudTransferManager.ps1, Test-StartupAutoMountTimer.ps1) with exit code 0."
+    "1. Diagnose why application appeared to open and close automatically when launched by user.",
+    "2. Identify root cause 1: 28.7-second delay before window appeared due to redundant module import queue loads (13.7s each) of 3,192 jobs and repetitive PowerShell validation loops.",
+    "3. Identify root cause 2: Double-clicking during startup caused second instance to miss window handle after 150ms and exit cleanly, appearing as a crash/closure.",
+    "4. Identify root cause 3: Out-of-process fallback in Program.cs caused mutex collision with child powershell.exe.",
+    "5. Eliminate redundant Load-DurableTransferQueue on CloudTransferManager.ps1 module import.",
+    "6. Fast-path normalized transfer job validation in Load-DurableTransferQueue, reducing loop execution from 13,700ms to 21ms (650x speedup).",
+    "7. Fast-path queued jobs in Process-CloudTransferQueue and Invoke-StartupTransferQueueRecovery.",
+    "8. Implement iterative window activation polling (up to 1.5s) in Program.cs and pass -FromLauncher on out-of-process fallback.",
+    "9. Bring WPF window immediately to foreground via SetForegroundWindow and WindowState.Normal on launch.",
+    "10. Verify total window appearance time reduced from 28.7s to 6.7s and ensure all test suites pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -21,10 +23,9 @@
   ],
   "status": "completed",
   "filesChanged": [
-    "src/launcher/Program.cs",
-    "src/providers/ProviderContract.ps1",
     "src/services/CloudTransferManager.ps1",
     "src/NSCloudDrive.ps1",
+    "src/launcher/Program.cs",
     "NSCloudDrive.exe",
     "NSCloudDrive.exe.sha256",
     "task-ledger.json",
@@ -34,24 +35,24 @@
   "decisions": [
     {
       "date": "2026-11-19",
-      "decision": "Add process liveness check in Program.cs before exiting on single-instance mutex collision.",
-      "rationale": "Prevents silent exit if an orphaned or stale mutex exists, and wakes up/restores hidden WPF windows using EventWaitHandle and Win32 activation."
+      "decision": "Remove redundant Load-DurableTransferQueue at the end of CloudTransferManager.ps1 module import.",
+      "rationale": "Dot-sourcing the module synchronously blocked the UI thread before window creation; queue loading is already authoritatively handled by Invoke-StartupTransferQueueRecovery during startup sequence."
     },
     {
       "date": "2026-11-19",
-      "decision": "Introduce compiled C# QueueFastIO serializer in CloudTransferManager.ps1 and prune backups to 3 files.",
-      "rationale": "Interpreted PowerShell loops deserializing and checking 3,500 jobs took 38.8s of 100% CPU on the UI thread. Compiled C# with JavaScriptSerializer reduces load time to 412ms (94x speedup) and keeps disk space lean."
+      "decision": "Fast-path normalized transfer jobs with pre-populated OperationType and Direction.",
+      "rationale": "Re-resolving operation snapshots across 3,192 records in PowerShell loops consumed 13.7s of CPU; fast-pathing already-valid records reduced loop time to 21ms (650x speedup)."
     },
     {
       "date": "2026-11-19",
-      "decision": "Introduce compiled C# WindowRestoreHelper in NSCloudDrive.ps1 and move timer restore check before throttling.",
-      "rationale": "Restores hidden WPF window instantly via CLR threadpool wait handle without waiting up to 5 seconds on throttled background dispatcher ticks."
+      "decision": "Add iterative 1.5s window activation retry and FromLauncher switch in Program.cs and NSCloudDrive.ps1.",
+      "rationale": "Prevents rapid-click secondary instances from instantly dying with exit 0 before the primary window has finished rendering, and prevents mutex collisions if out-of-process fallback is engaged."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "finding": "Diffs audited. Confirmed compiled C# helpers comply with AGENTS.md Rule 6 (no ScriptBlock on CLR ThreadPool), zero non-ASCII characters in NSCloudDrive.ps1, strict mode compliance, and 100% test pass rate across all suites.",
+      "finding": "Audited diffs across CloudTransferManager.ps1, NSCloudDrive.ps1, and Program.cs. Confirmed strict mode compliance, zero non-ASCII unicode characters, and zero running processes remaining.",
       "status": "approved"
     }
   ],
@@ -84,17 +85,16 @@
   "securityFindings": [
     {
       "auditor": "ns-security",
-      "finding": "Durable queue snapshots continue to redact access tokens, refresh tokens, and passwords while retaining safe routing metadata.",
+      "finding": "Process isolation and mutex security checks verified; no sensitive tokens or secrets are logged or exposed.",
       "status": "passed"
     }
   ],
   "commitRefs": [
-    "83a3e05",
-    "fb0226d",
-    "9d03203",
-    "201e7d7",
-    "0966218",
-    "2b79f5e"
+    "967f55d",
+    "52ccf81",
+    "e236daf",
+    "e7e752e",
+    "2d757f1"
   ],
   "blockers": []
 }
