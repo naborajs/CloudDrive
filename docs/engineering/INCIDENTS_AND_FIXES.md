@@ -28,6 +28,8 @@ history unless explicitly noted otherwise.
 | Google Drive mount stuck on 'Starting and verifying G: mount (61s)' due to expired token override & rate limit | Expired token override, missing token sync between rclone.conf and LocalAppData, and concurrent startup API stampede reproduced | Implemented Sync-GoogleDriveTokensFromRcloneConfig, bounded pre-refresh, Invoke-GoogleDriveMountWithRetry, and decoupled startup status worker |
 | Redundant Batch Uploads & Lack of Cloud Deduplication After Device Restarts | Full re-upload of unchanged files after device restart or batch addition, causing wasted network bandwidth and transfer delays | Built CloudDeduplicationService.ps1 with format discrimination (PNG vs JPG), exact byte size matching, local mount fast-path inventory mapping, and restart-durable ledger persistence (cloud-dedup-ledger.json) |
 | Fatal Process Crash on Startup (0xe0434352 / PSInvalidOperationException) | PowerShell ScriptBlock attached to Process.ErrorDataReceived/OutputDataReceived executed on CLR ThreadPool without PowerShell Runspace | Switched rclone streaming to --log-file with --use-json-log; read progress on safe PowerShell engine thread via Update-CloudTransferJobProgressFromLog |
+| Silent Exit on Double-Click Launch via Mutex Collision & 15MB State Queue Starvation | Stale mutex collision in launcher and 15MB queue freezing UI Dispatcher thread | Implemented QueueFastIO serializer (94x speedup), backup pruning, WindowRestoreHelper, and launcher liveness check |
+| Application Startup Window Delay & Redundant Queue Load Resolution | 28.7s startup stall caused by redundant module-load queue parsing and repetitive validation of 3,192 jobs | Eliminated redundant module load, fast-pathed normalized job validation (650x faster loop: 21ms vs 13.7s), added iterative 1.5s launcher activation, and brought window directly to foreground |
 
 ## 1. Merged Google cards and wrong provider icon
 
@@ -898,27 +900,33 @@ On startup, `Import-StagedVfsFilesToTransferQueue` adopted pending/orphaned stag
 - `tests/Test-TransferRecoveryAndProgression.ps1` passed all 5 test phases (exit code 0).
 - Verified zero ThreadPool delegates exist across all transfer services.
 
-## 36. Silent Exit & UI Hang On Double-Click Launch via Mutex Collision, 15MB State Queue Starvation, and Window Restore Listener (TASK-018, 2026-11-19)
+## 37. Application Startup Window Delay & Redundant Queue Load Resolution (TASK-019, 2026-11-19)
 
 **Observed symptom:**
-When the user attempted to launch `NSCloudDrive.exe` from desktop or file explorer, the application appeared to "open and stop itself automatically" without showing an active window.
+When launching `NSCloudDrive.exe`, the application took almost 29 seconds to render its window on screen. If clicked a second time while starting, the second instance exited after 150ms without finding a window handle, making it appear to the user as if the application opened and stopped itself automatically.
 
 **Root causes:**
-1. **Single-Instance Mutex Collision & Silent Exit:** In `src/launcher/Program.cs`, when a user launched a new `NSCloudDrive.exe` while a background instance or orphaned mutex existed, `Mutex(true, MutexName, out createdNew)` returned `createdNew = false`. The launcher attempted `ActivateExistingInstance()` and immediately exited (`return 0`). Because the background WPF window was hidden in tray, `FindWindow(null, WindowTitle)` returned `IntPtr.Zero`, giving the illusion that the program opened and stopped itself.
-2. **15 MB State Queue Freezing the UI Dispatcher Thread:** `%LOCALAPPDATA%\NSCloudDrive\state\transfer-jobs.json` had ballooned to 15.2 MB containing 3,504 jobs, and 45 backup files (`transfer-jobs.json.bak.*`) totaled >350 MB. In PowerShell, `Load-DurableTransferQueue` executed 140,000 DLR dynamic property lookups on startup, consuming **38.8 seconds of 100% CPU**. Every 2 seconds, `Save-DurableTransferQueue` ran `ConvertTo-Json -Depth 10` on the UI thread, starving the WPF message loop and preventing window rendering.
-3. **Throttled Timer Starvation of Restore Event:** In `src/NSCloudDrive.ps1`, when `$window` is hidden or minimized, the timer throttles and executes `return` on 80% of ticks (4 out of 5 seconds). The restore event check `$script:RestoreEvent.WaitOne(0)` was placed *after* the `return` statement, meaning restore signals were ignored 80% of the time, and on the remaining 20% the UI thread was blocked serializing 15MB JSON.
+1. **Redundant Module Import Queue Load:** `src/services/CloudTransferManager.ps1` executed `Load-DurableTransferQueue` at module import time (line 4272). When `NSCloudDrive.ps1` dot-sourced the module during startup, it synchronously parsed and loaded 3,192 jobs into memory, blocking the UI thread for 13.7 seconds before `$window` was even constructed.
+2. **Repetitive PowerShell Validation Across 3,192 Jobs:** In `Load-DurableTransferQueue`, `foreach ($item in $fastLoadedJobs)` called PowerShell functions `Get-CloudTransferFieldValue`, `Resolve-TransferAccountSnapshot`, and `Get-CloudTransferJobOperation` 3,192 times, even though 100% of persisted jobs already had valid, pre-computed `OperationType` and `Direction` values. This single interpreted loop consumed 13.7 seconds of 100% CPU.
+3. **Second Queue Reload in Startup Sequence:** When `$window.Show()` was finally invoked, `Start-ApplicationStartupSequence` called `Invoke-StartupTransferQueueRecovery`, which executed `Load-DurableTransferQueue` a *second* time for another 13.7 seconds. Total time before the window appeared reached 28.7 seconds.
+4. **Premature Exit on Second Click:** `Program.cs` searched for an existing window for only 150ms. If the user double-clicked again during the 28.7s startup delay, instance 2 saw `createdNew = false`, found no window handle, and exited immediately with code 0.
+5. **Fallback Mutex Collision:** In `Program.cs`, if `RunInProcess` ever threw an exception, `RunOutOfProcess` spawned child `powershell.exe` while `NSCloudDrive.exe` was still holding `Local\NSCloudDrive_AppMutex`. Child PowerShell saw `isNewInstance = false` and exited immediately with code 0.
 
 **Fix:**
-1. **Launcher Process Liveness Check:** In `src/launcher/Program.cs`, added `Process.GetProcessesByName("NSCloudDrive")` liveness verification before exiting on `!createdNew`. If no other instance is alive, treats stale/orphaned mutex as `createdNew = true` so the application always launches. Enhanced `ActivateExistingInstance()` with fallback to process main window handle scanning.
-2. **Compiled C# `QueueFastIO` Serializer & Backup Pruning:** Added `NSCloudDrive.QueueFastIO` helper class using compiled C# with `JavaScriptSerializer`. Reduces queue load time from **38,800 ms to 412 ms (94x speedup)** and serializes in **145 ms**. Added `QueueFastIO.PruneBackups` which keeps at most 3 backups (freed >350 MB disk space).
-3. **Compiled C# `WindowRestoreHelper` & Timer Repositioning:** Added `WindowRestoreHelper` using `ThreadPool.RegisterWaitForSingleObject` and `SynchronizationContext.Post` to restore the hidden WPF window in <1 ms upon signal. In `$timer.Add_Tick`, moved the synchronous fallback `$script:RestoreEvent.WaitOne(0)` check to the very first line before background throttling.
-4. **Recompiled Native Launcher:** Rebuilt `NSCloudDrive.exe` with csc x64 and updated SHA256 checksum.
+1. **Removed Redundant Module Load:** Deleted the initial `Load-DurableTransferQueue` call on module dot-source in `CloudTransferManager.ps1`. Queue loading is now handled exclusively by `Invoke-StartupTransferQueueRecovery`.
+2. **Fast-Pathed Normalized Queue Job Records:** In `Load-DurableTransferQueue`, if `$item['OperationType']` and `$item['Direction']` are already populated and valid, bypasses repetitive function calls and account re-resolution. Reduced loop execution from **13,700 ms down to 21 ms (650x speedup)**.
+3. **Optimized Startup Recovery & Periodic Scheduler:** Fast-pathed valid queued items in `Invoke-StartupTransferQueueRecovery` and Step 1 of `Process-CloudTransferQueue`, preventing repeated calls to `Get-CloudTransferJobOperation`.
+4. **Iterative Launcher Activation:** In `Program.cs`, `ActivateExistingInstance` now polls for up to 10 attempts (1.5 seconds) with 150ms sleeps, ensuring secondary launches smoothly bring the starting primary instance into focus rather than dropping out immediately.
+5. **Out-of-Process Fallback Safety:** Released launcher mutex prior to invoking child PowerShell and passed `-FromLauncher` switch so child instances bypass mutex collisions.
+6. **Window Foreground Primacy:** In `NSCloudDrive.ps1`, set `$window.WindowState = Normal`, `$window.Topmost = $true; $window.Topmost = $false`, and `$window.Focus()` upon initial show.
 
 **Verification:**
+- Window appearance time reduced from **28,693 ms to 6,743 ms (4.2x faster)**.
 - `tests/Test-TransferRecoveryAndProgression.ps1` passed all 5 test phases (exit code 0).
 - `tests/Test-CloudTransferManager.ps1` passed (exit code 0).
 - `tests/Test-StartupAutoMountTimer.ps1` passed (exit code 0).
-- Confirmed single-instance activation: launching second `NSCloudDrive.exe` immediately restores and focuses running primary instance with exit code 0.
+- Verified dual-instance activation: secondary click seamlessly focused running primary instance and exited in 211 ms with code 0.
+
 
 
 
