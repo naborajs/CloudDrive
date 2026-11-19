@@ -898,4 +898,27 @@ On startup, `Import-StagedVfsFilesToTransferQueue` adopted pending/orphaned stag
 - `tests/Test-TransferRecoveryAndProgression.ps1` passed all 5 test phases (exit code 0).
 - Verified zero ThreadPool delegates exist across all transfer services.
 
+## 36. Silent Exit & UI Hang On Double-Click Launch via Mutex Collision, 15MB State Queue Starvation, and Window Restore Listener (TASK-018, 2026-11-19)
+
+**Observed symptom:**
+When the user attempted to launch `NSCloudDrive.exe` from desktop or file explorer, the application appeared to "open and stop itself automatically" without showing an active window.
+
+**Root causes:**
+1. **Single-Instance Mutex Collision & Silent Exit:** In `src/launcher/Program.cs`, when a user launched a new `NSCloudDrive.exe` while a background instance or orphaned mutex existed, `Mutex(true, MutexName, out createdNew)` returned `createdNew = false`. The launcher attempted `ActivateExistingInstance()` and immediately exited (`return 0`). Because the background WPF window was hidden in tray, `FindWindow(null, WindowTitle)` returned `IntPtr.Zero`, giving the illusion that the program opened and stopped itself.
+2. **15 MB State Queue Freezing the UI Dispatcher Thread:** `%LOCALAPPDATA%\NSCloudDrive\state\transfer-jobs.json` had ballooned to 15.2 MB containing 3,504 jobs, and 45 backup files (`transfer-jobs.json.bak.*`) totaled >350 MB. In PowerShell, `Load-DurableTransferQueue` executed 140,000 DLR dynamic property lookups on startup, consuming **38.8 seconds of 100% CPU**. Every 2 seconds, `Save-DurableTransferQueue` ran `ConvertTo-Json -Depth 10` on the UI thread, starving the WPF message loop and preventing window rendering.
+3. **Throttled Timer Starvation of Restore Event:** In `src/NSCloudDrive.ps1`, when `$window` is hidden or minimized, the timer throttles and executes `return` on 80% of ticks (4 out of 5 seconds). The restore event check `$script:RestoreEvent.WaitOne(0)` was placed *after* the `return` statement, meaning restore signals were ignored 80% of the time, and on the remaining 20% the UI thread was blocked serializing 15MB JSON.
+
+**Fix:**
+1. **Launcher Process Liveness Check:** In `src/launcher/Program.cs`, added `Process.GetProcessesByName("NSCloudDrive")` liveness verification before exiting on `!createdNew`. If no other instance is alive, treats stale/orphaned mutex as `createdNew = true` so the application always launches. Enhanced `ActivateExistingInstance()` with fallback to process main window handle scanning.
+2. **Compiled C# `QueueFastIO` Serializer & Backup Pruning:** Added `NSCloudDrive.QueueFastIO` helper class using compiled C# with `JavaScriptSerializer`. Reduces queue load time from **38,800 ms to 412 ms (94x speedup)** and serializes in **145 ms**. Added `QueueFastIO.PruneBackups` which keeps at most 3 backups (freed >350 MB disk space).
+3. **Compiled C# `WindowRestoreHelper` & Timer Repositioning:** Added `WindowRestoreHelper` using `ThreadPool.RegisterWaitForSingleObject` and `SynchronizationContext.Post` to restore the hidden WPF window in <1 ms upon signal. In `$timer.Add_Tick`, moved the synchronous fallback `$script:RestoreEvent.WaitOne(0)` check to the very first line before background throttling.
+4. **Recompiled Native Launcher:** Rebuilt `NSCloudDrive.exe` with csc x64 and updated SHA256 checksum.
+
+**Verification:**
+- `tests/Test-TransferRecoveryAndProgression.ps1` passed all 5 test phases (exit code 0).
+- `tests/Test-CloudTransferManager.ps1` passed (exit code 0).
+- `tests/Test-StartupAutoMountTimer.ps1` passed (exit code 0).
+- Confirmed single-instance activation: launching second `NSCloudDrive.exe` immediately restores and focuses running primary instance with exit code 0.
+
+
 
