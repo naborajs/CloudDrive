@@ -27,6 +27,7 @@ history unless explicitly noted otherwise.
 | Adaptive Bandwidth AST syntax error (return switch) | return switch statement syntax unsupported in PowerShell | Assigned switch result to variable before return; validated all PS1 files |
 | Google Drive mount stuck on 'Starting and verifying G: mount (61s)' due to expired token override & rate limit | Expired token override, missing token sync between rclone.conf and LocalAppData, and concurrent startup API stampede reproduced | Implemented Sync-GoogleDriveTokensFromRcloneConfig, bounded pre-refresh, Invoke-GoogleDriveMountWithRetry, and decoupled startup status worker |
 | Redundant Batch Uploads & Lack of Cloud Deduplication After Device Restarts | Full re-upload of unchanged files after device restart or batch addition, causing wasted network bandwidth and transfer delays | Built CloudDeduplicationService.ps1 with format discrimination (PNG vs JPG), exact byte size matching, local mount fast-path inventory mapping, and restart-durable ledger persistence (cloud-dedup-ledger.json) |
+| Fatal Process Crash on Startup (0xe0434352 / PSInvalidOperationException) | PowerShell ScriptBlock attached to Process.ErrorDataReceived/OutputDataReceived executed on CLR ThreadPool without PowerShell Runspace | Switched rclone streaming to --log-file with --use-json-log; read progress on safe PowerShell engine thread via Update-CloudTransferJobProgressFromLog |
 
 ## 1. Merged Google cards and wrong provider icon
 
@@ -846,4 +847,55 @@ When users transfer large batches of files or re-add directories after restartin
   - Fast batch deduplication and list partitioning.
   - Restart durability: Verified that after clearing in-memory state and re-loading from `cloud-dedup-ledger.json`, deduplication immediately identifies previously confirmed files without re-scanning or network calls.
 - Full master test suite `tests/Run-AllTests.ps1` passed all 50 tests with 0 failures.
+
+## 35. Fatal Process Crash on Startup via CLR ThreadPool ScriptBlock Execution (TASK-017, 2026-11-19)
+
+**Observed symptom:**
+When launching `NSCloudDrive.exe`, the application UI appeared briefly and then immediately crashed and vanished without any error message or desktop warning. Windows Event Log recorded Event ID 1026 (.NET Runtime) and Event ID 1000 (Application Error with crash code `0xe0434352`):
+```
+Exception Info: System.Management.Automation.PSInvalidOperationException: There is no Runspace available on this thread.
+   at System.Management.Automation.ScriptBlock.GetContextFromTLS()
+   at System.Management.Automation.ScriptBlock.InvokeAsDelegateHelper(System.Object, System.Object, System.Object[])
+   at System.Diagnostics.Process.ErrorReadNotifyUser(System.String)
+   at System.Diagnostics.AsyncStreamReader.FlushMessageQueue()
+   at System.Diagnostics.AsyncStreamReader.GetLinesFromStringBuilder()
+   at System.Diagnostics.AsyncStreamReader.ReadBuffer(System.IAsyncResult)
+   ...
+   at System.Threading.ThreadPoolWorkQueue.Dispatch()
+```
+
+**Root cause:**
+In `src/services/CloudTransferManager.ps1` (`Start-CloudTransfer`), process stream redirection was configured using asynchronous event handlers:
+```powershell
+$proc.Add_ErrorDataReceived($onDataReceived)
+$proc.Add_OutputDataReceived($onDataReceived)
+$proc.BeginErrorReadLine()
+$proc.BeginOutputReadLine()
+```
+`Process.BeginErrorReadLine()` and `Process.BeginOutputReadLine()` utilize .NET's `AsyncStreamReader`, which dispatches received lines via CLR `ThreadPool` worker threads. When rclone emitted JSON logs, the ThreadPool invoked the PowerShell `ScriptBlock` delegate (`$onDataReceived`).
+Because CLR ThreadPool threads do not have a PowerShell Runspace registered in Thread Local Storage (TLS), calling `ScriptBlock.GetContextFromTLS()` throws `PSInvalidOperationException`. In a hosted PowerShell environment (`NSCloudDrive.exe`), unhandled exceptions on the CLR ThreadPool terminate the entire host process immediately (`0xe0434352`).
+On startup, `Import-StagedVfsFilesToTransferQueue` adopted pending/orphaned staged files into the transfer queue, triggering `Start-CloudTransfer` within seconds of UI launch and immediately crashing the app.
+
+**Fix:**
+1. Eliminated all asynchronous process stream redirection and ThreadPool delegates in `Start-CloudTransfer`:
+   - Removed `$proc.Add_ErrorDataReceived`, `$proc.Add_OutputDataReceived`, `$proc.BeginErrorReadLine()`, and `$proc.BeginOutputReadLine()`.
+   - Set `$psi.RedirectStandardOutput = $false` and `$psi.RedirectStandardError = $false`.
+   - Set `$proc.EnableRaisingEvents = $false`.
+2. Passed dedicated per-job file logging to rclone:
+   - Added `--log-file $jobLogPath` and `--use-json-log`.
+   - Rclone writes JSON stats and errors directly to disk via OS file handles, bypassing pipe buffers and eliminating all ThreadPool callbacks.
+3. Implemented `Update-CloudTransferJobProgressFromLog`:
+   - Reads newly appended bytes from the log file using `[System.IO.File]::Open` with `FileMode.Open`, `FileAccess.Read`, and `FileShare.ReadWrite`.
+   - Safely parses JSON stats on the PowerShell UI/engine thread.
+   - Updates `BytesTransferred`, `TotalBytes`, `Percentage`, `SmoothedSpeed`, `EtaSeconds`, and `RecentLogs`.
+   - Updates `LogFileOffset` so subsequent reads only consume newly added bytes.
+4. Integrated log progress consumption into `Get-CloudTransferStatus`.
+
+**Verification:**
+- `tests/Test-CloudTransferManager.ps1` passed (exit code 0).
+- `tests/Test-PostRestartDropDeduplication.ps1` passed (exit code 0).
+- `tests/Test-StartupAutoMountTimer.ps1` passed (exit code 0).
+- `tests/Test-TransferRecoveryAndProgression.ps1` passed all 5 test phases (exit code 0).
+- Verified zero ThreadPool delegates exist across all transfer services.
+
 
