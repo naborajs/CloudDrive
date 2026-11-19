@@ -1140,6 +1140,17 @@ function Start-CloudTransfer {
     $srcSpec = if ($srcIsLocal) { $SourcePath } else { if ($cleanSrcPath) { "${srcRemote}:${cleanSrcPath}" } else { "${srcRemote}:" } }
     $dstSpec = if ($dstIsLocal) { $DestinationPath } else { if ($cleanDstPath) { "${dstRemote}:${cleanDstPath}" } else { "${dstRemote}:" } }
 
+    # Isolate rclone progress and diagnostic stream to dedicated job log file.
+    # CRITICAL CLR SAFETY: Direct process stdout/stderr pipe redirection via Add_ErrorDataReceived / Add_OutputDataReceived
+    # executes delegates on CLR ThreadPool threads without a PowerShell runspace in TLS, causing instant process termination
+    # via PSInvalidOperationException (0xe0434352). Writing to a dedicated log file eliminates threadpool delegates,
+    # prevents pipe buffer deadlocks, and guarantees 100% thread-safe progress consumption.
+    $transferLogDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs\transfers'
+    if (-not (Test-Path -LiteralPath $transferLogDir)) {
+        try { [void][System.IO.Directory]::CreateDirectory($transferLogDir) } catch { }
+    }
+    $jobLogPath = Join-Path $transferLogDir "transfer_${jobId}.log"
+
     # Build rclone streaming arguments
     # Important: Uses rclone copy/move streaming relay. No large file writes to local OS drive.
     $commandVerb = if ($IsMove) { 'move' } else { 'copy' }
@@ -1150,6 +1161,7 @@ function Start-CloudTransfer {
         '--stats', '500ms',
         '--use-json-log',
         '-v',
+        '--log-file', $jobLogPath,
         '--retries', '3',
         '--low-level-retries', '5'
     )
@@ -1169,8 +1181,8 @@ function Start-CloudTransfer {
     $psi.FileName = $rclonePath
     $psi.Arguments = $escapedArgs
     $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardOutput = $false
+    $psi.RedirectStandardError = $false
     $psi.CreateNoWindow = $true
 
     # Merge environment variables for both remotes
@@ -1210,67 +1222,133 @@ function Start-CloudTransfer {
         RecentErrors = $errorBuffer
         Mode = 'Streaming Relay'
         IsServerSide = $false
+        LogFilePath = $jobLogPath
+        LogFileOffset = 0L
     }
 
     $proc = [System.Diagnostics.Process]::new()
     $proc.StartInfo = $psi
-    $proc.EnableRaisingEvents = $true
-
-    # Asynchronous line reading from stderr where rclone writes its JSON log & progress
-    $jobRecordRef = $jobRecord
-    $onDataReceived = {
-        param($sender, $eventArgs)
-        if ($eventArgs.Data) {
-            $line = $eventArgs.Data
-            try {
-                $parsed = $line | ConvertFrom-Json
-                if ($parsed -and $parsed.PSObject.Properties['stats'] -and $parsed.stats) {
-                    $st = $parsed.stats
-                    $bTrans = if ($st.PSObject.Properties['bytes']) { [int64]$st.bytes } else { 0L }
-                    $tBytes = if ($st.PSObject.Properties['totalBytes']) { [int64]$st.totalBytes } else { 0L }
-                    $spd = if ($st.PSObject.Properties['speed']) { [double]$st.speed } else { 0.0 }
-                    $elap = if ($st.PSObject.Properties['elapsedTime']) { [double]$st.elapsedTime } else { 0.0 }
-
-                    $calc = Calculate-SmoothedSpeedAndEta -BytesTransferred $bTrans -TotalBytes $tBytes -InstantSpeedBytesPerSec $spd -PreviousSmoothedSpeed $jobRecordRef.SmoothedSpeed -ElapsedSeconds $elap
-
-                    $jobRecordRef.BytesTransferred = $calc.BytesTransferred
-                    $jobRecordRef.TotalBytes = $calc.TotalBytes
-                    $jobRecordRef.Percentage = $calc.Percentage
-                    $jobRecordRef.SmoothedSpeed = $calc.SmoothedSpeedBytesPerSec
-                    $jobRecordRef.AverageSpeed = $calc.AverageSpeedBytesPerSec
-                    $jobRecordRef.EtaSeconds = $calc.EtaSeconds
-
-                    if ($st.PSObject.Properties['errors'] -and [int]$st.errors -gt 0) {
-                        $jobRecordRef.LastError = "Errors recorded during transfer: $($st.errors)"
-                    }
-                } elseif ($parsed -and $parsed.PSObject.Properties['msg'] -and $parsed.msg) {
-                    $sanitizedMsg = Format-SanitizedDiagnosticMessage $parsed.msg
-                    if ($parsed.PSObject.Properties['level'] -and $parsed.level -eq 'error') {
-                        $jobRecordRef.LastError = $sanitizedMsg
-                        $jobRecordRef.RecentErrors.Add($sanitizedMsg)
-                    } else {
-                        $jobRecordRef.RecentLogs.Add($sanitizedMsg)
-                    }
-                }
-            } catch {
-                # Fallback for plain text log lines
-                $clean = Format-SanitizedDiagnosticMessage $line
-                $jobRecordRef.RecentLogs.Add($clean)
-            }
-        }
-    }
-
-    $proc.Add_ErrorDataReceived($onDataReceived)
-    $proc.Add_OutputDataReceived($onDataReceived)
+    $proc.EnableRaisingEvents = $false
 
     $proc.Start() | Out-Null
-    $proc.BeginErrorReadLine()
-    $proc.BeginOutputReadLine()
 
     $jobRecord.Process = $proc
     $script:ActiveTransferJobs[$jobId] = $jobRecord
 
     return $jobRecord
+}
+
+function Update-CloudTransferJobProgressFromLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$JobRecord
+    )
+
+    $logPath = [string](Get-CloudTransferFieldValue $JobRecord 'LogFilePath')
+    if ([string]::IsNullOrEmpty($logPath) -or -not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        return
+    }
+
+    $offset = [int64](Get-CloudTransferFieldValue $JobRecord 'LogFileOffset' 0L)
+    $newLines = [System.Collections.Generic.List[string]]::new()
+
+    try {
+        $fs = [System.IO.FileStream]::new($logPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            if ($fs.Length -gt $offset) {
+                $fs.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+                while (-not $reader.EndOfStream) {
+                    $line = $reader.ReadLine()
+                    if (-not [string]::IsNullOrWhiteSpace($line)) {
+                        $newLines.Add($line)
+                    }
+                }
+                if ($JobRecord -is [System.Collections.IDictionary]) {
+                    $JobRecord['LogFileOffset'] = $fs.Position
+                } elseif ($JobRecord.PSObject.Properties['LogFileOffset']) {
+                    $JobRecord.LogFileOffset = $fs.Position
+                }
+            }
+        } finally {
+            $fs.Dispose()
+        }
+    } catch { }
+
+    foreach ($line in $newLines) {
+        try {
+            $parsed = $line | ConvertFrom-Json
+            if ($parsed -and $parsed.PSObject.Properties['stats'] -and $parsed.stats) {
+                $st = $parsed.stats
+                $bTrans = if ($st.PSObject.Properties['bytes']) { [int64]$st.bytes } else { 0L }
+                $tBytes = if ($st.PSObject.Properties['totalBytes']) { [int64]$st.totalBytes } else { 0L }
+                $spd = if ($st.PSObject.Properties['speed']) { [double]$st.speed } else { 0.0 }
+                $elap = if ($st.PSObject.Properties['elapsedTime']) { [double]$st.elapsedTime } else { 0.0 }
+
+                $prevSpeed = [double](Get-CloudTransferFieldValue $JobRecord 'SmoothedSpeed' 0.0)
+                $calc = Calculate-SmoothedSpeedAndEta -BytesTransferred $bTrans -TotalBytes $tBytes -InstantSpeedBytesPerSec $spd -PreviousSmoothedSpeed $prevSpeed -ElapsedSeconds $elap
+
+                if ($JobRecord -is [System.Collections.IDictionary]) {
+                    $JobRecord['BytesTransferred'] = $calc.BytesTransferred
+                    $JobRecord['TotalBytes'] = $calc.TotalBytes
+                    $JobRecord['Percentage'] = $calc.Percentage
+                    $JobRecord['SmoothedSpeed'] = $calc.SmoothedSpeedBytesPerSec
+                    $JobRecord['AverageSpeed'] = $calc.AverageSpeedBytesPerSec
+                    $JobRecord['EtaSeconds'] = $calc.EtaSeconds
+                    if ($st.PSObject.Properties['errors'] -and [int]$st.errors -gt 0) {
+                        $JobRecord['LastError'] = "Errors recorded during transfer: $($st.errors)"
+                    }
+                } else {
+                    $JobRecord.BytesTransferred = $calc.BytesTransferred
+                    $JobRecord.TotalBytes = $calc.TotalBytes
+                    $JobRecord.Percentage = $calc.Percentage
+                    $JobRecord.SmoothedSpeed = $calc.SmoothedSpeedBytesPerSec
+                    $JobRecord.AverageSpeed = $calc.AverageSpeedBytesPerSec
+                    $JobRecord.EtaSeconds = $calc.EtaSeconds
+                    if ($st.PSObject.Properties['errors'] -and [int]$st.errors -gt 0) {
+                        $JobRecord.LastError = "Errors recorded during transfer: $($st.errors)"
+                    }
+                }
+            } elseif ($parsed -and $parsed.PSObject.Properties['msg'] -and $parsed.msg) {
+                $sanitizedMsg = Format-SanitizedDiagnosticMessage $parsed.msg
+                if ($parsed.PSObject.Properties['level'] -and $parsed.level -eq 'error') {
+                    if ($JobRecord -is [System.Collections.IDictionary]) {
+                        $JobRecord['LastError'] = $sanitizedMsg
+                        if ($JobRecord.Contains('RecentErrors') -and $JobRecord['RecentErrors'] -is [System.Collections.IList]) {
+                            $JobRecord['RecentErrors'].Add($sanitizedMsg) | Out-Null
+                        }
+                    } else {
+                        $JobRecord.LastError = $sanitizedMsg
+                        if ($JobRecord.RecentErrors -is [System.Collections.IList]) {
+                            $JobRecord.RecentErrors.Add($sanitizedMsg) | Out-Null
+                        }
+                    }
+                } else {
+                    if ($JobRecord -is [System.Collections.IDictionary]) {
+                        if ($JobRecord.Contains('RecentLogs') -and $JobRecord['RecentLogs'] -is [System.Collections.IList]) {
+                            $JobRecord['RecentLogs'].Add($sanitizedMsg) | Out-Null
+                        }
+                    } else {
+                        if ($JobRecord.RecentLogs -is [System.Collections.IList]) {
+                            $JobRecord.RecentLogs.Add($sanitizedMsg) | Out-Null
+                        }
+                    }
+                }
+            }
+        } catch {
+            $clean = Format-SanitizedDiagnosticMessage $line
+            if ($JobRecord -is [System.Collections.IDictionary]) {
+                if ($JobRecord.Contains('RecentLogs') -and $JobRecord['RecentLogs'] -is [System.Collections.IList]) {
+                    $JobRecord['RecentLogs'].Add($clean) | Out-Null
+                }
+            } else {
+                if ($JobRecord.RecentLogs -is [System.Collections.IList]) {
+                    $JobRecord.RecentLogs.Add($clean) | Out-Null
+                }
+            }
+        }
+    }
 }
 
 # ==============================================================================
@@ -1289,10 +1367,13 @@ function Get-CloudTransferStatus {
     }
 
     $job = $script:ActiveTransferJobs[$JobId]
+    Update-CloudTransferJobProgressFromLog -JobRecord $job
+
     $proc = $job.Process
 
     if ($proc) {
         if ($proc.HasExited) {
+            Update-CloudTransferJobProgressFromLog -JobRecord $job
             $job.EndTime = [DateTime]::UtcNow
             if ($proc.ExitCode -eq 0) {
                 if ($job.VerificationStatus -ne 'Remotely confirmed' -and $job.Status -notin @('Failed', 'Awaiting remote confirmation') -and $job.Status -notlike 'Needs attention*') {
@@ -1325,7 +1406,8 @@ function Get-CloudTransferStatus {
                     $job.Status = 'Failed'
                     $job.VerificationStatus = 'Failed'
                     if (-not $job.LastError) {
-                        $job.LastError = "Process exited with code $($proc.ExitCode)"
+                        $lastErr = if ($job.RecentErrors -and $job.RecentErrors.Count -gt 0) { [string]$job.RecentErrors[-1] } else { '' }
+                        $job.LastError = if ($lastErr) { $lastErr } else { "Process exited with code $($proc.ExitCode)" }
                     }
                 }
             }
