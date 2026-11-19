@@ -70,6 +70,59 @@ namespace NSCloudDrive
     } catch { }
 }
 
+if (-not ([System.Management.Automation.PSTypeName]'NSCloudDrive.WindowRestoreHelper').Type) {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Threading;
+
+namespace NSCloudDrive
+{
+    public static class WindowRestoreHelper
+    {
+        private static RegisteredWaitHandle _waitHandle;
+
+        public static void StartListening(EventWaitHandle restoreEvent, SynchronizationContext syncContext, Action onRestore)
+        {
+            if (restoreEvent == null || syncContext == null || onRestore == null) return;
+            StopListening();
+
+            _waitHandle = ThreadPool.RegisterWaitForSingleObject(
+                restoreEvent,
+                (state, timedOut) =>
+                {
+                    if (!timedOut)
+                    {
+                        syncContext.Post(_ =>
+                        {
+                            try { onRestore(); } catch { }
+                        }, null);
+                    }
+                },
+                null,
+                -1,
+                false
+            );
+        }
+
+        public static void StopListening()
+        {
+            try
+            {
+                if (_waitHandle != null)
+                {
+                    _waitHandle.Unregister(null);
+                    _waitHandle = null;
+                }
+            }
+            catch { }
+        }
+    }
+}
+"@ -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 try {
     [NSCloudDrive.Win32]::SetCurrentProcessExplicitAppUserModelID('NSCloud.NSCloudDrive')
     $aumidKey = 'HKCU:\Software\Classes\AppUserModelId\NSCloud.NSCloudDrive'
@@ -8554,6 +8607,9 @@ $menuExit.Add_Click({
     $notifyIcon.Visible = $false
     $notifyIcon.Dispose()
     Dispose-AppNotifyIcon
+    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.WindowRestoreHelper').Type) {
+        try { [NSCloudDrive.WindowRestoreHelper]::StopListening() } catch { }
+    }
     if ($script:RestoreEvent) {
         try { $script:RestoreEvent.Dispose() } catch { }
         $script:RestoreEvent = $null
@@ -8610,6 +8666,9 @@ $window.Add_Closing({
             $notifyIcon.Visible = $false
             $notifyIcon.Dispose()
             Dispose-AppNotifyIcon
+            if (([System.Management.Automation.PSTypeName]'NSCloudDrive.WindowRestoreHelper').Type) {
+                try { [NSCloudDrive.WindowRestoreHelper]::StopListening() } catch { }
+            }
             if ($script:RestoreEvent) {
                 try { $script:RestoreEvent.Dispose() } catch { }
                 $script:RestoreEvent = $null
@@ -10349,6 +10408,24 @@ $script:LastTransferQueueProcess = [DateTime]::MinValue
 $timer = [System.Windows.Threading.DispatcherTimer]::new()
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
+    if ($script:RestoreEvent) {
+        try {
+            if ($script:RestoreEvent.WaitOne(0)) {
+                $window.Show()
+                $window.WindowState = [System.Windows.WindowState]::Normal
+                $window.Topmost = $true
+                $window.Topmost = $false
+                $window.Activate() | Out-Null
+                $window.Focus() | Out-Null
+                try {
+                    $wshell = New-Object -ComObject WScript.Shell
+                    $wshell.AppActivate('NS Cloud Drive') | Out-Null
+                } catch { }
+                Update-AllUIState
+            }
+        } catch { }
+    }
+
     $isVisible = ($window.IsVisible -and $window.WindowState -ne [System.Windows.WindowState]::Minimized)
     if (-not $isVisible) {
         # Low-RAM background optimization: throttle ticks to 5s intervals when hidden/minimized
@@ -10393,25 +10470,6 @@ $timer.Add_Tick({
         } finally {
             Update-AllUIState
         }
-    }
-
-    if ($script:RestoreEvent) {
-        try {
-            if ($script:RestoreEvent.WaitOne(0)) {
-                $window.Show()
-                $window.WindowState = [System.Windows.WindowState]::Normal
-                $window.Topmost = $true
-                $window.Topmost = $false
-                $window.Activate() | Out-Null
-                $window.Focus() | Out-Null
-                try {
-                    $wshell = New-Object -ComObject WScript.Shell
-                    $wshell.AppActivate('NS Cloud Drive') | Out-Null
-                } catch { }
-                Update-AllUIState
-                return
-            }
-        } catch { }
     }
 
     if ($window.IsVisible) {
@@ -10470,6 +10528,24 @@ if ($MyInvocation.InvocationName -ne '.') {
     })
     $app.MainWindow = $window
     $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
+    if ($script:RestoreEvent -and ([System.Management.Automation.PSTypeName]'NSCloudDrive.WindowRestoreHelper').Type) {
+        $restoreAction = [Action]{
+            try {
+                $window.Show()
+                $window.WindowState = [System.Windows.WindowState]::Normal
+                $window.Topmost = $true
+                $window.Topmost = $false
+                $window.Activate() | Out-Null
+                $window.Focus() | Out-Null
+                try {
+                    $wshell = New-Object -ComObject WScript.Shell
+                    $wshell.AppActivate('NS Cloud Drive') | Out-Null
+                } catch { }
+                Update-AllUIState
+            } catch { }
+        }
+        [NSCloudDrive.WindowRestoreHelper]::StartListening($script:RestoreEvent, [System.Threading.SynchronizationContext]::Current, $restoreAction)
+    }
     if ($Minimized) {
         $window.Hide()
         Start-ApplicationStartupSequence
