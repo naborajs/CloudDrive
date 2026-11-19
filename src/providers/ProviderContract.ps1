@@ -198,7 +198,7 @@ function Get-CloudProviderFieldValue([object]$Object, [string]$Field, [object]$D
     if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($Field)) { return $DefaultValue }
 
     if ($Object -is [System.Collections.IDictionary]) {
-        if ($Object.Contains($Field)) {
+        if (([System.Collections.IDictionary]$Object).Contains($Field)) {
             $val = $Object[$Field]
             if ($null -ne $val) { return $val }
             return $DefaultValue
