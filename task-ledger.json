@@ -1,16 +1,17 @@
 {
-  "taskId": "TASK-017",
-  "goal": "Fatal Process Crash on Startup (0xe0434352 / PSInvalidOperationException) Root Cause Analysis & Elimination",
+  "taskId": "TASK-018",
+  "goal": "Silent Exit & UI Hang On Double-Click Launch (Mutex Collision, 15MB State Queue Starvation, and Window Restore Event Listener)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Diagnose startup crash from Windows Event Logs and process lifecycle traces.",
-    "2. Identify root cause: PowerShell ScriptBlock execution on CLR ThreadPool threads lacking Runspace in TLS.",
-    "3. Replace asynchronous stream redirection (Add_ErrorDataReceived, Add_OutputDataReceived) with isolated file-based rclone logging (--log-file, --use-json-log).",
-    "4. Implement safe UI thread progress consumption via Update-CloudTransferJobProgressFromLog.",
-    "5. Verify unit tests (Test-CloudTransferManager.ps1, Test-PostRestartDropDeduplication.ps1, Test-StartupAutoMountTimer.ps1, Test-TransferRecoveryAndProgression.ps1) pass with exit code 0.",
-    "6. Rebuild NSCloudDrive.exe native launcher and verify clean desktop startup without silent closing.",
-    "7. Enforce strict 1:1 granular commit and push protocol for every file modification."
+    "1. Diagnose why double-clicking NSCloudDrive.exe closes automatically or appears unresponsive.",
+    "2. Identify root cause 1: Stale / orphaned mutex or background instance causing silent exit in launcher without UI focus.",
+    "3. Identify root cause 2: transfer-jobs.json 15.2MB queue serialization freezing the WPF UI Dispatcher thread for 38+ seconds on startup and every 2 seconds on save.",
+    "4. Implement compiled C# QueueFastIO with JavaScriptSerializer for 94x faster load and save (<400ms vs 38.8s) and automatic 3-file backup pruning.",
+    "5. Implement compiled C# WindowRestoreHelper with ThreadPool.RegisterWaitForSingleObject and Dispatcher synchronization for instantaneous sub-millisecond window restoration.",
+    "6. Move RestoreEvent synchronous check ahead of background throttle check in timer loop.",
+    "7. Recompile native NSCloudDrive.exe with liveness verification, commit, push, and verify desktop launch.",
+    "8. Run full test suites (Test-TransferRecoveryAndProgression.ps1, Test-CloudTransferManager.ps1, Test-StartupAutoMountTimer.ps1) with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -20,41 +21,51 @@
   ],
   "status": "completed",
   "filesChanged": [
+    "src/launcher/Program.cs",
+    "src/providers/ProviderContract.ps1",
     "src/services/CloudTransferManager.ps1",
+    "src/NSCloudDrive.ps1",
+    "NSCloudDrive.exe",
+    "NSCloudDrive.exe.sha256",
+    "task-ledger.json",
     "docs/engineering/INCIDENTS_AND_FIXES.md",
-    ".agents/architecture/ISSUE_TRACKER.md",
-    "task-ledger.json"
+    ".agents/architecture/ISSUE_TRACKER.md"
   ],
   "decisions": [
     {
       "date": "2026-11-19",
-      "decision": "Replace asynchronous process stream delegates (Add_ErrorDataReceived / Add_OutputDataReceived) with per-job file logging (--log-file) in Start-CloudTransfer.",
-      "rationale": "CLR ThreadPool threads executing .NET AsyncStreamReader callbacks lack a PowerShell Runspace in TLS, throwing PSInvalidOperationException (0xe0434352) and immediately terminating the hosted WPF application."
+      "decision": "Add process liveness check in Program.cs before exiting on single-instance mutex collision.",
+      "rationale": "Prevents silent exit if an orphaned or stale mutex exists, and wakes up/restores hidden WPF windows using EventWaitHandle and Win32 activation."
     },
     {
       "date": "2026-11-19",
-      "decision": "Implement Update-CloudTransferJobProgressFromLog using safe file sharing (FileShare.ReadWrite) and byte offsets.",
-      "rationale": "Safely parses JSON stats on the PowerShell UI/engine thread without threadpool cross-talk, pipe deadlocks, or UI freezing."
+      "decision": "Introduce compiled C# QueueFastIO serializer in CloudTransferManager.ps1 and prune backups to 3 files.",
+      "rationale": "Interpreted PowerShell loops deserializing and checking 3,500 jobs took 38.8s of 100% CPU on the UI thread. Compiled C# with JavaScriptSerializer reduces load time to 412ms (94x speedup) and keeps disk space lean."
+    },
+    {
+      "date": "2026-11-19",
+      "decision": "Introduce compiled C# WindowRestoreHelper in NSCloudDrive.ps1 and move timer restore check before throttling.",
+      "rationale": "Restores hidden WPF window instantly via CLR threadpool wait handle without waiting up to 5 seconds on throttled background dispatcher ticks."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "finding": "Audited CloudTransferManager.ps1 diff. Verified complete removal of ThreadPool delegates, zero raw non-ASCII unicode characters, strict mode compliance, and non-blocking file reads using FileShare.ReadWrite.",
+      "finding": "Diffs audited. Confirmed compiled C# helpers comply with AGENTS.md Rule 6 (no ScriptBlock on CLR ThreadPool), zero non-ASCII characters in NSCloudDrive.ps1, strict mode compliance, and 100% test pass rate across all suites.",
       "status": "approved"
     }
   ],
   "testResults": [
     {
-      "suite": "tests/Test-CloudTransferManager.ps1",
+      "suite": "tests/Test-TransferRecoveryAndProgression.ps1",
       "status": "passed",
       "exitCode": 0,
-      "total": 1,
-      "passed": 1,
+      "total": 5,
+      "passed": 5,
       "failed": 0
     },
     {
-      "suite": "tests/Test-PostRestartDropDeduplication.ps1",
+      "suite": "tests/Test-CloudTransferManager.ps1",
       "status": "passed",
       "exitCode": 0,
       "total": 1,
@@ -65,30 +76,25 @@
       "suite": "tests/Test-StartupAutoMountTimer.ps1",
       "status": "passed",
       "exitCode": 0,
-      "total": 1,
-      "passed": 1,
-      "failed": 0
-    },
-    {
-      "suite": "tests/Test-TransferRecoveryAndProgression.ps1",
-      "status": "passed",
-      "exitCode": 0,
-      "total": 1,
-      "passed": 1,
+      "total": 7,
+      "passed": 7,
       "failed": 0
     }
   ],
   "securityFindings": [
     {
       "auditor": "ns-security",
-      "finding": "Verified that transfer log paths reside strictly in LocalAppData and sanitized diagnostic messages continue to redact auth tokens, client secrets, and sensitive credentials.",
+      "finding": "Durable queue snapshots continue to redact access tokens, refresh tokens, and passwords while retaining safe routing metadata.",
       "status": "passed"
     }
   ],
   "commitRefs": [
-    "f26f85e",
-    "1cd7832",
-    "efd251e"
+    "83a3e05",
+    "fb0226d",
+    "9d03203",
+    "201e7d7",
+    "0966218",
+    "2b79f5e"
   ],
   "blockers": []
 }
