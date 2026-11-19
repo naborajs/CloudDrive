@@ -1,5 +1,6 @@
 param(
-    [switch]$Minimized
+    [switch]$Minimized,
+    [switch]$FromLauncher
 )
 
 Set-StrictMode -Version Latest
@@ -494,7 +495,7 @@ $script:LastStartupAutoMountLogKey = ''
 # Enforce single instance when launched as standalone application
 if ($MyInvocation.InvocationName -ne '.') {
     $isNewInstance = $false
-    if ([System.Diagnostics.Process]::GetCurrentProcess().ProcessName -eq 'NSCloudDrive') {
+    if ($FromLauncher -or [System.Diagnostics.Process]::GetCurrentProcess().ProcessName -eq 'NSCloudDrive') {
         # Already guarded by native launcher mutex
         $isNewInstance = $true
     } else {
@@ -10558,7 +10559,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         try {
             Add-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs\startup-restore.jsonl') -Value ("{\""timestampUtc\"":\""" + [DateTime]::UtcNow.ToString('o') + "\"",\""event\"":\""debug_window_shown\""}") -Encoding UTF8 -ErrorAction SilentlyContinue
         } catch { }
+        $window.WindowState = [System.Windows.WindowState]::Normal
+        $window.Topmost = $true
+        $window.Topmost = $false
         $window.Activate() | Out-Null
+        $window.Focus() | Out-Null
         try {
             $wshell = New-Object -ComObject WScript.Shell
             $wshell.AppActivate('NS Cloud Drive') | Out-Null
