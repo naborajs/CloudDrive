@@ -2051,45 +2051,54 @@ function Load-DurableTransferQueue {
 
     if ($fastLoadedJobs -is [System.Collections.Generic.List[hashtable]]) {
         foreach ($item in $fastLoadedJobs) {
-            $srcAcc = Get-CloudTransferFieldValue $item 'SourceAccount'
-            $dstAcc = Get-CloudTransferFieldValue $item 'DestinationAccount'
-            if ($srcAcc) { $item['SourceAccount'] = Resolve-TransferAccountSnapshot -Snapshot $srcAcc }
-            if ($dstAcc) { $item['DestinationAccount'] = Resolve-TransferAccountSnapshot -Snapshot $dstAcc }
+            $op = if ($item.ContainsKey('OperationType')) { [string]$item['OperationType'] } else { '' }
+            $dir = if ($item.ContainsKey('Direction')) { [string]$item['Direction'] } else { '' }
+            if ([string]::IsNullOrWhiteSpace($op) -or $op -eq 'Unknown' -or [string]::IsNullOrWhiteSpace($dir) -or $dir -eq 'Unknown' -or [string]$item['ReconciliationStatus'] -eq 'Required') {
+                $srcAcc = Get-CloudTransferFieldValue $item 'SourceAccount'
+                $dstAcc = Get-CloudTransferFieldValue $item 'DestinationAccount'
+                if ($srcAcc) { $item['SourceAccount'] = Resolve-TransferAccountSnapshot -Snapshot $srcAcc }
+                if ($dstAcc) { $item['DestinationAccount'] = Resolve-TransferAccountSnapshot -Snapshot $dstAcc }
 
-            $jobOperation = Get-CloudTransferJobOperation -Job $item
-            if ($jobOperation.IsValid) {
-                if ([string]::IsNullOrWhiteSpace([string]$item['OperationType']) -or [string]$item['OperationType'] -eq 'Unknown') {
-                    $item['OperationType'] = [string]$jobOperation.OperationType
-                }
-                if ([string]::IsNullOrWhiteSpace([string]$item['Direction']) -or [string]$item['Direction'] -eq 'Unknown') {
-                    $item['Direction'] = [string]$jobOperation.Direction
-                }
-                if ([string]::IsNullOrWhiteSpace([string]$item['SourceProvider'])) { $item['SourceProvider'] = [string]$jobOperation.SourceProvider }
-                if ([string]::IsNullOrWhiteSpace([string]$item['DestinationProvider'])) { $item['DestinationProvider'] = [string]$jobOperation.DestinationProvider }
-                if ([string]::IsNullOrWhiteSpace([string]$item['SourceAccountId'])) { $item['SourceAccountId'] = [string]$jobOperation.SourceAccountId }
-                if ([string]::IsNullOrWhiteSpace([string]$item['DestinationAccountId'])) { $item['DestinationAccountId'] = [string]$jobOperation.DestinationAccountId }
-                if ([string]$item['ReconciliationStatus'] -eq 'Required' -and [string]$item['StatusBeforeReconciliation']) {
-                    $item['Status'] = [string]$item['StatusBeforeReconciliation']
-                    $item['StatusBeforeReconciliation'] = ''
-                    $item['ReconciliationStatus'] = 'None'
-                    $item['LastError'] = ''
-                }
-            } else {
-                $isBothLocal = [string]$jobOperation.Reason -match '(?i)both local'
-                if (-not $isBothLocal) {
-                    $terminalStatuses = @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')
-                    if ([string]$item['Status'] -notin $terminalStatuses) {
-                        if ([string]::IsNullOrWhiteSpace([string]$item['StatusBeforeReconciliation'])) {
-                            $item['StatusBeforeReconciliation'] = [string]$item['Status']
+                $jobOperation = Get-CloudTransferJobOperation -Job $item
+                if ($jobOperation.IsValid) {
+                    if ([string]::IsNullOrWhiteSpace([string]$item['OperationType']) -or [string]$item['OperationType'] -eq 'Unknown') {
+                        $item['OperationType'] = [string]$jobOperation.OperationType
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$item['Direction']) -or [string]$item['Direction'] -eq 'Unknown') {
+                        $item['Direction'] = [string]$jobOperation.Direction
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$item['SourceProvider'])) { $item['SourceProvider'] = [string]$jobOperation.SourceProvider }
+                    if ([string]::IsNullOrWhiteSpace([string]$item['DestinationProvider'])) { $item['DestinationProvider'] = [string]$jobOperation.DestinationProvider }
+                    if ([string]::IsNullOrWhiteSpace([string]$item['SourceAccountId'])) { $item['SourceAccountId'] = [string]$jobOperation.SourceAccountId }
+                    if ([string]::IsNullOrWhiteSpace([string]$item['DestinationAccountId'])) { $item['DestinationAccountId'] = [string]$jobOperation.DestinationAccountId }
+                    if ([string]$item['ReconciliationStatus'] -eq 'Required' -and [string]$item['StatusBeforeReconciliation']) {
+                        $item['Status'] = [string]$item['StatusBeforeReconciliation']
+                        $item['StatusBeforeReconciliation'] = ''
+                        $item['ReconciliationStatus'] = 'None'
+                        $item['LastError'] = ''
+                    }
+                } else {
+                    $isBothLocal = [string]$jobOperation.Reason -match '(?i)both local'
+                    if (-not $isBothLocal) {
+                        $terminalStatuses = @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')
+                        if ([string]$item['Status'] -notin $terminalStatuses) {
+                            if ([string]::IsNullOrWhiteSpace([string]$item['StatusBeforeReconciliation'])) {
+                                $item['StatusBeforeReconciliation'] = [string]$item['Status']
+                            }
+                            $item['Status'] = 'Needs reconciliation: operation unresolved'
+                            $item['ReconciliationStatus'] = 'Required'
+                            $item['LastError'] = [string]$jobOperation.Reason
+                            $item['WorkerPid'] = 0
+                            $item['WorkerLeaseUtc'] = $null
+                            $item['JobId'] = ''
                         }
-                        $item['Status'] = 'Needs reconciliation: operation unresolved'
-                        $item['ReconciliationStatus'] = 'Required'
-                        $item['LastError'] = [string]$jobOperation.Reason
-                        $item['WorkerPid'] = 0
-                        $item['WorkerLeaseUtc'] = $null
-                        $item['JobId'] = ''
                     }
                 }
+            } else {
+                $srcAcc = Get-CloudTransferFieldValue $item 'SourceAccount'
+                $dstAcc = Get-CloudTransferFieldValue $item 'DestinationAccount'
+                if ($srcAcc -and $srcAcc -isnot [System.Collections.IDictionary]) { $item['SourceAccount'] = Resolve-TransferAccountSnapshot -Snapshot $srcAcc }
+                if ($dstAcc -and $dstAcc -isnot [System.Collections.IDictionary]) { $item['DestinationAccount'] = Resolve-TransferAccountSnapshot -Snapshot $dstAcc }
             }
             $loadedItems.Add($item)
             $loadedCount++
@@ -2881,6 +2890,13 @@ function Invoke-StartupTransferQueueRecovery {
     foreach ($item in @($script:CloudTransferQueue)) {
         $status = [string]$item['Status']
         if ($status -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')) { continue }
+
+        $op = if ($item.ContainsKey('OperationType')) { [string]$item['OperationType'] } else { '' }
+        $dir = if ($item.ContainsKey('Direction')) { [string]$item['Direction'] } else { '' }
+        $recStatus = if ($item.ContainsKey('ReconciliationStatus')) { [string]$item['ReconciliationStatus'] } else { '' }
+        if ($status -eq 'Queued' -and -not [string]::IsNullOrWhiteSpace($op) -and $op -ne 'Unknown' -and -not [string]::IsNullOrWhiteSpace($dir) -and $dir -ne 'Unknown' -and $recStatus -ne 'Required') {
+            continue
+        }
 
         $jobOperation = Get-CloudTransferJobOperation -Job $item
         $skipOperationValidation = $false
@@ -3758,21 +3774,26 @@ function Process-CloudTransferQueue {
             # Fail closed on an unresolved operation. The record and its files stay
             # intact; only scheduling is blocked until reconciliation is explicit.
             if ($status -notin @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')) {
-                $jobOperation = Get-CloudTransferJobOperation -Job $item
-                if (-not $jobOperation.IsValid) {
-                    if ($status -ne 'Needs reconciliation: operation unresolved') {
-                        if ([string]::IsNullOrWhiteSpace([string]$item['StatusBeforeReconciliation'])) {
-                            $item['StatusBeforeReconciliation'] = $status
+                $op = if ($item.ContainsKey('OperationType')) { [string]$item['OperationType'] } else { '' }
+                $dir = if ($item.ContainsKey('Direction')) { [string]$item['Direction'] } else { '' }
+                $recStatus = if ($item.ContainsKey('ReconciliationStatus')) { [string]$item['ReconciliationStatus'] } else { '' }
+                if ([string]::IsNullOrWhiteSpace($op) -or $op -eq 'Unknown' -or [string]::IsNullOrWhiteSpace($dir) -or $dir -eq 'Unknown' -or $recStatus -eq 'Required') {
+                    $jobOperation = Get-CloudTransferJobOperation -Job $item
+                    if (-not $jobOperation.IsValid) {
+                        if ($status -ne 'Needs reconciliation: operation unresolved') {
+                            if ([string]::IsNullOrWhiteSpace([string]$item['StatusBeforeReconciliation'])) {
+                                $item['StatusBeforeReconciliation'] = $status
+                            }
+                            $item['Status'] = 'Needs reconciliation: operation unresolved'
+                            $item['ReconciliationStatus'] = 'Required'
+                            $item['LastError'] = [string]$jobOperation.Reason
+                            $item['WorkerPid'] = 0
+                            $item['WorkerLeaseUtc'] = $null
+                            $item['JobId'] = ''
+                            $stateChanged = $true
                         }
-                        $item['Status'] = 'Needs reconciliation: operation unresolved'
-                        $item['ReconciliationStatus'] = 'Required'
-                        $item['LastError'] = [string]$jobOperation.Reason
-                        $item['WorkerPid'] = 0
-                        $item['WorkerLeaseUtc'] = $null
-                        $item['JobId'] = ''
-                        $stateChanged = $true
+                        continue
                     }
-                    continue
                 }
             }
 
@@ -4265,10 +4286,4 @@ function Clear-CloudTransferQueue {
     Save-DurableTransferQueue | Out-Null
 }
 
-# Automatically load queue on module load if persistent state file exists
-try {
-    $initStateFile = Get-TransferQueueFilePath
-    if (Test-Path -LiteralPath $initStateFile -PathType Leaf) {
-        Load-DurableTransferQueue | Out-Null
-    }
-} catch { }
+
