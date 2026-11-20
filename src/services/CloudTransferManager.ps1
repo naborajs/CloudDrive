@@ -190,8 +190,28 @@ namespace NSCloudDrive
 $script:ActiveTransferJobs = @{}
 $script:CloudTransferQueue = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
 $script:TransferQueueStateUnavailable = $false
-$script:TransferQueueFile = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\state\transfer-jobs.json')
 $script:CustomTransferQueueFile = $null
+
+function Get-TransferQueueFilePath {
+    if ($script:CustomTransferQueueFile) {
+        return $script:CustomTransferQueueFile
+    }
+    $baseDir = if (Get-Command 'Get-NSCloudDriveDataRoot' -ErrorAction SilentlyContinue) {
+        Get-NSCloudDriveDataRoot
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.local/share/nsclouddrive'
+    }
+    $stateDir = Join-Path $baseDir 'state'
+    if (-not (Test-Path -LiteralPath $stateDir)) {
+        try { [void][System.IO.Directory]::CreateDirectory($stateDir) } catch { }
+    }
+    return (Join-Path $stateDir 'transfer-jobs.json')
+}
+
+$script:TransferQueueFile = (Get-TransferQueueFilePath)
 
 # Staged revisions already confirmed on the provider, keyed by the same identity the
 # pending summary uses. This is deliberately independent of queue jobs: clearing the
@@ -273,13 +293,6 @@ function Update-CloudTransferSettledStagedLedger {
 
 function Set-TransferQueueFilePath([string]$Path) {
     $script:CustomTransferQueueFile = $Path
-}
-
-function Get-TransferQueueFilePath {
-    if ($script:CustomTransferQueueFile) {
-        return $script:CustomTransferQueueFile
-    }
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\state\transfer-jobs.json')
 }
 
 # ==============================================================================
@@ -1303,7 +1316,15 @@ function Start-CloudTransfer {
     # executes delegates on CLR ThreadPool threads without a PowerShell runspace in TLS, causing instant process termination
     # via PSInvalidOperationException (0xe0434352). Writing to a dedicated log file eliminates threadpool delegates,
     # prevents pipe buffer deadlocks, and guarantees 100% thread-safe progress consumption.
-    $transferLogDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs\transfers'
+    $baseDataDir = if (Get-Command 'Get-NSCloudDriveDataRoot' -ErrorAction SilentlyContinue) {
+        Get-NSCloudDriveDataRoot
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.local/share/nsclouddrive'
+    }
+    $transferLogDir = Join-Path (Join-Path $baseDataDir 'logs') 'transfers'
     if (-not (Test-Path -LiteralPath $transferLogDir)) {
         try { [void][System.IO.Directory]::CreateDirectory($transferLogDir) } catch { }
     }
@@ -1326,6 +1347,17 @@ function Start-CloudTransfer {
 
     if ($ConflictAction -eq 'Skip') {
         $rawArgs += '--ignore-existing'
+    }
+
+    # Add chunked resumable upload arguments for Google Drive
+    $dstProv = Get-CloudTransferProviderId $DestinationAccount
+    if ($dstProv -match '(?i)(?:gdrive|google)') {
+        $rawArgs += @(
+            '--drive-chunk-size', '32M',
+            '--drive-upload-cutoff', '32M',
+            '--drive-pacer-min-sleep', '10ms',
+            '--tpslimit', '10'
+        )
     }
 
     if (-not [string]::IsNullOrEmpty($BandwidthLimit) -and $BandwidthLimit -ne 'off') {
@@ -3082,7 +3114,7 @@ function Invoke-StartupTransferQueueRecovery {
         }
     }
 
-    if ($recoveredCount -gt 0 -or $reconciliationCount -gt 0 -or $confirmedCount -gt 0) {
+    if ($recoveredCount -gt 0 -or $reconciliationCount -gt 0 -or $confirmedCount -gt 0 -or $resetCount -gt 0) {
         Save-DurableTransferQueue | Out-Null
         if (Get-Command Save-CloudDedupLedger -ErrorAction SilentlyContinue) {
             try { Save-CloudDedupLedger } catch { }
