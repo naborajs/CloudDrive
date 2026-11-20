@@ -629,7 +629,7 @@ function Test-ProviderUploadPreflight {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$Account,
+        [object]$Account,
 
         [Parameter(Mandatory = $true)]
         [int64]$FileSizeBytes,
@@ -756,7 +756,7 @@ function Get-CloudAccountTransferRemoteEnvironment {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$Account,
+        [object]$Account,
 
         [Parameter(Mandatory = $true)]
         [string]$RemoteAlias
@@ -797,7 +797,7 @@ function Get-CloudDirectoryContents {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$Account,
+        [object]$Account,
 
         [string]$Path = '',
 
@@ -955,7 +955,7 @@ function Test-RemoteCloudFileVerification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$Account,
+        [object]$Account,
 
         [Parameter(Mandatory = $true)]
         [string]$RemotePath,
@@ -1212,13 +1212,13 @@ function Start-CloudTransfer {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$SourceAccount,
+        [object]$SourceAccount,
 
         [Parameter(Mandatory = $true)]
         [string]$SourcePath,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $false)]
         [string]$DestinationPath = '',
@@ -1768,7 +1768,7 @@ function ConvertTo-TransferAccountSnapshot {
 
 function Resolve-TransferAccountSnapshot {
     [CmdletBinding()]
-    param([AllowNull()][System.Collections.IDictionary]$Snapshot)
+    param([AllowNull()][object]$Snapshot)
 
     if ($null -eq $Snapshot) { return @{} }
     $accountId = [string](Get-CloudTransferFieldValue $Snapshot 'Id')
@@ -1777,6 +1777,12 @@ function Resolve-TransferAccountSnapshot {
             $storedAccount = Get-CloudAccount -AccountId $accountId
             if ($storedAccount) { return $storedAccount }
         } catch { }
+    }
+    if ($Snapshot -is [System.Collections.IDictionary]) { return $Snapshot }
+    $ht = @{}
+    if ($Snapshot -is [pscustomobject]) {
+        foreach ($p in $Snapshot.PSObject.Properties) { $ht[$p.Name] = $p.Value }
+        return $ht
     }
     return $Snapshot
 }
@@ -2294,13 +2300,13 @@ function Add-CloudTransferFolderBatch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$SourceAccount,
+        [object]$SourceAccount,
 
         [Parameter(Mandatory = $true)]
         [string]$SourceFolderPath,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $false)]
         [string]$DestinationFolderPath = '',
@@ -2400,16 +2406,32 @@ function Add-CloudTransferFolderBatch {
         # Rapid deduplication & format check against cloud storage
         $dedupStatus = 'New'
         $isAlreadyInCloud = $false
-        if ($ConflictAction -eq 'Skip' -and $null -ne $remoteInventory) {
-            $classification = Classify-TransferCandidate `
-                -LocalFilePath $filePath `
-                -DestinationRelativePath $cleanDest `
-                -RemoteInventoryMap $remoteInventory
-            $dedupStatus = [string]$classification.Status
-            if ($dedupStatus -eq 'AlreadyInCloud') {
-                $isAlreadyInCloud = $true
-                $alreadyPresentCount++
-                $alreadyPresentBytes += $fileSize
+        if ($ConflictAction -eq 'Skip') {
+            if ($null -ne $remoteInventory -and (Get-Command Classify-TransferCandidate -ErrorAction SilentlyContinue)) {
+                $classification = Classify-TransferCandidate `
+                    -LocalFilePath $filePath `
+                    -DestinationRelativePath $cleanDest `
+                    -RemoteInventoryMap $remoteInventory `
+                    -DestinationAccount $DestinationAccount
+                $dedupStatus = [string]$classification.Status
+                if ($dedupStatus -eq 'AlreadyInCloud') {
+                    $isAlreadyInCloud = $true
+                    $alreadyPresentCount++
+                    $alreadyPresentBytes += $fileSize
+                }
+            } elseif (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue) {
+                $dedupDirect = Test-RemoteCloudFileDeduplication `
+                    -AccountId $dstAccId `
+                    -ProviderId $dstProvId `
+                    -RemotePath $cleanDest `
+                    -LocalSizeBytes $fileSize `
+                    -LocalFilePath $filePath `
+                    -Account $DestinationAccount
+                if ($dedupDirect.IsPresent) {
+                    $isAlreadyInCloud = $true
+                    $alreadyPresentCount++
+                    $alreadyPresentBytes += $fileSize
+                }
             }
         }
 
@@ -2532,7 +2554,7 @@ function Add-CloudTransferDroppedItems {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $true)]
         [string[]]$DroppedPaths,
@@ -2648,9 +2670,31 @@ function Add-CloudTransferDroppedItems {
         $classification = Classify-TransferCandidate `
             -LocalFilePath $fp `
             -DestinationRelativePath $destRel `
-            -RemoteInventoryMap $remoteInventory
+            -RemoteInventoryMap $remoteInventory `
+            -DestinationAccount $DestinationAccount
 
-        if ($classification.Status -eq 'AlreadyInCloud') {
+        $isAlreadyInCloud = ($classification.Status -eq 'AlreadyInCloud')
+        $dedupReason = [string]$classification.Reason
+        $dedupFormat = [string]$classification.LocalFormat
+
+        if (-not $isAlreadyInCloud -and (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue)) {
+            try {
+                $dedupDirect = Test-RemoteCloudFileDeduplication `
+                    -AccountId $dstAccId `
+                    -ProviderId $dstProvId `
+                    -RemotePath $destRel `
+                    -LocalSizeBytes $fSize `
+                    -LocalFilePath $fp `
+                    -Account $DestinationAccount
+                if ($dedupDirect.IsPresent) {
+                    $isAlreadyInCloud = $true
+                    $dedupReason = [string]$dedupDirect.Reason
+                    $dedupFormat = [string]$dedupDirect.Format
+                }
+            } catch { }
+        }
+
+        if ($isAlreadyInCloud) {
             # File is ALREADY present in the cloud with matching name, location, and exact size/format!
             # LEAVE that file without transferring again!
             $skippedBytes += $fSize
@@ -2659,7 +2703,7 @@ function Add-CloudTransferDroppedItems {
                 RelativePath = $destRel
                 SizeBytes    = $fSize
                 Status       = 'AlreadyInCloud'
-                Reason       = $classification.Reason
+                Reason       = $dedupReason
             })
 
             # Ensure durable ledger records verification
@@ -2668,7 +2712,7 @@ function Add-CloudTransferDroppedItems {
                 -ProviderId $dstProvId `
                 -RemotePath $destRel `
                 -SizeBytes $fSize `
-                -Format ([string]$classification.LocalFormat) `
+                -Format $dedupFormat `
                 -SkipPersist
         } else {
             # File is either:
@@ -2891,6 +2935,44 @@ function Invoke-StartupTransferQueueRecovery {
         $status = [string]$item['Status']
         if ($status -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')) { continue }
 
+        # Pre-transfer deduplication check on startup recovery:
+        # If the file is already confirmed in the cloud with identical format and size, reconcile to Completed immediately.
+        if (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue) {
+            $destAcc = if ($item.ContainsKey('DestinationAccount')) { $item['DestinationAccount'] } else { $null }
+            $dstAccId = if ($item.ContainsKey('DestinationAccountId') -and $item['DestinationAccountId']) { [string]$item['DestinationAccountId'] } else { [string](Get-CloudTransferFieldValue $destAcc 'Id') }
+            $dstProvId = if ($item.ContainsKey('DestinationProvider') -and $item['DestinationProvider']) { [string]$item['DestinationProvider'] } else { [string](Get-CloudTransferFieldValue $destAcc 'ProviderId') }
+            $destFileRel = if ($item.ContainsKey('DestinationFilePath') -and $item['DestinationFilePath']) { [string]$item['DestinationFilePath'] } else { [string]$item['FileName'] }
+            $fileSize = if ($item.ContainsKey('FileSizeBytes')) { [int64]$item['FileSizeBytes'] } else { 0L }
+            $srcPath = if ($item.ContainsKey('SourcePath')) { [string]$item['SourcePath'] } else { '' }
+
+            if ($dstAccId -and $destFileRel -and $fileSize -gt 0L) {
+                try {
+                    $dedup = Test-RemoteCloudFileDeduplication `
+                        -AccountId $dstAccId `
+                        -ProviderId $dstProvId `
+                        -RemotePath $destFileRel `
+                        -LocalSizeBytes $fileSize `
+                        -LocalFilePath $srcPath `
+                        -Account $destAcc
+
+                    if ($dedup.IsPresent) {
+                        $item['Status'] = 'Completed and remotely confirmed'
+                        $item['Percentage'] = 100.0
+                        $item['BytesTransferred'] = $fileSize
+                        $item['CompletedUtc'] = $now
+                        $item['WorkerPid'] = 0
+                        $item['WorkerLeaseUtc'] = $null
+                        $item['JobId'] = ''
+                        $item['ReconciliationStatus'] = 'None'
+                        $item['VerificationType'] = 'PreTransferDeduplication'
+                        $item['LastError'] = [string]$dedup.Reason
+                        $confirmedCount++
+                        continue
+                    }
+                } catch { }
+            }
+        }
+
         $op = if ($item.ContainsKey('OperationType')) { [string]$item['OperationType'] } else { '' }
         $dir = if ($item.ContainsKey('Direction')) { [string]$item['Direction'] } else { '' }
         $recStatus = if ($item.ContainsKey('ReconciliationStatus')) { [string]$item['ReconciliationStatus'] } else { '' }
@@ -3000,8 +3082,11 @@ function Invoke-StartupTransferQueueRecovery {
         }
     }
 
-    if ($recoveredCount -gt 0 -or $reconciliationCount -gt 0) {
+    if ($recoveredCount -gt 0 -or $reconciliationCount -gt 0 -or $confirmedCount -gt 0) {
         Save-DurableTransferQueue | Out-Null
+        if (Get-Command Save-CloudDedupLedger -ErrorAction SilentlyContinue) {
+            try { Save-CloudDedupLedger } catch { }
+        }
     }
 
     return [ordered]@{
@@ -3020,13 +3105,13 @@ function Add-CloudTransferQueueItem {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$SourceAccount,
+        [object]$SourceAccount,
 
         [Parameter(Mandatory = $true)]
         [string]$SourcePath,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $false)]
         [string]$DestinationPath = '',
@@ -3403,9 +3488,28 @@ function Import-StagedVfsFilesToTransferQueue {
             }
         }
 
-        # Check durable deduplication ledger before adoption:
+        # Check durable deduplication ledger and remote cloud storage before adoption:
         # If the file is already confirmed in the cloud with identical relative path and size, skip re-adoption.
-        if (Get-Command Test-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
+        if (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue) {
+            try {
+                $dedup = Test-RemoteCloudFileDeduplication `
+                    -AccountId $accountId `
+                    -ProviderId $providerId `
+                    -RemotePath $relativePath `
+                    -LocalSizeBytes $length `
+                    -LocalFilePath $path `
+                    -Account $account
+                if ($dedup.IsPresent) {
+                    $result.AlreadySettledCount++
+                    $script:CloudTransferSettledStaged[$identity] = @{
+                        Size         = $length
+                        LastWriteUtc = $lastWriteUtc
+                        ConfirmedUtc = [DateTime]::UtcNow.ToString('o')
+                    }
+                    continue
+                }
+            } catch { }
+        } elseif (Get-Command Test-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
             try {
                 if (Test-CloudDedupVerifiedFile -AccountId $accountId -RemotePath $relativePath -SizeBytes $length) {
                     $result.AlreadySettledCount++
@@ -4137,17 +4241,26 @@ function Process-CloudTransferQueue {
                 }
 
                 try {
-                    $remoteInv = Get-RemoteFileInventoryMap -DestinationAccount $destAcc
-                    $dedupCheck = Classify-TransferCandidate -LocalFilePath $srcPath -DestinationRelativePath $destFileRel -RemoteInventoryMap $remoteInv
+                    $fileSize = if ($eligible.ContainsKey('FileSizeBytes')) { [int64]$eligible['FileSizeBytes'] } else { 0L }
+                    $dstAccId = if ($eligible.ContainsKey('DestinationAccountId') -and $eligible['DestinationAccountId']) { [string]$eligible['DestinationAccountId'] } else { [string](Get-CloudTransferFieldValue $destAcc 'Id') }
+                    $dstProvId = if ($eligible.ContainsKey('DestinationProvider') -and $eligible['DestinationProvider']) { [string]$eligible['DestinationProvider'] } else { [string](Get-CloudTransferFieldValue $destAcc 'ProviderId') }
 
-                    if ($dedupCheck.Status -eq 'AlreadyInCloud') {
+                    $dedupCheck = Test-RemoteCloudFileDeduplication `
+                        -AccountId $dstAccId `
+                        -ProviderId $dstProvId `
+                        -RemotePath $destFileRel `
+                        -LocalSizeBytes $fileSize `
+                        -LocalFilePath $srcPath `
+                        -Account $destAcc
+
+                    if ($dedupCheck.IsPresent) {
                         $eligible['Status'] = 'Completed and remotely confirmed'
                         $eligible['Percentage'] = 100.0
-                        $eligible['BytesTransferred'] = [int64]$eligible['FileSizeBytes']
+                        $eligible['BytesTransferred'] = $fileSize
                         $eligible['CompletedUtc'] = [DateTime]::UtcNow
                         $eligible['WorkerPid'] = 0
                         $eligible['VerificationType'] = 'PreTransferDeduplication'
-                        $eligible['LastError'] = "Already present in cloud with identical format and size ($([int64]$eligible['FileSizeBytes']) bytes). Skipped upload."
+                        $eligible['LastError'] = [string]$dedupCheck.Reason
                         $stateChanged = $true
                         continue
                     }
