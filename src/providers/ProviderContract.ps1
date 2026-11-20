@@ -218,6 +218,22 @@ function Get-CloudProviderFieldValue([object]$Object, [string]$Field, [object]$D
 
 function Set-CloudCredentialAcl([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        try {
+            $isDir = (Test-Path -LiteralPath $Path -PathType Container)
+            $mode = if ($isDir) { '700' } else { '600' }
+            & chmod $mode $Path 2>$null
+        } catch { }
+        return
+    }
+
     try {
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
