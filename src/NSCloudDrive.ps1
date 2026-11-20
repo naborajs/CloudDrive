@@ -9441,25 +9441,11 @@ function Start-ApplicationStartupSequence {
         $recoverySummary = Invoke-StartupTransferQueueRecovery
         $script:TransferQueueStateUnavailable = $false
 
-        # Notify user if any transfers were interrupted across application/system restart
-        $hasInterrupted = $false
-        if ($recoverySummary -and [int]$recoverySummary.ResetCount -gt 0) {
-            $hasInterrupted = $true
-        } else {
+        # Automatically resume background transfer processing after restart silently without balloon popups
+        if ($recoverySummary -and ([int]$recoverySummary.ResetCount -gt 0 -or [int]$recoverySummary.RecoveredCount -gt 0)) {
             try {
-                $qRes = if (Get-Command Get-CloudTransferQueue -ErrorAction SilentlyContinue) { Get-CloudTransferQueue } else { $null }
-                $checkQ = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) { @($qRes[0]) } elseif ($null -ne $qRes) { @($qRes) } else { @() }
-                $hasInterrupted = ($checkQ | Where-Object {
-                    $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
-                    $_['Status'] -in @('Waiting for network/provider', 'Awaiting remote confirmation', 'Needs attention: remote verification unavailable')
-                }).Count -gt 0
-            } catch { }
-        }
-
-        if ($hasInterrupted) {
-            try {
-                if ($notifyIcon -and (Test-AndSetNotifiedEventKey "startup_interrupted_prompt" 1440.0)) {
-                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Transfer Interrupted", "Transfer was interrupted. Please drag and drop your folder into the drive again to resume syncing.", [System.Windows.Forms.ToolTipIcon]::Info)
+                if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
+                    [void](Process-CloudTransferQueue)
                 }
             } catch { }
         }
@@ -9654,17 +9640,7 @@ function Update-LiveTransferActivity {
     }
     $pendingVfsFiles = if ($script:CachedPendingVfsFiles) { $script:CachedPendingVfsFiles } else { @() }
 
-    # If uncompleted staged files exist after an interrupted session, notify the user ONCE
-    # to simply drag and drop the folder again to resume. No complex automatic queue mutation.
-    if ($pendingVfsFiles.Count -gt 0 -and $notificationsAllowed) {
-        if (Test-AndSetNotifiedEventKey "interrupted_staged_prompt" 1440.0) {
-            try {
-                if ($notifyIcon) {
-                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Interrupted Transfer Detected", "Unfinished files from a previous session were detected. Please drag and drop your folder into the drive again to resume syncing.", [System.Windows.Forms.ToolTipIcon]::Info)
-                }
-            } catch { }
-        }
-    }
+    # Uncompleted staged files are automatically reconciled and transferred in background without spamming balloon tips
     $pendingSummary = if (Get-Command Get-CloudTransferPendingSummary -ErrorAction SilentlyContinue) {
         Get-CloudTransferPendingSummary -QueueItems $rawQueue -StagedFiles $pendingVfsFiles
     } else {
