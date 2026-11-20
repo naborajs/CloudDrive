@@ -154,6 +154,13 @@ namespace NSCloudDrive
     } catch { }
 }
 
+function Test-IsLinuxOperatingSystem {
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -ne $linuxVar) { return [bool]$linuxVar }
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { return $true }
+    return $false
+}
+
 function Format-SafeProcessArgument([string]$Argument) {
     if ([string]::IsNullOrEmpty($Argument)) { return '""' }
     if ($Argument -notmatch '[\s"\\]') { return $Argument }
@@ -168,12 +175,7 @@ function Find-RcloneBinary([string]$CustomPath = '') {
         return $CustomPath
     }
 
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     $candidates = @()
     if ($env:RCLONE_EXE_PATH) {
@@ -228,12 +230,7 @@ function Get-VerifiedRclonePath([string]$CustomPath = '') {
 }
 
 function Test-WinFspInstalled {
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     if ($isLinux) {
         $fuseCmd = Get-Command 'fusermount3', 'fusermount' -ErrorAction SilentlyContinue
@@ -297,12 +294,7 @@ function Get-VirtualDriveRcPort([string]$DriveLetter) {
 function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 5) {
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'Filesystem check timeout must be between 1 and 30 seconds.' }
 
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     if ($isLinux) {
         if ([string]::IsNullOrWhiteSpace($DriveRoot) -or -not (Test-Path -LiteralPath $DriveRoot -PathType Container)) {
@@ -343,12 +335,7 @@ function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 
 }
 
 function Clear-StaleDriveLetterMapping([string]$DriveLetter, [string]$VolumeLabel = '') {
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
     if ($isLinux) { return }
 
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
@@ -591,12 +578,7 @@ function Build-RcloneMountArguments(
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
     }
 
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     $driveRoot = ''
     if ($isLinux) {
@@ -789,12 +771,7 @@ function Start-VirtualDriveMount(
         }
     }
 
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     $letter = ''
     $driveRoot = ''
@@ -1206,12 +1183,7 @@ function Stop-VirtualDriveMount(
         try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
 
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $isLinux = Test-IsLinuxOperatingSystem
 
     if ($isLinux) {
         try {
