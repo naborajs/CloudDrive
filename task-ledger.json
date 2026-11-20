@@ -1,19 +1,16 @@
 {
-  "taskId": "TASK-019",
-  "goal": "Application Startup Window Stall & Redundant Queue Load Resolution (650x Queue Speedup, 4.2x Faster Window Presentation, and Resilient Multi-Click Activation)",
+  "taskId": "TASK-020",
+  "goal": "Fast Cloud Deduplication on Post-Restart Drop, Notification De-Spamming, and Dispatcher Unfreezing",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Diagnose why application appeared to open and close automatically when launched by user.",
-    "2. Identify root cause 1: 28.7-second delay before window appeared due to redundant module import queue loads (13.7s each) of 3,192 jobs and repetitive PowerShell validation loops.",
-    "3. Identify root cause 2: Double-clicking during startup caused second instance to miss window handle after 150ms and exit cleanly, appearing as a crash/closure.",
-    "4. Identify root cause 3: Out-of-process fallback in Program.cs caused mutex collision with child powershell.exe.",
-    "5. Eliminate redundant Load-DurableTransferQueue on CloudTransferManager.ps1 module import.",
-    "6. Fast-path normalized transfer job validation in Load-DurableTransferQueue, reducing loop execution from 13,700ms to 21ms (650x speedup).",
-    "7. Fast-path queued jobs in Process-CloudTransferQueue and Invoke-StartupTransferQueueRecovery.",
-    "8. Implement iterative window activation polling (up to 1.5s) in Program.cs and pass -FromLauncher on out-of-process fallback.",
-    "9. Bring WPF window immediately to foreground via SetForegroundWindow and WindowState.Normal on launch.",
-    "10. Verify total window appearance time reduced from 28.7s to 6.7s and ensure all test suites pass with exit code 0."
+    "1. When user drops files (e.g. 100 files) after an interrupted transfer (e.g. 85 completed), files already present in the cloud matching name, format, and exact byte size are skipped immediately without re-transferring.",
+    "2. Cloud deduplication performs O(1) checks against local deduplication ledger and direct virtual drive mount (<1ms per file) without crawling directory trees.",
+    "3. Support PSCustomObject account deserialization in Test-RemoteCloudFileDeduplication and Classify-TransferCandidate without parameter binding errors.",
+    "4. Eliminate continuous notification spam: suppress balloon tips for recovery batches, throttle interrupted session alerts to once per session.",
+    "5. Eliminate WPF Dispatcher freezing: remove aggressive periodic background adoption loop from UI timer, throttle cache disk scans to 30s, and only trigger queue scheduling when items exist.",
+    "6. Purge 3,192 zombie auto-adopted recovery jobs from transfer-jobs.json, shrinking state from 7MB to <1KB.",
+    "7. Verify all test suites pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -23,9 +20,10 @@
   ],
   "status": "completed",
   "filesChanged": [
+    "src/services/CloudDeduplicationService.ps1",
     "src/services/CloudTransferManager.ps1",
     "src/NSCloudDrive.ps1",
-    "src/launcher/Program.cs",
+    "tests/Test-PostRestartDropDeduplication.ps1",
     "NSCloudDrive.exe",
     "NSCloudDrive.exe.sha256",
     "task-ledger.json",
@@ -34,29 +32,37 @@
   ],
   "decisions": [
     {
-      "date": "2026-11-19",
-      "decision": "Remove redundant Load-DurableTransferQueue at the end of CloudTransferManager.ps1 module import.",
-      "rationale": "Dot-sourcing the module synchronously blocked the UI thread before window creation; queue loading is already authoritatively handled by Invoke-StartupTransferQueueRecovery during startup sequence."
+      "date": "2026-11-20",
+      "decision": "Use direct O(1) WinFsp mount checking and in-memory dedup ledger rather than unbounded tree walks or remote HTTP RC stat calls on mounted drives.",
+      "rationale": "Prevents 47-second tree enumeration and eliminates Google Drive API 403 RATE_LIMIT_EXCEEDED errors."
     },
     {
-      "date": "2026-11-19",
-      "decision": "Fast-path normalized transfer jobs with pre-populated OperationType and Direction.",
-      "rationale": "Re-resolving operation snapshots across 3,192 records in PowerShell loops consumed 13.7s of CPU; fast-pathing already-valid records reduced loop time to 21ms (650x speedup)."
+      "date": "2026-11-20",
+      "decision": "Accept [object] accounts in CloudDeduplicationService and CloudTransferManager.",
+      "rationale": "Allows both hashtable and PSCustomObject (from JSON deserialization) without throwing ParameterArgumentTransformationError."
     },
     {
-      "date": "2026-11-19",
-      "decision": "Add iterative 1.5s window activation retry and FromLauncher switch in Program.cs and NSCloudDrive.ps1.",
-      "rationale": "Prevents rapid-click secondary instances from instantly dying with exit 0 before the primary window has finished rendering, and prevents mutex collisions if out-of-process fallback is engaged."
+      "date": "2026-11-21",
+      "decision": "Remove periodic background staged adoption loop from UI timer and notify user once to resume interrupted transfers via drag-and-drop.",
+      "rationale": "Directly respects user architecture guidance, eliminates UI thread freezing, and stops balloon notification spam."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "finding": "Audited diffs across CloudTransferManager.ps1, NSCloudDrive.ps1, and Program.cs. Confirmed strict mode compliance, zero non-ASCII unicode characters, and zero running processes remaining.",
+      "finding": "Audited diffs across CloudDeduplicationService.ps1, CloudTransferManager.ps1, and NSCloudDrive.ps1. Confirmed strict mode compliance, zero non-ASCII unicode characters, and zero running processes remaining.",
       "status": "approved"
     }
   ],
   "testResults": [
+    {
+      "suite": "tests/Test-PostRestartDropDeduplication.ps1",
+      "status": "passed",
+      "exitCode": 0,
+      "total": 6,
+      "passed": 6,
+      "failed": 0
+    },
     {
       "suite": "tests/Test-TransferRecoveryAndProgression.ps1",
       "status": "passed",
@@ -72,29 +78,22 @@
       "total": 1,
       "passed": 1,
       "failed": 0
-    },
-    {
-      "suite": "tests/Test-StartupAutoMountTimer.ps1",
-      "status": "passed",
-      "exitCode": 0,
-      "total": 7,
-      "passed": 7,
-      "failed": 0
     }
   ],
   "securityFindings": [
     {
       "auditor": "ns-security",
-      "finding": "Process isolation and mutex security checks verified; no sensitive tokens or secrets are logged or exposed.",
+      "finding": "Credential safety verified; all paths sanitized, zero token exposure in logs or UI toasts.",
       "status": "passed"
     }
   ],
   "commitRefs": [
-    "967f55d",
-    "52ccf81",
-    "e236daf",
-    "e7e752e",
-    "2d757f1"
+    "994984a",
+    "636bca6",
+    "4fa63e4",
+    "a270e99",
+    "8da73de",
+    "471f0aa"
   ],
   "blockers": []
 }
