@@ -218,12 +218,8 @@ function Get-CloudProviderFieldValue([object]$Object, [string]$Field, [object]$D
 
 function Set-CloudCredentialAcl([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
     if ($isLinux) {
         try {
