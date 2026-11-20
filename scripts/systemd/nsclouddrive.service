@@ -1,0 +1,21 @@
+[Unit]
+Description=NS Cloud Drive Background Mounting & Resumable Sync Daemon
+Documentation=https://github.com/naborajs/CloudDrive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nsclouddrive daemon
+Restart=on-failure
+RestartSec=10s
+KillMode=mixed
+TimeoutStopSec=30s
+
+# Sandboxing & safety
+ProtectSystem=full
+ProtectHome=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
