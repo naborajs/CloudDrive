@@ -233,6 +233,57 @@ function Format-SanitizedDiagnosticMessage([string]$Message) {
 }
 
 # ==============================================================================
+# CROSS-PLATFORM DATA AND CONFIGURATION ROOT DIRECTORIES
+# ==============================================================================
+function Get-NSCloudDriveDataRoot {
+    if ($env:NS_CLOUD_DRIVE_DATA_DIR -and (Test-Path -LiteralPath $env:NS_CLOUD_DRIVE_DATA_DIR)) {
+        return $env:NS_CLOUD_DRIVE_DATA_DIR
+    }
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        if ($env:XDG_DATA_HOME) {
+            return (Join-Path $env:XDG_DATA_HOME 'nsclouddrive')
+        }
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        return (Join-Path (Join-Path $homeDir '.local') 'share/nsclouddrive')
+    }
+
+    if ($env:LOCALAPPDATA) {
+        return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive')
+    }
+    $userProfile = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+    return (Join-Path (Join-Path $userProfile 'AppData\Local') 'NSCloudDrive')
+}
+
+function Get-NSCloudDriveConfigRoot {
+    if ($env:NS_CLOUD_DRIVE_CONFIG_DIR -and (Test-Path -LiteralPath $env:NS_CLOUD_DRIVE_CONFIG_DIR)) {
+        return $env:NS_CLOUD_DRIVE_CONFIG_DIR
+    }
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        if ($env:XDG_CONFIG_HOME) {
+            return (Join-Path $env:XDG_CONFIG_HOME 'nsclouddrive')
+        }
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        return (Join-Path (Join-Path $homeDir '.config') 'nsclouddrive')
+    }
+
+    return (Join-Path (Get-NSCloudDriveDataRoot) 'config')
+}
+
+# ==============================================================================
 # SHARED APPLICATION LOG (bounded JSONL store; safe to call from any runspace)
 # ==============================================================================
 # Both the UI runspaces and the background mount workers dot-source this file,
@@ -262,7 +313,7 @@ function Invoke-LogMaintenance {
         }
         $script:LastLogMaintenanceTime = [DateTime]::UtcNow
 
-        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        $logDir = Join-Path (Get-NSCloudDriveDataRoot) 'logs'
         if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
             return $null
         }
@@ -342,7 +393,7 @@ function Get-ApplicationLogSettingEnabled {
         if (([DateTime]::UtcNow - $script:ApplicationLogCheckState.ReadAt).TotalSeconds -lt 5 -and $null -ne $script:ApplicationLogCheckState.Setting) {
             return $script:ApplicationLogCheckState.Setting
         }
-        $settingsPath = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\settings.json'
+        $settingsPath = Join-Path (Get-NSCloudDriveConfigRoot) 'settings.json'
         $enabled = $true
         if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
             $raw = [System.IO.File]::ReadAllText($settingsPath)
@@ -358,7 +409,7 @@ function Get-ApplicationLogSettingEnabled {
 }
 
 function Get-ApplicationLogFilePath {
-    return (Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs') 'application.jsonl')
+    return (Join-Path (Join-Path (Get-NSCloudDriveDataRoot) 'logs') 'application.jsonl')
 }
 
 function Write-NSCloudLog {
@@ -381,7 +432,7 @@ function Write-NSCloudLog {
         # Automated periodic maintenance of log directory (rate-limited to once every 30 minutes)
         $null = Invoke-LogMaintenance
 
-        $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+        $logDir = Join-Path (Get-NSCloudDriveDataRoot) 'logs'
         if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
