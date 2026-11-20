@@ -168,24 +168,51 @@ function Find-RcloneBinary([string]$CustomPath = '') {
         return $CustomPath
     }
 
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
     $candidates = @()
     if ($env:RCLONE_EXE_PATH) {
         $candidates += $env:RCLONE_EXE_PATH
     }
-    $candidates += (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-    $candidates += (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\builds\rclone-extra-v1.75.2-extra\rclone.exe')
-    if ($env:USERPROFILE) {
-        $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX\tools\rclone\rclone.exe')
-        $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX_extracted\CloudPlayX\tools\rclone\rclone.exe')
+
+    $baseDataDir = if (Get-Command 'Get-NSCloudDriveDataRoot' -ErrorAction SilentlyContinue) {
+        Get-NSCloudDriveDataRoot
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.local/share/nsclouddrive'
     }
 
-    $onPath = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
-    if ($onPath) {
-        $candidates += $onPath.Source
+    if ($isLinux) {
+        $candidates += '/usr/bin/rclone'
+        $candidates += '/usr/local/bin/rclone'
+        $candidates += '/bin/rclone'
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        $candidates += (Join-Path $homeDir '.local/bin/rclone')
+        $candidates += (Join-Path $baseDataDir 'tools/rclone/rclone')
+        $onPath = Get-Command 'rclone' -ErrorAction SilentlyContinue
+        if ($onPath) { $candidates += $onPath.Source }
+    } else {
+        $candidates += (Join-Path $baseDataDir 'tools\rclone\rclone.exe')
+        $candidates += (Join-Path $baseDataDir 'builds\rclone-extra-v1.75.2-extra\rclone.exe')
+        if ($env:USERPROFILE) {
+            $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX\tools\rclone\rclone.exe')
+            $candidates += (Join-Path $env:USERPROFILE 'Downloads\CloudPlayX_extracted\CloudPlayX\tools\rclone\rclone.exe')
+        }
+        $onPath = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
+        if ($onPath) { $candidates += $onPath.Source }
+        $onPathBare = Get-Command 'rclone' -ErrorAction SilentlyContinue
+        if ($onPathBare) { $candidates += $onPathBare.Source }
     }
 
     foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             return $candidate
         }
     }
@@ -201,6 +228,23 @@ function Get-VerifiedRclonePath([string]$CustomPath = '') {
 }
 
 function Test-WinFspInstalled {
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        $fuseCmd = Get-Command 'fusermount3', 'fusermount' -ErrorAction SilentlyContinue
+        if ($fuseCmd) { return $true }
+        foreach ($p in @('/bin/fusermount3', '/usr/bin/fusermount3', '/bin/fusermount', '/usr/bin/fusermount')) {
+            if (Test-Path -LiteralPath $p) { return $true }
+        }
+        if (Test-Path -LiteralPath '/dev/fuse') { return $true }
+        return $false
+    }
+
     $paths = @(
         'C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll',
         'C:\Program Files\WinFsp\bin\winfsp-x64.dll'
@@ -251,8 +295,28 @@ function Get-VirtualDriveRcPort([string]$DriveLetter) {
 }
 
 function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 5) {
-    if ($DriveRoot -notmatch '^[A-Za-z]:\\$') { throw 'A valid drive root is required for the filesystem check.' }
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'Filesystem check timeout must be between 1 and 30 seconds.' }
+
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        if ([string]::IsNullOrWhiteSpace($DriveRoot) -or -not (Test-Path -LiteralPath $DriveRoot -PathType Container)) {
+            return [ordered]@{ Success = $false; State = 'Unavailable'; Error = "Directory '$DriveRoot' does not exist." }
+        }
+        try {
+            $null = [System.IO.Directory]::EnumerateFileSystemEntries($DriveRoot)
+            return [ordered]@{ Success = $true; State = 'Accessible'; Error = $null }
+        } catch {
+            return [ordered]@{ Success = $false; State = 'Unavailable'; Error = $_.Exception.Message }
+        }
+    }
+
+    if ($DriveRoot -notmatch '^[A-Za-z]:\\$') { throw 'A valid drive root is required for the filesystem check.' }
 
     # Enumerate the root in a child process so a stalled WinFsp callback cannot
     # hold the WPF dispatcher or this worker forever. The directory output is
@@ -279,6 +343,14 @@ function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 
 }
 
 function Clear-StaleDriveLetterMapping([string]$DriveLetter, [string]$VolumeLabel = '') {
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+    if ($isLinux) { return }
+
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($letter.Length -ne 1) { return }
@@ -512,13 +584,37 @@ function Build-RcloneMountArguments(
     [switch]$ReadOnly = $false,
     [switch]$FixedDisk = $false,
     [int]$RcPort = 0,
-    [string]$InitialBwLimit = ''
+    [string]$InitialBwLimit = '',
+    [string]$MountPoint = ''
 ) {
     if ($CacheMaxGigabytes -lt 1 -or $CacheMaxGigabytes -gt 1024) {
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
     }
-    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    $driveRoot = "$letter`:\"
+
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    $driveRoot = ''
+    if ($isLinux) {
+        if (-not [string]::IsNullOrWhiteSpace($MountPoint)) {
+            $driveRoot = $MountPoint
+        } else {
+            $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+            $cleanRemoteName = [regex]::Replace($RemoteName, '[^a-zA-Z0-9_\-]', '_')
+            $driveRoot = (Join-Path (Join-Path $homeDir 'CloudDrives') $cleanRemoteName)
+        }
+        if (-not (Test-Path -LiteralPath $driveRoot -PathType Container)) {
+            try { [void][System.IO.Directory]::CreateDirectory($driveRoot) } catch { }
+        }
+    } else {
+        $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+        $driveRoot = "$letter`:\"
+    }
+
     $safeCache = Resolve-SafeCacheDirectory $CacheDirectory
 
     $volName = if (-not [string]::IsNullOrEmpty($VolumeLabel)) {
@@ -547,8 +643,12 @@ function Build-RcloneMountArguments(
         $args += '--read-only'
     }
 
-    if (-not $FixedDisk) {
+    if (-not $isLinux -and -not $FixedDisk) {
         $args += '--network-mode'
+    }
+
+    if ($isLinux) {
+        $args += '--allow-other'
     }
 
     $args += @(
@@ -571,11 +671,13 @@ function Build-RcloneMountArguments(
         '--log-level', 'ERROR'
     )
 
-    # WinFsp request threads: 64 threads for ALL mounts (both Google Drive and TeraBox).
-    # Prevents concurrent metadata, thumbnail, EXIF, and streaming byte requests from starving
-    # WinFsp's default 4-thread pool during media inspection (e.g. Windows Photos / Explorer),
-    # eliminating RPC timeouts and application crashes.
-    $args += @('--fuse-flag', '--ThreadCount=64')
+    if (-not $isLinux) {
+        # WinFsp request threads: 64 threads for ALL mounts (both Google Drive and TeraBox).
+        # Prevents concurrent metadata, thumbnail, EXIF, and streaming byte requests from starving
+        # WinFsp's default 4-thread pool during media inspection (e.g. Windows Photos / Explorer),
+        # eliminating RPC timeouts and application crashes.
+        $args += @('--fuse-flag', '--ThreadCount=64')
+    }
 
     # Provider-tuned streaming chunk size and transfer concurrency
     if ($cleanRemote -match '(?i)(?:gdrive|google)') {
@@ -687,16 +789,38 @@ function Start-VirtualDriveMount(
         }
     }
 
-    $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
-    $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-    if (-not (Test-DriveLetterAvailable $cleanLetter)) {
-        if (-not [string]::IsNullOrEmpty($DriveLetter)) {
-            throw "Drive letter $cleanLetter`: is already in use. Choose another letter before mounting this account."
-        }
-        $cleanLetter = Get-NextAvailableDriveLetter $cleanLetter
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
     }
-    $letter = $cleanLetter
-    $driveRoot = "$letter`:\"
+
+    $letter = ''
+    $driveRoot = ''
+    if ($isLinux) {
+        $driveRoot = if (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue) {
+            Resolve-ProviderMountPoint -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $DriveLetter
+        } else {
+            $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+            Join-Path (Join-Path $homeDir 'CloudDrives') $mountKey
+        }
+        if (-not (Test-Path -LiteralPath $driveRoot -PathType Container)) {
+            try { [void][System.IO.Directory]::CreateDirectory($driveRoot) } catch { }
+        }
+        $letter = $resolvedProvider.Substring(0, 1).ToUpperInvariant()
+    } else {
+        $prefLetter = if (-not [string]::IsNullOrEmpty($DriveLetter)) { $DriveLetter } else { Get-PreferredDriveLetter $resolvedProvider }
+        $cleanLetter = $prefLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+        if (-not (Test-DriveLetterAvailable $cleanLetter)) {
+            if (-not [string]::IsNullOrEmpty($DriveLetter)) {
+                throw "Drive letter $cleanLetter`: is already in use. Choose another letter before mounting this account."
+            }
+            $cleanLetter = Get-NextAvailableDriveLetter $cleanLetter
+        }
+        $letter = $cleanLetter
+        $driveRoot = "$letter`:\"
+    }
 
     $volName = if (-not [string]::IsNullOrEmpty($VolumeLabel)) {
         $VolumeLabel
@@ -719,8 +843,15 @@ function Start-VirtualDriveMount(
     # Clean any stale/orphaned network or subst mapping for this drive letter to prevent Explorer red X artifacts
     Clear-StaleDriveLetterMapping -DriveLetter $letter -VolumeLabel $volName
 
-    # Prepare rotating log file for this mount under %LOCALAPPDATA%\NSCloudDrive\logs\
-    $logDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+    # Prepare rotating log file for this mount under logs directory
+    $logDir = if (Get-Command 'Get-NSCloudDriveDataRoot' -ErrorAction SilentlyContinue) {
+        Join-Path (Get-NSCloudDriveDataRoot) 'logs'
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive\logs'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.local/share/nsclouddrive/logs'
+    }
     if (-not (Test-Path -LiteralPath $logDir)) {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
@@ -740,7 +871,14 @@ function Start-VirtualDriveMount(
 
     # Non-secret static options are isolated per mount. Authentication overrides remain
     # in the child process environment; the actual VFS cache root is resolved after mount.
-    $configDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    $configDir = if (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) {
+        Get-NSCloudDriveConfigRoot
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.config/nsclouddrive'
+    }
     if (-not (Test-Path -LiteralPath $configDir -PathType Container)) {
         try {
             New-Item -ItemType Directory -Path $configDir -Force | Out-Null
@@ -1068,7 +1206,38 @@ function Stop-VirtualDriveMount(
         try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
 
-    # Clean up any matching orphaned rclone processes. Ownership is decided by
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        try {
+            $fuseUnmountCmd = Get-Command 'fusermount3', 'fusermount' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($AccountId -or $ProviderId) {
+                $provKey = if ($ProviderId) { $ProviderId } else { 'gdrive' }
+                if (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue) {
+                    $mountPointToUnmount = Resolve-ProviderMountPoint -ProviderId $provKey -AccountId $AccountId
+                    if ($mountPointToUnmount -and (Test-Path -LiteralPath $mountPointToUnmount)) {
+                        if ($fuseUnmountCmd) {
+                            & $fuseUnmountCmd.Source -u -z $mountPointToUnmount 2>$null
+                        }
+                    }
+                }
+            }
+        } catch { }
+
+        return [ordered]@{
+            Success = $true
+            Verified = $true
+            Stopped = $stoppedAny
+            Message = if ($stoppedAny) { 'Virtual drive unmounted and verified.' } else { 'No matching virtual drive mount remained.' }
+        }
+    }
+
+    # Clean up any matching orphaned rclone processes on Windows. Ownership is decided by
     # the per-account cache/log path segment rclone was started with: account
     # mounts embed their AccountId, legacy provider mounts do not. A scoped
     # request must never terminate a process owned by a different account, and
