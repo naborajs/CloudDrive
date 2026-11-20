@@ -239,12 +239,8 @@ function Get-NSCloudDriveDataRoot {
     if ($env:NS_CLOUD_DRIVE_DATA_DIR -and (Test-Path -LiteralPath $env:NS_CLOUD_DRIVE_DATA_DIR)) {
         return $env:NS_CLOUD_DRIVE_DATA_DIR
     }
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
     if ($isLinux) {
         if ($env:XDG_DATA_HOME) {
@@ -265,12 +261,8 @@ function Get-NSCloudDriveConfigRoot {
     if ($env:NS_CLOUD_DRIVE_CONFIG_DIR -and (Test-Path -LiteralPath $env:NS_CLOUD_DRIVE_CONFIG_DIR)) {
         return $env:NS_CLOUD_DRIVE_CONFIG_DIR
     }
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
     if ($isLinux) {
         if ($env:XDG_CONFIG_HOME) {
