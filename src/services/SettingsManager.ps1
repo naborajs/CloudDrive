@@ -15,7 +15,14 @@ function Get-NSCloudDriveSettingsDirectory {
     if ($script:SettingsDirectoryOverride) {
         return $script:SettingsDirectoryOverride
     }
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config')
+    if (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) {
+        return (Get-NSCloudDriveConfigRoot)
+    }
+    if ($env:LOCALAPPDATA) {
+        return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config')
+    }
+    $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+    return (Join-Path (Join-Path $homeDir '.config') 'nsclouddrive')
 }
 
 function Get-NSCloudDriveSettingsPath {
@@ -31,7 +38,44 @@ function Resolve-AppTheme([string]$ThemeName) {
     return 'PureBlack'
 }
 
+function Resolve-ProviderMountPoint([string]$ProviderId = 'gdrive', [string]$AccountId = '', [string]$DriveLetter = '') {
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    if ($isLinux) {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        $mountBase = Join-Path $homeDir 'CloudDrives'
+        $folderName = if ($AccountId) {
+            ($AccountId -replace '[^a-zA-Z0-9_\-]', '_')
+        } else {
+            $ProviderId
+        }
+        return (Join-Path $mountBase $folderName)
+    }
+
+    $letter = if ($DriveLetter) { $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\') } else { 'G' }
+    return "$letter`:\"
+}
+
 function Get-DefaultSettings {
+    $isLinux = $false
+    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
+        $isLinux = [bool]$IsLinux
+    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $isLinux = $true
+    }
+
+    $defaultCache = if ($isLinux) {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir 'CloudCache'
+    } else {
+        'D:\CloudCache'
+    }
+
     return [ordered]@{
         AutoStartWithWindows = $true
         AutoMountDrives = $true
@@ -39,7 +83,7 @@ function Get-DefaultSettings {
         StartMinimized = $false
         OpenExplorerOnMount = $true
         Theme = 'Light' # Default remains Light for backward compatibility; resolves to PureWhite. Supports PureBlack, Translucent, PureWhite
-        CacheDirectory = 'D:\CloudCache'
+        CacheDirectory = $defaultCache
         CacheMaxGigabytes = 20
         DiagnosticLogging = 'Normal'
         HealthCheckIntervalSec = 4
