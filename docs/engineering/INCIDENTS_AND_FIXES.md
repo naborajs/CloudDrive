@@ -927,6 +927,44 @@ When launching `NSCloudDrive.exe`, the application took almost 29 seconds to ren
 - `tests/Test-StartupAutoMountTimer.ps1` passed (exit code 0).
 - Verified dual-instance activation: secondary click seamlessly focused running primary instance and exited in 211 ms with code 0.
 
+## 38. Post-Restart Cloud File Deduplication, Notification De-Spamming, and Dispatcher Unfreezing (TASK-020, 2026-11-20/21)
+
+**Observed symptom:**
+1. After an interrupted transfer (e.g. 85 of 100 files completed), when the user dropped all 100 files into the drive again, the application attempted to re-transfer all 100 files rather than skipping the 85 existing files.
+2. The user was spammed with continuous toast notifications ("NS Cloud Drive - Batch Upload Started", "Uploading Folder", "Uploading in Background").
+3. The NS Cloud Drive UI froze and became unresponsive ("Not Responding") when clicked.
+
+**Root causes:**
+1. **Unbounded Tree Enumeration on Cloud Mount:** In `CloudDeduplicationService.ps1`, `Get-RemoteFileInventoryMap` called `[System.IO.Directory]::EnumerateFiles` with `AllDirectories` across the virtual drive root (`G:\`), taking 47+ seconds over WinFsp/rclone VFS. The call timed out inside `try/catch`, silently falling through to treat every file as "New" and re-uploading.
+2. **PSCustomObject Type Mismatch in Dedup Binding:** In `Test-RemoteCloudFileDeduplication`, `Get-RemoteFileInventoryMap`, and `Classify-TransferCandidate`, account parameters were typed as `[System.Collections.IDictionary]`. When transfer jobs were deserialized from JSON, accounts were `PSCustomObject`s. PowerShell threw `ParameterArgumentTransformationError`, which was caught by `try/catch` and silently bypassed deduplication.
+3. **Aggressive Background Staged Adoption:** In `src/NSCloudDrive.ps1`, `Update-LiveTransferActivity` ran `Import-StagedVfsFilesToTransferQueue` automatically every 30 seconds on the UI thread, creating synthetic batches ("Recovered staged uploads") and ballooning `transfer-jobs.json` to 3,192 jobs (7 MB). Every batch fired balloon notifications ("Batch Upload Started").
+4. **Dispatcher Thread Starvation:** The WPF DispatcherTimer executed `Process-CloudTransferQueue` every 2 seconds and `Get-VirtualDrivePendingUploads` (recursive cache walk) every second on the main UI thread. Serializing and deserializing 7 MB of JSON while traversing thousands of cache files completely blocked the WPF Dispatcher, freezing the window.
+
+**Fix:**
+1. **Targeted O(1) Cloud Deduplication:**
+   - Added `Test-RemoteCloudFileDeduplication`: queries (1) in-memory ledger cache (0 ms), (2) direct WinFsp filesystem path `Join-Path $mountRoot $cleanPath` with format and exact byte size matching (0.7 ms), and (3) parent directory format collision check.
+   - Cached mount roots in `$script:AccountMountRootCache` to avoid disk reads and DPAPI token decryption on every file check.
+   - Bypassed remote rclone RC `operations/stat` calls when the drive is already mounted and accessible, preventing Google Drive API 403 `RATE_LIMIT_EXCEEDED` errors.
+2. **Flexible Parameter Types:**
+   - Changed account parameters from `[System.Collections.IDictionary]` to `[object]` across deduplication and transfer functions.
+   - Updated `Resolve-TransferAccountSnapshot` to convert `PSCustomObject` into hashtables.
+3. **Removed Unwanted Auto-Adoption & Suppressed Notification Spam:**
+   - Removed the periodic background staged adoption loop from `Update-LiveTransferActivity`.
+   - Replaced it with a single, friendly user prompt balloon tip: `"NS Cloud Drive - Interrupted Transfer Detected: Unfinished files from a previous session were detected. Please drag and drop your folder into the drive again to resume syncing."` Throttled to display at most once per 24 hours.
+   - Suppressed balloon tips for internal recovery batches and individual file completions during multi-file transfers.
+4. **Dispatcher Unfreezing & Cache Scan Throttling:**
+   - Throttled `Get-VirtualDrivePendingUploads` cache directory scans to at most once per 30 seconds.
+   - In the DispatcherTimer tick handler, only invoked `Process-CloudTransferQueue` when transfers are actually queued, leaving the UI thread 100% responsive.
+5. **Purged Zombie Queue State:**
+   - Reset `$env:LOCALAPPDATA\NSCloudDrive\state\transfer-jobs.json` to a clean 219-byte state, removing 3,192 zombie jobs.
+
+**Verification:**
+- `tests/Test-PostRestartDropDeduplication.ps1`: PASSED with exit code 0 (100 files: exactly 85 files skipped, exactly 15 unsent files queued, format/size mismatches correctly detected).
+- `tests/Test-TransferRecoveryAndProgression.ps1`: PASSED all 5 phases with exit code 0.
+- `tests/Test-CloudTransferManager.ps1`: PASSED with exit code 0.
+- Recompiled `NSCloudDrive.exe` with SHA256 verified.
+- Confirmed zero UI hangs and zero balloon notification spam.
+
 
 
 
