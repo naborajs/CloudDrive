@@ -9458,8 +9458,8 @@ function Start-ApplicationStartupSequence {
 
         if ($hasInterrupted) {
             try {
-                if ($notifyIcon) {
-                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Transfer Interrupted", "Transfer interrupted by restart. Please re-upload your files.", [System.Windows.Forms.ToolTipIcon]::Warning)
+                if ($notifyIcon -and (Test-AndSetNotifiedEventKey "startup_interrupted_prompt" 1440.0)) {
+                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Transfer Interrupted", "Transfer was interrupted. Please drag and drop your folder into the drive again to resume syncing.", [System.Windows.Forms.ToolTipIcon]::Info)
                 }
             } catch { }
         }
@@ -9509,6 +9509,8 @@ $script:HasPendingTransferSync = $false
 $script:QueueStallPollCycles = 0
 $script:LastQueueStallRecovery = [DateTime]::MinValue
 $script:LastStagedQueueAdoptionUtc = [DateTime]::MinValue
+$script:LastPendingVfsScanUtc = [DateTime]::MinValue
+$script:CachedPendingVfsFiles = @()
 
 function Resolve-PendingTransferAccount {
     [CmdletBinding()]
@@ -9640,39 +9642,27 @@ function Update-LiveTransferActivity {
         $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
     })
 
-    try {
-        if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
-            $activeCachePaths = @($mountedCachePaths | Where-Object { $_ })
-            $pendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory -ActiveCachePaths $activeCachePaths)
-        }
-    } catch { $vfsScanUnavailable = $true }
-
-    # Adopt staged files that sit outside every live cache root. rclone resolves its
-    # upload queue once at mount startup, so those bytes would otherwise stay stranded
-    # forever after a restart changed the cache root name. The durable queue uploads
-    # and verifies them; the staged source files are never moved or deleted here.
-    if (-not $script:TransferQueueStateUnavailable -and -not $script:IsExiting -and
-        $pendingVfsFiles.Count -gt 0 -and (Get-Command Import-StagedVfsFilesToTransferQueue -ErrorAction SilentlyContinue)) {
-        if (([DateTime]::UtcNow - $script:LastStagedQueueAdoptionUtc).TotalSeconds -ge 30.0) {
-            $script:LastStagedQueueAdoptionUtc = [DateTime]::UtcNow
-            try {
-                $adoption = Import-StagedVfsFilesToTransferQueue -StagedFiles $pendingVfsFiles -Accounts $accounts
-                if ($adoption -and [int]$adoption.AdoptedCount -gt 0) {
-                    $qRes = Get-CloudTransferQueue
-                    $rawQueue = if ($qRes -is [array] -and $qRes.Count -gt 0 -and $qRes[0] -is [array]) { @($qRes[0]) } elseif ($null -ne $qRes) { @($qRes) } else { @() }
-                    $pendingQueueItems = @($rawQueue | Where-Object {
-                        $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
-                        $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
-                    })
-                }
-            } catch {
-                if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
-                    try {
-                        Write-NSCloudLog -Severity 'Warning' -Operation 'staged-upload-adoption' `
-                            -Message ("Staged files could not be adopted into the durable transfer queue: " + (Format-SanitizedDiagnosticMessage $_.Exception.Message))
-                    } catch { }
-                }
+    # Throttle cache directory scan to 30s to keep the UI thread completely fluid
+    if (-not $script:LastPendingVfsScanUtc -or ([DateTime]::UtcNow - $script:LastPendingVfsScanUtc).TotalSeconds -ge 30.0) {
+        $script:LastPendingVfsScanUtc = [DateTime]::UtcNow
+        try {
+            if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
+                $activeCachePaths = @($mountedCachePaths | Where-Object { $_ })
+                $script:CachedPendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory -ActiveCachePaths $activeCachePaths)
             }
+        } catch { $vfsScanUnavailable = $true }
+    }
+    $pendingVfsFiles = if ($script:CachedPendingVfsFiles) { $script:CachedPendingVfsFiles } else { @() }
+
+    # If uncompleted staged files exist after an interrupted session, notify the user ONCE
+    # to simply drag and drop the folder again to resume. No complex automatic queue mutation.
+    if ($pendingVfsFiles.Count -gt 0 -and $notificationsAllowed) {
+        if (Test-AndSetNotifiedEventKey "interrupted_staged_prompt" 1440.0) {
+            try {
+                if ($notifyIcon) {
+                    $notifyIcon.ShowBalloonTip(6000, "NS Cloud Drive - Interrupted Transfer Detected", "Unfinished files from a previous session were detected. Please drag and drop your folder into the drive again to resume syncing.", [System.Windows.Forms.ToolTipIcon]::Info)
+                }
+            } catch { }
         }
     }
     $pendingSummary = if (Get-Command Get-CloudTransferPendingSummary -ErrorAction SilentlyContinue) {
@@ -9779,7 +9769,7 @@ function Update-LiveTransferActivity {
 
             $hasActive = ($bItems | Where-Object { $_['Status'] -in @('Uploading', 'Staging', 'Queued', 'Awaiting remote confirmation', 'Verifying remote file') })
             if ($hasActive) {
-                if (Test-AndSetNotifiedEventKey "batch_start:${bId}") {
+                if (-not $bId.StartsWith('recovery_') -and (Test-AndSetNotifiedEventKey "batch_start:${bId}")) {
                     if ($notificationsAllowed -and $script:Settings.NotifyOnUploadStart) {
                         try {
                             $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Batch Upload Started", "Batch '$bName' ($totalFiles files, $totalSizeStr) staged on drive ${bDrive}:. Uploading to $bProv in background.", [System.Windows.Forms.ToolTipIcon]::None)
@@ -9796,7 +9786,7 @@ function Update-LiveTransferActivity {
                 }
             }
             if ($allConfirmed -and $totalFiles -gt 0) {
-                if (Test-AndSetNotifiedEventKey "batch_complete:${bId}") {
+                if (-not $bId.StartsWith('recovery_') -and (Test-AndSetNotifiedEventKey "batch_complete:${bId}")) {
                     if ($notificationsAllowed -and $script:Settings.NotifyOnUploadComplete) {
                         try {
                             $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Batch Upload Complete", "Batch '$bName' ($totalFiles files, $totalSizeStr) was successfully uploaded and verified on $bProv.", [System.Windows.Forms.ToolTipIcon]::None)
@@ -10445,8 +10435,15 @@ $timer.Add_Tick({
         }
     }
 
-    if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
-        if (([DateTime]::UtcNow - $script:LastTransferQueueProcess).TotalSeconds -ge 2.0) {
+    $hasPendingJobs = $false
+    try {
+        if ($script:CloudTransferQueue -and $script:CloudTransferQueue.Count -gt 0) {
+            $hasPendingJobs = $true
+        }
+    } catch { }
+
+    if ($hasPendingJobs -and (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue)) {
+        if (([DateTime]::UtcNow - $script:LastTransferQueueProcess).TotalSeconds -ge 3.0) {
             $script:LastTransferQueueProcess = [DateTime]::UtcNow
             try { Process-CloudTransferQueue | Out-Null } catch { }
         }
