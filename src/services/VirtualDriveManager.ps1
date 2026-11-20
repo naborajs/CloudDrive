@@ -582,6 +582,8 @@ function Build-RcloneMountArguments(
         $args += @(
             '--drive-chunk-size', '32M',
             '--drive-upload-cutoff', '32M',
+            '--drive-pacer-min-sleep', '10ms',
+            '--tpslimit', '10',
             '--transfers', '4'
         )
     } elseif ($cleanRemote -match '(?i)terabox') {
