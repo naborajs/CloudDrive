@@ -25,7 +25,15 @@ function Get-CloudDedupLedgerPath {
     if ($script:DedupLedgerPathOverride) {
         return $script:DedupLedgerPathOverride
     }
-    $cacheDir = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\cache'
+    $baseDir = if (Get-Command 'Get-NSCloudDriveDataRoot' -ErrorAction SilentlyContinue) {
+        Get-NSCloudDriveDataRoot
+    } elseif ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA 'NSCloudDrive'
+    } else {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir '.local/share/nsclouddrive'
+    }
+    $cacheDir = Join-Path $baseDir 'cache'
     if (-not (Test-Path -LiteralPath $cacheDir)) {
         New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
     }
@@ -289,11 +297,17 @@ function Test-RemoteCloudFileDeduplication {
         if ($Account) {
             $accProv = [string](Get-SafeFieldValue $Account 'ProviderId')
             if (-not $ProviderId -and $accProv) { $prov = $accProv }
-            $letterVal = [string](Get-SafeFieldValue $Account 'DriveLetter')
-            if ($letterVal) {
-                $letter = $letterVal.ToUpperInvariant().TrimEnd(':')
-                if ($letter -match '^[A-Z]$' -and (Test-Path -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)) {
-                    $mountRoot = "${letter}:\"
+            $mountPathVal = [string](Get-SafeFieldValue $Account 'MountPath')
+            if (-not $mountPathVal) { $mountPathVal = [string](Get-SafeFieldValue $Account 'MountPoint') }
+            if ($mountPathVal -and (Test-Path -LiteralPath $mountPathVal -ErrorAction SilentlyContinue)) {
+                $mountRoot = $mountPathVal
+            } else {
+                $letterVal = [string](Get-SafeFieldValue $Account 'DriveLetter')
+                if ($letterVal) {
+                    $letter = $letterVal.ToUpperInvariant().TrimEnd(':')
+                    if ($letter -match '^[A-Z]$' -and (Test-Path -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)) {
+                        $mountRoot = "${letter}:\"
+                    }
                 }
             }
         }
@@ -307,13 +321,24 @@ function Test-RemoteCloudFileDeduplication {
             } catch { }
         }
 
+        if (-not $mountRoot -and (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue)) {
+            try {
+                $candMount = Resolve-ProviderMountPoint -ProviderId $prov -AccountId $AccountId
+                if ($candMount -and (Test-Path -LiteralPath $candMount -ErrorAction SilentlyContinue)) {
+                    $mountRoot = $candMount
+                }
+            } catch { }
+        }
+
         if ($AccountId -and $mountRoot) {
             $script:AccountMountRootCache[$AccountId] = $mountRoot
         }
     }
 
     if ($mountRoot -and (Test-Path -LiteralPath $mountRoot -ErrorAction SilentlyContinue)) {
-        $targetCloudPath = Join-Path $mountRoot ($cleanPath.Replace('/', '\'))
+        $sep = [System.IO.Path]::DirectorySeparatorChar
+        $cleanRel = $cleanPath.Replace('/', $sep).Replace('\', $sep)
+        $targetCloudPath = Join-Path $mountRoot $cleanRel
         if ([System.IO.File]::Exists($targetCloudPath)) {
             try {
                 $remoteFi = [System.IO.FileInfo]::new($targetCloudPath)
