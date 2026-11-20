@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# NS Cloud Drive - Linux CLI Executable Wrapper
+# Supports Ubuntu, Debian, RHEL, Arch, and remote Linux VPS
+# ==============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLI_PS1="$REPO_ROOT/src/cli/nsclouddrive.ps1"
+
+# Locate pwsh (PowerShell Core)
+if command -v pwsh >/dev/null 2>&1; then
+    PWSH_BIN="pwsh"
+elif [ -x "/usr/bin/pwsh" ]; then
+    PWSH_BIN="/usr/bin/pwsh"
+elif [ -x "/snap/bin/pwsh" ]; then
+    PWSH_BIN="/snap/bin/pwsh"
+else
+    echo "[ERROR] PowerShell Core ('pwsh') is required to run NS Cloud Drive on Linux." >&2
+    echo "To install on Ubuntu / Debian:" >&2
+    echo "  sudo apt-get update && sudo apt-get install -y powershell" >&2
+    echo "Or run: ./scripts/install-linux.sh" >&2
+    exit 1
+fi
+
+exec "$PWSH_BIN" -NoProfile -ExecutionPolicy Bypass -File "$CLI_PS1" "$@"
