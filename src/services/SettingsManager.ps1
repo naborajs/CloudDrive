@@ -39,12 +39,8 @@ function Resolve-AppTheme([string]$ThemeName) {
 }
 
 function Resolve-ProviderMountPoint([string]$ProviderId = 'gdrive', [string]$AccountId = '', [string]$DriveLetter = '') {
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
     if ($isLinux) {
         $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
@@ -62,12 +58,8 @@ function Resolve-ProviderMountPoint([string]$ProviderId = 'gdrive', [string]$Acc
 }
 
 function Get-DefaultSettings {
-    $isLinux = $false
-    if (Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue) {
-        $isLinux = [bool]$IsLinux
-    } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
-        $isLinux = $true
-    }
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
     $defaultCache = if ($isLinux) {
         $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
