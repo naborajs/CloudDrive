@@ -16,6 +16,7 @@ function Get-SafeFieldValue($Item, [string]$Name) {
 }
 
 $script:DedupLedgerCache = [hashtable]::Synchronized(@{})
+$script:AccountMountRootCache = [hashtable]::Synchronized(@{})
 $script:DedupLedgerPathOverride = $null
 $script:DedupLedgerLoaded = $false
 $script:DedupLedgerLock = [System.Object]::new()
@@ -256,7 +257,7 @@ function Test-RemoteCloudFileDeduplication {
         [string]$LocalFilePath = '',
 
         [Parameter(Mandatory = $false)]
-        [System.Collections.IDictionary]$Account = $null
+        [object]$Account = $null
     )
 
     $cleanPath = $RemotePath.Trim().Replace('\', '/').TrimStart('/')
@@ -281,26 +282,37 @@ function Test-RemoteCloudFileDeduplication {
     # 2. Fast Path: Direct virtual mount check (O(1) filesystem query)
     $mountRoot = ''
     $prov = if ($ProviderId) { $ProviderId } else { 'gdrive' }
-    if ($Account) {
-        if (-not $ProviderId -and $Account.Contains('ProviderId')) { $prov = [string]$Account['ProviderId'] }
-        if ($Account.Contains('DriveLetter') -and $Account['DriveLetter']) {
-            $letter = ([string]$Account['DriveLetter']).ToUpperInvariant().TrimEnd(':')
-            if ($letter -match '^[A-Z]$' -and (Test-Path -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)) {
-                $mountRoot = "${letter}:\"
+
+    if ($AccountId -and $script:AccountMountRootCache.ContainsKey($AccountId)) {
+        $mountRoot = [string]$script:AccountMountRootCache[$AccountId]
+    } else {
+        if ($Account) {
+            $accProv = [string](Get-SafeFieldValue $Account 'ProviderId')
+            if (-not $ProviderId -and $accProv) { $prov = $accProv }
+            $letterVal = [string](Get-SafeFieldValue $Account 'DriveLetter')
+            if ($letterVal) {
+                $letter = $letterVal.ToUpperInvariant().TrimEnd(':')
+                if ($letter -match '^[A-Z]$' -and (Test-Path -LiteralPath "${letter}:\" -ErrorAction SilentlyContinue)) {
+                    $mountRoot = "${letter}:\"
+                }
             }
+        }
+
+        if (-not $mountRoot -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
+            try {
+                $status = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $prov
+                if ($status -and $status.IsMounted -and $status.DriveRoot -and (Test-Path -LiteralPath $status.DriveRoot -ErrorAction SilentlyContinue)) {
+                    $mountRoot = $status.DriveRoot
+                }
+            } catch { }
+        }
+
+        if ($AccountId -and $mountRoot) {
+            $script:AccountMountRootCache[$AccountId] = $mountRoot
         }
     }
 
-    if (-not $mountRoot -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
-        try {
-            $status = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $prov
-            if ($status -and $status.IsMounted -and $status.DriveRoot -and (Test-Path -LiteralPath $status.DriveRoot -ErrorAction SilentlyContinue)) {
-                $mountRoot = $status.DriveRoot
-            }
-        } catch { }
-    }
-
-    if ($mountRoot) {
+    if ($mountRoot -and (Test-Path -LiteralPath $mountRoot -ErrorAction SilentlyContinue)) {
         $targetCloudPath = Join-Path $mountRoot ($cleanPath.Replace('/', '\'))
         if ([System.IO.File]::Exists($targetCloudPath)) {
             try {
@@ -353,7 +365,7 @@ function Test-RemoteCloudFileDeduplication {
             # Check if same basename exists with different format in parent folder
             try {
                 $parentCloudDir = [System.IO.Path]::GetDirectoryName($targetCloudPath)
-                if ([System.IO.Directory]::Exists($parentCloudDir)) {
+                if ($parentCloudDir -and [System.IO.Directory]::Exists($parentCloudDir)) {
                     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($targetCloudPath)
                     $matchingFiles = [System.IO.Directory]::EnumerateFiles($parentCloudDir, "$baseName.*", [System.IO.SearchOption]::TopDirectoryOnly)
                     foreach ($mf in $matchingFiles) {
@@ -372,10 +384,19 @@ function Test-RemoteCloudFileDeduplication {
                     }
                 }
             } catch { }
+
+            # Drive is mounted and file does not exist on virtual drive.
+            return [ordered]@{
+                IsPresent       = $false
+                Status          = 'New'
+                RemoteSizeBytes = 0L
+                Format          = $localFmt
+                Reason          = 'Not found in mounted cloud storage. Queued for upload.'
+            }
         }
     }
 
-    # 3. Direct Rclone RC operations/stat fallback
+    # 3. Direct Rclone RC operations/stat fallback (only if virtual drive is unmounted/headless)
     try {
         $cleanLetter = if ($mountRoot) { $mountRoot.ToUpperInvariant().TrimEnd(':').TrimEnd('\') } else { '' }
         $rcPort = 0
@@ -521,7 +542,7 @@ function Get-RemoteFileInventoryMap {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $false)]
         [string]$DestinationFolderPath = '',
@@ -627,7 +648,7 @@ function Classify-TransferCandidate {
         [System.Collections.Generic.Dictionary[string, hashtable]]$RemoteInventoryMap,
 
         [Parameter(Mandatory = $false)]
-        [System.Collections.IDictionary]$DestinationAccount = $null
+        [object]$DestinationAccount = $null
     )
 
     if (-not (Test-Path -LiteralPath $LocalFilePath -PathType Leaf)) {
@@ -784,7 +805,7 @@ function Classify-TransferBatch {
         [string[]]$FilePaths,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$DestinationAccount,
+        [object]$DestinationAccount,
 
         [Parameter(Mandatory = $false)]
         [string]$DestinationFolderPath = '',
