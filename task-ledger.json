@@ -1,15 +1,13 @@
 {
-  "taskId": "TASK-021",
-  "goal": "Cross-Platform Linux VPS Support, Silent Automatic Background Restart Resumption, and Resumable Progression (20% -> 21%)",
+  "taskId": "TASK-022",
+  "goal": "Fix Linux PowerShell 7.7 / Ubuntu 26.04 aarch64 runtime bugs: symlink dereferencing, Add-Type WPF guard, and IsLinux read-only variable collision",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Linux VPS / Ubuntu Support: Provide headless CLI, daemon mode, POSIX permissions, directory-based FUSE mounts (omitting Windows-only WinFsp flags), and XDG directory resolution.",
-    "2. Silent Automatic Background Restart Resumption: Eliminate notifications asking user to drag-and-drop again on restart. System automatically fetches and resumes interrupted transfers silently in the background.",
-    "3. Resumable Progression (20% -> 21%): Checks cloud storage first; skipped files retain confirmed progress so batches start at 20% and advance to 21%+ rather than resetting to 0%. Large files utilize chunked resumable flags (--drive-chunk-size 32M) and --ignore-existing.",
-    "4. Headless Linux Entrypoint: Implement src/cli/nsclouddrive.ps1, scripts/nsclouddrive bash wrapper, systemd service (scripts/systemd/nsclouddrive.service), and scripts/install-linux.sh.",
-    "5. Unified Release Packaging: Package-Release.ps1 creates both Windows zip (NSCloudDrive-v2.0.0-Windows-x64.zip) and Linux tarball (NSCloudDrive-v2.0.0-Linux-x64.tar.gz) with SHA-256 checksums.",
-    "6. Verification: Automated test suites (Test-LinuxCrossPlatformSupport.ps1, Test-PostRestartDropDeduplication.ps1, Test-TransferRecoveryAndProgression.ps1, etc.) pass with exit code 0."
+    "1. Resolve symlink realpath in scripts/nsclouddrive so /usr/local/bin/nsclouddrive correctly locates src/cli/nsclouddrive.ps1.",
+    "2. Guard PresentationCore and System.Web.Extensions Add-Type calls in src/services/CloudTransferManager.ps1 on Linux where missing assemblies cause terminating errors.",
+    "3. Rename local $isLinux variables to $onLinux across ConnectionState.ps1, ProviderContract.ps1, SettingsManager.ps1, and VirtualDriveManager.ps1 to eliminate collision with PowerShell Core 7.4+ read-only $IsLinux automatic constant.",
+    "4. Verify all automated test suites pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -19,42 +17,31 @@
   ],
   "status": "completed",
   "filesChanged": [
-    "src/models/ConnectionState.ps1",
-    "src/services/SettingsManager.ps1",
-    "src/providers/ProviderContract.ps1",
-    "src/services/CloudDeduplicationService.ps1",
-    "src/services/CloudTransferManager.ps1",
-    "src/services/VirtualDriveManager.ps1",
-    "src/NSCloudDrive.ps1",
-    "src/cli/nsclouddrive.ps1",
     "scripts/nsclouddrive",
-    "scripts/systemd/nsclouddrive.service",
-    "scripts/install-linux.sh",
-    "scripts/Package-Release.ps1",
-    "tests/Test-LinuxCrossPlatformSupport.ps1",
+    "src/services/CloudTransferManager.ps1",
+    "src/models/ConnectionState.ps1",
+    "src/providers/ProviderContract.ps1",
+    "src/services/SettingsManager.ps1",
+    "src/services/VirtualDriveManager.ps1",
     "task-ledger.json",
-    "docs/engineering/INCIDENTS_AND_FIXES.md"
+    "docs/engineering/INCIDENTS_AND_FIXES.md",
+    ".agents/architecture/ISSUE_TRACKER.md"
   ],
   "decisions": [
     {
-      "date": "2026-11-21",
-      "decision": "Implement cross-platform XDG data and config root resolution in ConnectionState.ps1 with fallback to LocalAppData on Windows.",
-      "rationale": "Enables completely native headless operation on Linux VPS without throwing Windows-specific path errors."
+      "date": "2026-11-22",
+      "decision": "Use readlink -f in scripts/nsclouddrive to resolve symlink target directory before computing REPO_ROOT.",
+      "rationale": "Prevents SCRIPT_DIR from resolving to /usr/local/bin when installed globally."
     },
     {
-      "date": "2026-11-21",
-      "decision": "Support directory mount targets and Linux FUSE in VirtualDriveManager.ps1 while omitting WinFsp flags (--network-mode, --fuse-flag --ThreadCount=64, --fuse-flag --FileSystemName=NTFS).",
-      "rationale": "Prevents rclone crash on Linux where WinFsp-specific flags are unrecognized by Linux kernel FUSE."
+      "date": "2026-11-22",
+      "decision": "Wrap Windows-only assembly loads (PresentationCore, System.Web.Extensions) in $onWindows check.",
+      "rationale": "Add-Type for non-existent assemblies in pwsh on Linux produces an uncatchable terminating error under $ErrorActionPreference='Stop'."
     },
     {
-      "date": "2026-11-21",
-      "decision": "Remove interactive drag-and-drop prompt notifications on startup; automatically resume background transfer queue processing silently.",
-      "rationale": "Fulfills user requirement for completely automated unattended sync across system and PC restarts."
-    },
-    {
-      "date": "2026-11-21",
-      "decision": "Build unified dual-distribution packaging (Windows zip and Linux tar.gz with SHA-256) in scripts/Package-Release.ps1.",
-      "rationale": "Allows simultaneous publishing and deployment across Windows desktop and Linux VPS platforms."
+      "date": "2026-11-22",
+      "decision": "Rename local $isLinux variables to $onLinux across all modules.",
+      "rationale": "PowerShell variables are case-insensitive and $IsLinux is a built-in read-only automatic variable in PowerShell Core 7.4+."
     }
   ],
   "reviewFindings": [
