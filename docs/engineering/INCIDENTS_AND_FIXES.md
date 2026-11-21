@@ -30,6 +30,8 @@ history unless explicitly noted otherwise.
 | Fatal Process Crash on Startup (0xe0434352 / PSInvalidOperationException) | PowerShell ScriptBlock attached to Process.ErrorDataReceived/OutputDataReceived executed on CLR ThreadPool without PowerShell Runspace | Switched rclone streaming to --log-file with --use-json-log; read progress on safe PowerShell engine thread via Update-CloudTransferJobProgressFromLog |
 | Silent Exit on Double-Click Launch via Mutex Collision & 15MB State Queue Starvation | Stale mutex collision in launcher and 15MB queue freezing UI Dispatcher thread | Implemented QueueFastIO serializer (94x speedup), backup pruning, WindowRestoreHelper, and launcher liveness check |
 | Application Startup Window Delay & Redundant Queue Load Resolution | 28.7s startup stall caused by redundant module-load queue parsing and repetitive validation of 3,192 jobs | Eliminated redundant module load, fast-pathed normalized job validation (650x faster loop: 21ms vs 13.7s), added iterative 1.5s launcher activation, and brought window directly to foreground |
+| Post-Restart Cloud File Deduplication, Notification De-Spamming, and Dispatcher Unfreezing | Unbounded virtual drive tree enumeration, PSCustomObject type mismatch in binding, zombie recovery batch loops, and unthrottled cache scans | Implemented O(1) mount dedup with format and byte size check, PSCustomObject support, suppressed recovery notifications, and throttled cache scans |
+| Linux VPS FUSE Support, Silent Background Restart Resumption, and Resumable Progression (20% -> 21%) | WinFsp flags invalid on Linux FUSE, Windows-specific LocalAppData and ACL paths, prompt notifications on restart requiring manual re-drop, and batches resetting to 0% | Implemented cross-platform XDG roots, POSIX permissions, directory FUSE mounts, headless CLI, systemd service, silent automatic restart queue resumption, and 20% -> 21% progress retention |
 
 ## 1. Merged Google cards and wrong provider icon
 
@@ -964,6 +966,50 @@ When launching `NSCloudDrive.exe`, the application took almost 29 seconds to ren
 - `tests/Test-CloudTransferManager.ps1`: PASSED with exit code 0.
 - Recompiled `NSCloudDrive.exe` with SHA256 verified.
 - Confirmed zero UI hangs and zero balloon notification spam.
+
+## 39. Linux VPS FUSE Support, Silent Background Restart Resumption, and Resumable Batch Progression (TASK-021, 2026-11-21)
+
+**Observed symptom:**
+1. The user required deploying NS Cloud Drive on a headless Linux / Ubuntu VPS to mount cloud providers as remote filesystems without Windows GUI dependencies.
+2. Previously on system/PC restart, the application displayed a notification asking the user to manually drag-and-drop their folders again instead of silently and automatically resuming pending uploads.
+3. If an upload was interrupted at 20% completion (e.g. 20 of 100 files or 20 MB of 100 MB uploaded), dropping the batch again or resuming previously forced progress to reset to 0%, re-checking or re-sending files from scratch.
+
+**Root causes:**
+1. **Windows-Only Path & OS Assumptions:** Core modules hardcoded `$env:LOCALAPPDATA` paths, Windows drive letters (`G:\`), Win32 Access Control Lists (`System.Security.AccessControl`), and WinFsp command-line arguments (`--network-mode`, `--fuse-flag --ThreadCount=64`, `--fuse-flag --FileSystemName=NTFS`), which fail on Linux kernel FUSE (`fusermount3`).
+2. **Interactive Prompts on Startup Recovery:** `src/NSCloudDrive.ps1` previously displayed balloon tips asking the user to drag and drop files again rather than automatically triggering background queue processing.
+3. **Progress Loss on Re-Drop:** Progress calculation across batch jobs did not credit confirmed existing files with 100% completion in the batch summary calculations, causing the UI and scheduler to display 0% until the newly sent files progressed. Additionally, rclone transfers lacked Google Drive chunked resumable upload arguments (`--drive-chunk-size 32M`, `--drive-upload-cutoff 32M`).
+
+**Fix:**
+1. **Cross-Platform XDG & Directory Resolution:**
+   - In `src/models/ConnectionState.ps1`, implemented `Get-NSCloudDriveDataRoot` and `Get-NSCloudDriveConfigRoot` mapping to `~/.local/share/nsclouddrive` and `~/.config/nsclouddrive` on Linux and `$env:LOCALAPPDATA\NSCloudDrive` on Windows.
+   - Handled strict mode `$IsLinux` resolution via `Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue`.
+2. **Linux FUSE Mounts & POSIX Security:**
+   - In `src/services/VirtualDriveManager.ps1`, updated `Find-RcloneBinary` and `Test-WinFspInstalled` to detect Linux binaries (`/usr/bin/rclone`, `fusermount3`, `/dev/fuse`).
+   - In `Build-RcloneMountArguments`, dynamically omitted WinFsp flags (`--network-mode`, `--fuse-flag --ThreadCount=64`, `--fuse-flag --FileSystemName=NTFS`) when running on Linux, added `--allow-other`, and targeted directory mount points (`~/CloudDrives/<account>`).
+   - Updated `Stop-VirtualDriveMount` to use `fusermount3 -u -z <dir>`.
+   - In `src/providers/ProviderContract.ps1`, updated `Set-CloudCredentialAcl` to apply POSIX `chmod 700` / `chmod 600` permissions on Linux.
+3. **Headless Linux CLI & Systemd Daemon:**
+   - Implemented `src/cli/nsclouddrive.ps1` supporting commands: `status`, `accounts`, `mount`, `unmount`, `transfer`, `queue`, `clear-queue`, `recover`, and `daemon`.
+   - Created bash wrapper `scripts/nsclouddrive`, systemd service unit `scripts/systemd/nsclouddrive.service`, and one-click installer `scripts/install-linux.sh`.
+4. **Silent Automatic Restart Resumption:**
+   - In `src/NSCloudDrive.ps1`, removed interactive drag-and-drop reminder balloon tips on startup.
+   - Startup queue recovery now invokes `Process-CloudTransferQueue` immediately and silently in the background.
+5. **Resumable Progression (20% -> 21%):**
+   - In `CloudTransferManager.ps1`, skipped files identified via `Test-RemoteCloudFileDeduplication` retain confirmed completed status (`Completed and remotely confirmed`) and contribute their full byte size to the batch summary.
+   - An interrupted batch with 20% completed files immediately computes `OverallPercentage = 20.0%`, smoothly advancing to 21%+ as file 21 uploads.
+   - Added Google Drive resumable upload flags (`--drive-chunk-size 32M`, `--drive-upload-cutoff 32M`, `--drive-pacer-min-sleep 10ms`, `--tpslimit 10`).
+6. **Unified Dual-Distribution Packaging:**
+   - Updated `scripts/Package-Release.ps1` to produce both `NSCloudDrive-v2.0.0-Windows-x64.zip` (2.21 MB) and `NSCloudDrive-v2.0.0-Linux-x64.tar.gz` (1.67 MB) with SHA-256 verification.
+
+**Verification:**
+- `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED all 4 phases with exit code 0.
+- `tests/Test-PostRestartDropDeduplication.ps1`: PASSED with exit code 0.
+- `tests/Test-TransferRecoveryAndProgression.ps1`: PASSED all 5 phases with exit code 0.
+- `tests/Test-SettingsManager.ps1`: PASSED with exit code 0.
+- `tests/Test-VirtualDriveManager.ps1`: PASSED with exit code 0.
+- `tests/Test-DesktopUIRegression.ps1`: PASSED with exit code 0.
+- Validated package archives and SHA-256 integrity in `dist/`.
+
 
 
 
