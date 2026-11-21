@@ -700,8 +700,10 @@ function Build-RcloneMountArguments(
         )
     }
 
-    # Set WinFsp filesystem name to NTFS so Windows File Explorer displays clean volume format
-    $args += @('--fuse-flag', '--FileSystemName=NTFS')
+    if (-not $isLinux) {
+        # Set WinFsp filesystem name to NTFS so Windows File Explorer displays clean volume format
+        $args += @('--fuse-flag', '--FileSystemName=NTFS')
+    }
 
     return $args
 }
