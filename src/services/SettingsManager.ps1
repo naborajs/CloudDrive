@@ -40,9 +40,9 @@ function Resolve-AppTheme([string]$ThemeName) {
 
 function Resolve-ProviderMountPoint([string]$ProviderId = 'gdrive', [string]$AccountId = '', [string]$DriveLetter = '') {
     $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
-    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
-    if ($isLinux) {
+    if ($onLinux) {
         $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
         $mountBase = Join-Path $homeDir 'CloudDrives'
         $folderName = if ($AccountId) {
@@ -59,9 +59,9 @@ function Resolve-ProviderMountPoint([string]$ProviderId = 'gdrive', [string]$Acc
 
 function Get-DefaultSettings {
     $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
-    $isLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
 
-    $defaultCache = if ($isLinux) {
+    $defaultCache = if ($onLinux) {
         $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
         Join-Path $homeDir 'CloudCache'
     } else {
