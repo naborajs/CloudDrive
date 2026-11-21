@@ -175,7 +175,7 @@ function Find-RcloneBinary([string]$CustomPath = '') {
         return $CustomPath
     }
 
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
     $candidates = @()
     if ($env:RCLONE_EXE_PATH) {
@@ -191,7 +191,7 @@ function Find-RcloneBinary([string]$CustomPath = '') {
         Join-Path $homeDir '.local/share/nsclouddrive'
     }
 
-    if ($isLinux) {
+    if ($onLinux) {
         $candidates += '/usr/bin/rclone'
         $candidates += '/usr/local/bin/rclone'
         $candidates += '/bin/rclone'
@@ -230,9 +230,9 @@ function Get-VerifiedRclonePath([string]$CustomPath = '') {
 }
 
 function Test-WinFspInstalled {
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
-    if ($isLinux) {
+    if ($onLinux) {
         $fuseCmd = Get-Command 'fusermount3', 'fusermount' -ErrorAction SilentlyContinue
         if ($fuseCmd) { return $true }
         foreach ($p in @('/bin/fusermount3', '/usr/bin/fusermount3', '/bin/fusermount', '/usr/bin/fusermount')) {
@@ -294,9 +294,9 @@ function Get-VirtualDriveRcPort([string]$DriveLetter) {
 function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 5) {
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30) { throw 'Filesystem check timeout must be between 1 and 30 seconds.' }
 
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
-    if ($isLinux) {
+    if ($onLinux) {
         if ([string]::IsNullOrWhiteSpace($DriveRoot) -or -not (Test-Path -LiteralPath $DriveRoot -PathType Container)) {
             return [ordered]@{ Success = $false; State = 'Unavailable'; Error = "Directory '$DriveRoot' does not exist." }
         }
@@ -335,8 +335,8 @@ function Test-VirtualDriveFilesystem([string]$DriveRoot, [int]$TimeoutSeconds = 
 }
 
 function Clear-StaleDriveLetterMapping([string]$DriveLetter, [string]$VolumeLabel = '') {
-    $isLinux = Test-IsLinuxOperatingSystem
-    if ($isLinux) { return }
+    $onLinux = Test-IsLinuxOperatingSystem
+    if ($onLinux) { return }
 
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
@@ -578,10 +578,10 @@ function Build-RcloneMountArguments(
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
     }
 
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
     $driveRoot = ''
-    if ($isLinux) {
+    if ($onLinux) {
         if (-not [string]::IsNullOrWhiteSpace($MountPoint)) {
             $driveRoot = $MountPoint
         } else {
@@ -625,11 +625,11 @@ function Build-RcloneMountArguments(
         $args += '--read-only'
     }
 
-    if (-not $isLinux -and -not $FixedDisk) {
+    if (-not $onLinux -and -not $FixedDisk) {
         $args += '--network-mode'
     }
 
-    if ($isLinux) {
+    if ($onLinux) {
         $args += '--allow-other'
     }
 
@@ -653,7 +653,7 @@ function Build-RcloneMountArguments(
         '--log-level', 'ERROR'
     )
 
-    if (-not $isLinux) {
+    if (-not $onLinux) {
         # WinFsp request threads: 64 threads for ALL mounts (both Google Drive and TeraBox).
         # Prevents concurrent metadata, thumbnail, EXIF, and streaming byte requests from starving
         # WinFsp's default 4-thread pool during media inspection (e.g. Windows Photos / Explorer),
@@ -700,7 +700,7 @@ function Build-RcloneMountArguments(
         )
     }
 
-    if (-not $isLinux) {
+    if (-not $onLinux) {
         # Set WinFsp filesystem name to NTFS so Windows File Explorer displays clean volume format
         $args += @('--fuse-flag', '--FileSystemName=NTFS')
     }
@@ -773,11 +773,11 @@ function Start-VirtualDriveMount(
         }
     }
 
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
     $letter = ''
     $driveRoot = ''
-    if ($isLinux) {
+    if ($onLinux) {
         $driveRoot = if (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue) {
             Resolve-ProviderMountPoint -ProviderId $resolvedProvider -AccountId $AccountId -DriveLetter $DriveLetter
         } else {
@@ -1185,9 +1185,9 @@ function Stop-VirtualDriveMount(
         try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
 
-    $isLinux = Test-IsLinuxOperatingSystem
+    $onLinux = Test-IsLinuxOperatingSystem
 
-    if ($isLinux) {
+    if ($onLinux) {
         try {
             $fuseUnmountCmd = Get-Command 'fusermount3', 'fusermount' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($AccountId -or $ProviderId) {
