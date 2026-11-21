@@ -1,8 +1,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
-Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+$onWindows = if ($null -ne (Get-Variable -Name 'IsWindows' -ValueOnly -ErrorAction SilentlyContinue)) {
+    [bool](Get-Variable -Name 'IsWindows' -ValueOnly)
+} else {
+    [System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Unix
+}
+if ($onWindows) {
+    Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+}
 
 # Win32 Process Suspend and Resume for pause/resume transfer support
 $ntdllDef = @"
