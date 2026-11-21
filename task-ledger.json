@@ -1,16 +1,15 @@
 {
-  "taskId": "TASK-020",
-  "goal": "Fast Cloud Deduplication on Post-Restart Drop, Notification De-Spamming, and Dispatcher Unfreezing",
+  "taskId": "TASK-021",
+  "goal": "Cross-Platform Linux VPS Support, Silent Automatic Background Restart Resumption, and Resumable Progression (20% -> 21%)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. When user drops files (e.g. 100 files) after an interrupted transfer (e.g. 85 completed), files already present in the cloud matching name, format, and exact byte size are skipped immediately without re-transferring.",
-    "2. Cloud deduplication performs O(1) checks against local deduplication ledger and direct virtual drive mount (<1ms per file) without crawling directory trees.",
-    "3. Support PSCustomObject account deserialization in Test-RemoteCloudFileDeduplication and Classify-TransferCandidate without parameter binding errors.",
-    "4. Eliminate continuous notification spam: suppress balloon tips for recovery batches, throttle interrupted session alerts to once per session.",
-    "5. Eliminate WPF Dispatcher freezing: remove aggressive periodic background adoption loop from UI timer, throttle cache disk scans to 30s, and only trigger queue scheduling when items exist.",
-    "6. Purge 3,192 zombie auto-adopted recovery jobs from transfer-jobs.json, shrinking state from 7MB to <1KB.",
-    "7. Verify all test suites pass with exit code 0."
+    "1. Linux VPS / Ubuntu Support: Provide headless CLI, daemon mode, POSIX permissions, directory-based FUSE mounts (omitting Windows-only WinFsp flags), and XDG directory resolution.",
+    "2. Silent Automatic Background Restart Resumption: Eliminate notifications asking user to drag-and-drop again on restart. System automatically fetches and resumes interrupted transfers silently in the background.",
+    "3. Resumable Progression (20% -> 21%): Checks cloud storage first; skipped files retain confirmed progress so batches start at 20% and advance to 21%+ rather than resetting to 0%. Large files utilize chunked resumable flags (--drive-chunk-size 32M) and --ignore-existing.",
+    "4. Headless Linux Entrypoint: Implement src/cli/nsclouddrive.ps1, scripts/nsclouddrive bash wrapper, systemd service (scripts/systemd/nsclouddrive.service), and scripts/install-linux.sh.",
+    "5. Unified Release Packaging: Package-Release.ps1 creates both Windows zip (NSCloudDrive-v2.0.0-Windows-x64.zip) and Linux tarball (NSCloudDrive-v2.0.0-Linux-x64.tar.gz) with SHA-256 checksums.",
+    "6. Verification: Automated test suites (Test-LinuxCrossPlatformSupport.ps1, Test-PostRestartDropDeduplication.ps1, Test-TransferRecoveryAndProgression.ps1, etc.) pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -20,80 +19,92 @@
   ],
   "status": "completed",
   "filesChanged": [
+    "src/models/ConnectionState.ps1",
+    "src/services/SettingsManager.ps1",
+    "src/providers/ProviderContract.ps1",
     "src/services/CloudDeduplicationService.ps1",
     "src/services/CloudTransferManager.ps1",
+    "src/services/VirtualDriveManager.ps1",
     "src/NSCloudDrive.ps1",
-    "tests/Test-PostRestartDropDeduplication.ps1",
-    "NSCloudDrive.exe",
-    "NSCloudDrive.exe.sha256",
+    "src/cli/nsclouddrive.ps1",
+    "scripts/nsclouddrive",
+    "scripts/systemd/nsclouddrive.service",
+    "scripts/install-linux.sh",
+    "scripts/Package-Release.ps1",
+    "tests/Test-LinuxCrossPlatformSupport.ps1",
     "task-ledger.json",
-    "docs/engineering/INCIDENTS_AND_FIXES.md",
-    ".agents/architecture/ISSUE_TRACKER.md"
+    "docs/engineering/INCIDENTS_AND_FIXES.md"
   ],
   "decisions": [
     {
-      "date": "2026-11-20",
-      "decision": "Use direct O(1) WinFsp mount checking and in-memory dedup ledger rather than unbounded tree walks or remote HTTP RC stat calls on mounted drives.",
-      "rationale": "Prevents 47-second tree enumeration and eliminates Google Drive API 403 RATE_LIMIT_EXCEEDED errors."
-    },
-    {
-      "date": "2026-11-20",
-      "decision": "Accept [object] accounts in CloudDeduplicationService and CloudTransferManager.",
-      "rationale": "Allows both hashtable and PSCustomObject (from JSON deserialization) without throwing ParameterArgumentTransformationError."
+      "date": "2026-11-21",
+      "decision": "Implement cross-platform XDG data and config root resolution in ConnectionState.ps1 with fallback to LocalAppData on Windows.",
+      "rationale": "Enables completely native headless operation on Linux VPS without throwing Windows-specific path errors."
     },
     {
       "date": "2026-11-21",
-      "decision": "Remove periodic background staged adoption loop from UI timer and notify user once to resume interrupted transfers via drag-and-drop.",
-      "rationale": "Directly respects user architecture guidance, eliminates UI thread freezing, and stops balloon notification spam."
+      "decision": "Support directory mount targets and Linux FUSE in VirtualDriveManager.ps1 while omitting WinFsp flags (--network-mode, --fuse-flag --ThreadCount=64, --fuse-flag --FileSystemName=NTFS).",
+      "rationale": "Prevents rclone crash on Linux where WinFsp-specific flags are unrecognized by Linux kernel FUSE."
+    },
+    {
+      "date": "2026-11-21",
+      "decision": "Remove interactive drag-and-drop prompt notifications on startup; automatically resume background transfer queue processing silently.",
+      "rationale": "Fulfills user requirement for completely automated unattended sync across system and PC restarts."
+    },
+    {
+      "date": "2026-11-21",
+      "decision": "Build unified dual-distribution packaging (Windows zip and Linux tar.gz with SHA-256) in scripts/Package-Release.ps1.",
+      "rationale": "Allows simultaneous publishing and deployment across Windows desktop and Linux VPS platforms."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "finding": "Audited diffs across CloudDeduplicationService.ps1, CloudTransferManager.ps1, and NSCloudDrive.ps1. Confirmed strict mode compliance, zero non-ASCII unicode characters, and zero running processes remaining.",
-      "status": "approved"
+      "date": "2026-11-21",
+      "status": "approved",
+      "notes": "Audited strict mode safety, POSIX ACL compatibility, non-blocking UI dispatcher, and granular 1:1 commit compliance. All tests passed with exit code 0."
     }
   ],
   "testResults": [
     {
-      "suite": "tests/Test-PostRestartDropDeduplication.ps1",
+      "suite": "Test-LinuxCrossPlatformSupport.ps1",
       "status": "passed",
-      "exitCode": 0,
-      "total": 6,
-      "passed": 6,
-      "failed": 0
+      "exitCode": 0
     },
     {
-      "suite": "tests/Test-TransferRecoveryAndProgression.ps1",
+      "suite": "Test-PostRestartDropDeduplication.ps1",
       "status": "passed",
-      "exitCode": 0,
-      "total": 5,
-      "passed": 5,
-      "failed": 0
+      "exitCode": 0
     },
     {
-      "suite": "tests/Test-CloudTransferManager.ps1",
+      "suite": "Test-TransferRecoveryAndProgression.ps1",
       "status": "passed",
-      "exitCode": 0,
-      "total": 1,
-      "passed": 1,
-      "failed": 0
-    }
-  ],
-  "securityFindings": [
+      "exitCode": 0
+    },
     {
-      "auditor": "ns-security",
-      "finding": "Credential safety verified; all paths sanitized, zero token exposure in logs or UI toasts.",
-      "status": "passed"
+      "suite": "Test-SettingsManager.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Test-VirtualDriveManager.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Test-ProviderContracts.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Test-ConnectionState.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Test-DesktopUIRegression.ps1",
+      "status": "passed",
+      "exitCode": 0
     }
-  ],
-  "commitRefs": [
-    "994984a",
-    "636bca6",
-    "4fa63e4",
-    "a270e99",
-    "8da73de",
-    "471f0aa"
-  ],
-  "blockers": []
+  ]
 }
