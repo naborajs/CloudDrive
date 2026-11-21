@@ -32,6 +32,7 @@ history unless explicitly noted otherwise.
 | Application Startup Window Delay & Redundant Queue Load Resolution | 28.7s startup stall caused by redundant module-load queue parsing and repetitive validation of 3,192 jobs | Eliminated redundant module load, fast-pathed normalized job validation (650x faster loop: 21ms vs 13.7s), added iterative 1.5s launcher activation, and brought window directly to foreground |
 | Post-Restart Cloud File Deduplication, Notification De-Spamming, and Dispatcher Unfreezing | Unbounded virtual drive tree enumeration, PSCustomObject type mismatch in binding, zombie recovery batch loops, and unthrottled cache scans | Implemented O(1) mount dedup with format and byte size check, PSCustomObject support, suppressed recovery notifications, and throttled cache scans |
 | Linux VPS FUSE Support, Silent Background Restart Resumption, and Resumable Progression (20% -> 21%) | WinFsp flags invalid on Linux FUSE, Windows-specific LocalAppData and ACL paths, prompt notifications on restart requiring manual re-drop, and batches resetting to 0% | Implemented cross-platform XDG roots, POSIX permissions, directory FUSE mounts, headless CLI, systemd service, silent automatic restart queue resumption, and 20% -> 21% progress retention |
+| Linux (PowerShell 7.7 / Ubuntu aarch64) Runtime Bugs | Symlink path resolution in scripts/nsclouddrive, unguarded WPF Add-Type terminating on Linux, and $isLinux assignment colliding with read-only automatic variable $IsLinux | Implemented readlink -f in wrapper, guarded Windows-only Add-Type in CloudTransferManager, and renamed local variables to $onLinux across core modules |
 
 ## 1. Merged Google cards and wrong provider icon
 
@@ -1009,6 +1010,30 @@ When launching `NSCloudDrive.exe`, the application took almost 29 seconds to ren
 - `tests/Test-VirtualDriveManager.ps1`: PASSED with exit code 0.
 - `tests/Test-DesktopUIRegression.ps1`: PASSED with exit code 0.
 - Validated package archives and SHA-256 integrity in `dist/`.
+
+## 40. Linux (PowerShell 7.7 / Ubuntu 26.04 aarch64) Runtime Bugs (TASK-022, 2026-11-22)
+
+**Observed symptom:**
+When deploying to a Linux VPS (Ubuntu 26.04 aarch64) running PowerShell Core 7.7.0:
+1. `nsclouddrive status` exited with code 1.
+2. The background systemd user service `nsclouddrive.service` crash-looped under `Restart=on-failure`.
+
+**Root causes:**
+1. **Symlink Path Resolution:** `scripts/nsclouddrive` used `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`. When invoked via `/usr/local/bin/nsclouddrive`, `${BASH_SOURCE[0]}` was the symlink itself, resulting in `REPO_ROOT=/usr/local` and calling non-existent `/usr/local/src/cli/nsclouddrive.ps1` (exit 64).
+2. **Unguarded WPF Add-Type:** In `src/services/CloudTransferManager.ps1`, `Add-Type -AssemblyName PresentationCore` and `System.Web.Extensions` were executed unconditionally. On Linux pwsh 7.7, `Add-Type` for non-existent assemblies throws an uncatchable terminating error that `-ErrorAction SilentlyContinue` does not suppress under `$ErrorActionPreference='Stop'`.
+3. **Collision with Read-Only Automatic Variable `$IsLinux`:** In PowerShell Core 7.4+, `$IsLinux` is a built-in read-only/constant automatic variable. Local variable assignments `$isLinux = ...` (case-insensitive) across `ConnectionState.ps1`, `ProviderContract.ps1`, `SettingsManager.ps1`, and `VirtualDriveManager.ps1` threw `Cannot overwrite variable IsLinux because it is read-only or constant`.
+
+**Fix:**
+1. Updated `scripts/nsclouddrive` to dereference canonical realpath: `SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"`.
+2. In `src/services/CloudTransferManager.ps1`, wrapped Windows-specific `Add-Type` calls inside an `$onWindows` environment check.
+3. Renamed all local variables `$isLinux` to `$onLinux` across `src/models/ConnectionState.ps1`, `src/providers/ProviderContract.ps1`, `src/services/SettingsManager.ps1`, and `src/services/VirtualDriveManager.ps1`.
+
+**Verification:**
+- `Test-LinuxCrossPlatformSupport.ps1`: PASSED with exit code 0.
+- `Test-VirtualDriveManager.ps1`: PASSED with exit code 0.
+- `Test-CloudTransferManager.ps1`: PASSED with exit code 0.
+- `Test-PostRestartDropDeduplication.ps1`: PASSED with exit code 0.
+
 
 
 
