@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ProviderContract.ps1')
 
 function Get-VpsCredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-VpsCredentialFilePath([string]$AccountId = '') {
@@ -51,8 +51,8 @@ function Get-VpsProviderInfo {
 function Obscure-VpsPassword([string]$PlainText, [string]$RcloneBinary = $null) {
     if ([string]::IsNullOrEmpty($PlainText)) { return '' }
     if (-not $RcloneBinary -or -not (Test-Path -LiteralPath $RcloneBinary -PathType Leaf)) {
-        $cand = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+        $cand = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+        if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
             $RcloneBinary = $cand
         } else {
             $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
@@ -241,8 +241,8 @@ function Test-VpsBackendSession(
     }
 
     # Locate rclone to execute remote connectivity probe
-    $rclone = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
@@ -403,8 +403,8 @@ function Get-VpsFileList(
         throw "No VPS session found for AccountId '$AccountId'."
     }
 
-    $rclone = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
