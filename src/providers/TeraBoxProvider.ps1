@@ -4,9 +4,10 @@ $ErrorActionPreference = 'Stop'
 try { Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue } catch { }
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
+. (Join-Path $PSScriptRoot 'ProviderContract.ps1')
 
 function Get-TeraBoxCredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-TeraBoxCredentialFilePath([string]$AccountId = '') {
@@ -22,41 +23,10 @@ $script:TeraBoxAppId = '250528'
 
 function Set-StrictTeraBoxCredentialAcl([string]$Path) {
     try {
-        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
-        $acl = if ($isDir) {
-            [System.IO.Directory]::GetAccessControl($Path)
-        } else {
-            [System.IO.File]::GetAccessControl($Path)
+        if (-not (Test-Path -LiteralPath $Path)) {
+            throw [System.IO.FileNotFoundException]::new("Cannot find path '$Path' because it does not exist.")
         }
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($existingRule in @($acl.Access)) {
-            [void]$acl.RemoveAccessRuleSpecific($existingRule)
-        }
-        foreach ($sid in @($userSid, $systemSid)) {
-            $rule = if ($isDir) {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            } else {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            }
-            [void]$acl.SetAccessRule($rule)
-        }
-        if ($isDir) {
-            [System.IO.Directory]::SetAccessControl($Path, $acl)
-        } else {
-            [System.IO.File]::SetAccessControl($Path, $acl)
-        }
+        Set-CloudCredentialAcl -Path $Path
     } catch {
         throw "Unable to restrict permissions on the TeraBox credential path '$Path': $($_.Exception.Message)"
     }
@@ -250,10 +220,15 @@ function Get-TeraBoxRcloneEnvironment(
 
     $cookie = Format-TeraBoxCookieHeader $session.Secret
     $safeRemote = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
-    return @{
+    $envVars = @{
         "RCLONE_CONFIG_${safeRemote}_TYPE" = 'terabox'
         "RCLONE_CONFIG_${safeRemote}_COOKIE" = $cookie
     }
+    $jsTok = [string](Get-SafeProperty $session 'JsToken' '')
+    if (-not [string]::IsNullOrWhiteSpace($jsTok)) {
+        $envVars["RCLONE_CONFIG_${safeRemote}_JS_TOKEN"] = $jsTok
+    }
+    return $envVars
 }
 
 function Set-TeraBoxManualSession(
@@ -425,8 +400,9 @@ function Test-TeraBoxBackendSession(
     }
 
     try {
-        $activeUserAgent = if ($session.UserAgent) {
-            $session.UserAgent
+        $sessionUserAgent = Get-SafeProperty $session 'UserAgent' $null
+        $activeUserAgent = if ($sessionUserAgent) {
+            [string]$sessionUserAgent
         } else {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -435,18 +411,23 @@ function Test-TeraBoxBackendSession(
             'User-Agent' = $activeUserAgent
         }
 
+        $sessionType = [string](Get-SafeProperty $session 'Type' 'web-session')
+        $sessionSecret = [string](Get-SafeProperty $session 'Secret' '')
+        $sessionBaseUrl = [string](Get-SafeProperty $session 'BaseUrl' '')
+        $sessionJsToken = [string](Get-SafeProperty $session 'JsToken' '')
+
         $checkUrl = ''
-        if ($session.Type -eq 'open-api') {
-            $checkUrl = "https://www.terabox.com/openapi/uinfo?access_tokens=$([System.Uri]::EscapeDataString($session.Secret))"
+        if ($sessionType -eq 'open-api') {
+            $checkUrl = "https://www.terabox.com/openapi/uinfo?access_tokens=$([System.Uri]::EscapeDataString($sessionSecret))"
         } else {
             # Web session
-            $baseUrl = if ($session.BaseUrl) { $session.BaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
+            $baseUrl = if ($sessionBaseUrl) { $sessionBaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
             $headers['Referer'] = "$baseUrl/"
             $headers['X-Requested-With'] = 'XMLHttpRequest'
-            $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
+            $headers['Cookie'] = Format-TeraBoxCookieHeader $sessionSecret
             $checkUrl = "$baseUrl/api/check/login?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0"
-            if ($session.JsToken) {
-                $checkUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+            if ($sessionJsToken) {
+                $checkUrl += "&jsToken=$([System.Uri]::EscapeDataString($sessionJsToken))"
             }
         }
 
@@ -611,8 +592,9 @@ function Get-TeraBoxFileList(
 
     $session = if ($SessionOverride) { $SessionOverride } else { Get-TeraBoxStoredSession -AccountId $AccountId }
     try {
-        $activeUserAgent = if ($session.UserAgent) {
-            $session.UserAgent
+        $sessionUserAgent = Get-SafeProperty $session 'UserAgent' $null
+        $activeUserAgent = if ($sessionUserAgent) {
+            [string]$sessionUserAgent
         } else {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -621,20 +603,25 @@ function Get-TeraBoxFileList(
             'User-Agent' = $activeUserAgent
         }
 
+        $sessionType = [string](Get-SafeProperty $session 'Type' 'web-session')
+        $sessionSecret = [string](Get-SafeProperty $session 'Secret' '')
+        $sessionBaseUrl = [string](Get-SafeProperty $session 'BaseUrl' '')
+        $sessionJsToken = [string](Get-SafeProperty $session 'JsToken' '')
+
         $listUrl = ''
-        if ($session.Type -eq 'open-api') {
+        if ($sessionType -eq 'open-api') {
             $dirParam = [System.Uri]::EscapeDataString($Directory)
-            $tokenParam = [System.Uri]::EscapeDataString($session.Secret)
+            $tokenParam = [System.Uri]::EscapeDataString($sessionSecret)
             $listUrl = "https://www.terabox.com/openapi/api/list?dir=$dirParam&access_tokens=$tokenParam&page=1&num=100"
         } else {
-            $baseUrl = if ($session.BaseUrl) { $session.BaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
+            $baseUrl = if ($sessionBaseUrl) { $sessionBaseUrl.TrimEnd('/') } else { 'https://www.terabox.com' }
             $headers['Referer'] = "$baseUrl/"
             $headers['X-Requested-With'] = 'XMLHttpRequest'
-            $headers['Cookie'] = Format-TeraBoxCookieHeader $session.Secret
+            $headers['Cookie'] = Format-TeraBoxCookieHeader $sessionSecret
             $dirParam = [System.Uri]::EscapeDataString($Directory)
             $listUrl = "$baseUrl/api/list?app_id=$script:TeraBoxAppId&channel=dubox&clienttype=0&dir=$dirParam&page=1&num=100"
-            if ($session.JsToken) {
-                $listUrl += "&jsToken=$([System.Uri]::EscapeDataString($session.JsToken))"
+            if ($sessionJsToken) {
+                $listUrl += "&jsToken=$([System.Uri]::EscapeDataString($sessionJsToken))"
             }
         }
 
