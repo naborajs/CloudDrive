@@ -1034,6 +1034,37 @@ When deploying to a Linux VPS (Ubuntu 26.04 aarch64) running PowerShell Core 7.7
 - `Test-CloudTransferManager.ps1`: PASSED with exit code 0.
 - `Test-PostRestartDropDeduplication.ps1`: PASSED with exit code 0.
 
+## 41. Windows-Parity Linux Web UI & Native Chromium CDP Automated Cookie Capture (TASK-023, 2026-11-22)
+
+**Observed symptom:**
+On Linux / Ubuntu VPS desktop environments, users lacked a visual interface with parity to the Windows desktop application. Manual cookie extraction for TeraBox onboarding was cumbersome and error-prone, requiring users to open DevTools, copy raw session strings, and paste them manually into CLI flags or text fields.
+
+**Root causes:**
+1. **Lack of Graphical Interface on Linux:** WPF XAML runs only on Windows. Linux environments lacked a dedicated graphical interface that reflected the sleek `PureBlack` desktop dashboard (Disks, Transfers, Settings, Analytics).
+2. **Manual Onboarding Friction:** TeraBox authentication uses session cookies (`ndus`, `BDUSS`) and `window.jsToken`. Without an embedded browser interceptor on Linux, users had no mechanism to sign in directly with Google/Email and have tokens captured automatically.
+
+**Fix:**
+1. **Windows-Parity Web UI Dashboard (`src/web/app.py`, `src/web/index.html`):**
+   - Implemented a single-page management dashboard matching the exact aesthetics and layout of the Windows WPF app (`PureBlack` theme: `#000000`, card `#0E0E10`, sidebar `#080808`, accent `#22C55E`).
+   - Built views for Disks (active drives, mounts, quick actions), Transfers (durable queue, progression), Settings (cache directory, auto-mount), and Analytics (system telemetry).
+   - Added `+ Add Cloud Disk` modal with 6 provider options and 1-click TeraBox Direct Sign-In.
+2. **Automated Chromium CDP Interceptor (`src/web/cdp_interceptor.py`):**
+   - Implemented `PureWebSocketClient` (RFC 6455 compliant) using Python standard libraries (`socket`, `struct`, `base64`, `urllib`).
+   - Launches Chromium on `DISPLAY=:1` in standalone application window mode (`--app=https://www.terabox.com/`) with `--remote-debugging-port=9224`.
+   - Attaches to Chrome DevTools Protocol over WebSockets and polls `Network.getCookies` for the `ndus` session cookie.
+   - Evaluates `Runtime.evaluate` to automatically capture `window.jsToken`.
+   - Validates session with TeraBox check/login API and persists account via `nsclouddrive login terabox ...` and mounts the drive without manual copy-pasting.
+3. **CLI Integration & Systemd Unit:**
+   - Added `ui` command to `src/cli/nsclouddrive.ps1` (`nsclouddrive ui [start|stop|status]`).
+   - Added `--browser` flag to `nsclouddrive login terabox` for automated terminal-initiated browser login.
+   - Created `scripts/systemd/nsclouddrive-ui.service` and updated `scripts/install-linux.sh`.
+
+**Verification:**
+- `tests/Test-WebUiAndBrowserLogin.ps1`: PASSED all 22 tests with exit code 0.
+- `tests/Test-LinuxE2EOpaqueBox.ps1`: PASSED all 71 tests with exit code 0.
+- `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED all phases with exit code 0.
+
+
 
 
 
