@@ -5,7 +5,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ProviderContract.ps1')
 
 function Get-ProtonDriveCredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
+}
+
+function Get-ProtonCredentialDirectory {
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-ProtonDriveCredentialFilePath([string]$AccountId = '') {
@@ -49,8 +53,8 @@ function Get-ProtonDriveProviderInfo {
 function Obscure-ProtonPassword([string]$PlainText, [string]$RcloneBinary = $null) {
     if ([string]::IsNullOrEmpty($PlainText)) { return '' }
     if (-not $RcloneBinary -or -not (Test-Path -LiteralPath $RcloneBinary -PathType Leaf)) {
-        $cand = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+        $cand = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+        if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
             $RcloneBinary = $cand
         } else {
             $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
@@ -221,8 +225,8 @@ function Test-ProtonDriveBackendSession(
         }
     }
 
-    $rclone = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
@@ -341,8 +345,8 @@ function Get-ProtonDriveFileList(
         throw "No Proton Drive session found for AccountId '$AccountId'."
     }
 
-    $rclone = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
