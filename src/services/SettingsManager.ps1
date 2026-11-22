@@ -2,6 +2,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:SettingsDirectoryOverride = $null
+$script:AccountListCache = $null
+$script:AccountListCacheAt = [DateTime]::MinValue
+$script:AccountListCacheTtlSec = 5
 
 function Set-SettingsDirectoryOverride([string]$Path) {
     $script:SettingsDirectoryOverride = $Path
@@ -12,8 +15,9 @@ function Reset-SettingsDirectoryOverride {
 }
 
 function Get-NSCloudDriveSettingsDirectory {
-    if ($script:SettingsDirectoryOverride) {
-        return $script:SettingsDirectoryOverride
+    $override = Get-Variable -Name 'SettingsDirectoryOverride' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($override) {
+        return $override
     }
     if (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) {
         return (Get-NSCloudDriveConfigRoot)
@@ -278,9 +282,12 @@ function Get-CloudAccounts {
     # file reads during UI refresh ticks. Invalidated by Clear-AccountListCache
     # after any account mutation.
     $now = [DateTime]::UtcNow
-    if ($script:AccountListCache -and
-        ($now - $script:AccountListCacheAt).TotalSeconds -lt $script:AccountListCacheTtlSec) {
-        return $script:AccountListCache
+    $cached = Get-Variable -Name 'AccountListCache' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $cachedAt = Get-Variable -Name 'AccountListCacheAt' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $cachedTtl = Get-Variable -Name 'AccountListCacheTtlSec' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $maxTtl = if ($cachedTtl) { [double]$cachedTtl } else { 5.0 }
+    if ($cached -and $cachedAt -and ($now - $cachedAt).TotalSeconds -lt $maxTtl) {
+        return $cached
     }
 
     $settings = Get-NSCloudDriveSettings
@@ -360,6 +367,12 @@ function Test-CloudAccountPersisted([string]$AccountId) {
 }
 
 function Test-CloudAccountDriveLetterAvailable([string]$DriveLetter, [string]$ExcludeAccountId = '') {
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+    if ($onLinux -and [string]::IsNullOrWhiteSpace($DriveLetter)) {
+        return $true
+    }
+
     $letter = ([string]$DriveLetter).ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($letter -notmatch '^[A-Z]$') { throw 'Choose a single valid drive letter before saving this account.' }
     foreach ($savedAccount in @(Get-CloudAccounts)) {
@@ -383,12 +396,17 @@ function Add-CloudAccount([hashtable]$Account) {
     }
     $accounts = @($settings.Accounts)
 
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+
     $cleanLetter = if ($Account.ContainsKey('DriveLetter') -and $Account.DriveLetter) {
         [string]$Account.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     } else {
         ''
     }
-    Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter | Out-Null
+    if (-not ($onLinux -and [string]::IsNullOrWhiteSpace($cleanLetter))) {
+        Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter | Out-Null
+    }
 
     $item = [ordered]@{
         Id = [string]$Account.Id
@@ -422,12 +440,17 @@ function Update-CloudAccount([hashtable]$Account) {
         throw "Account with Id '$targetId' does not exist."
     }
 
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+
     $cleanLetter = if ($Account.ContainsKey('DriveLetter') -and $Account.DriveLetter) {
         [string]$Account.DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     } else {
         $existing.DriveLetter
     }
-    Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter -ExcludeAccountId $targetId | Out-Null
+    if (-not ($onLinux -and [string]::IsNullOrWhiteSpace($cleanLetter))) {
+        Test-CloudAccountDriveLetterAvailable -DriveLetter $cleanLetter -ExcludeAccountId $targetId | Out-Null
+    }
 
     # Merge properties while preserving account Id, ProviderId, and Created
     $merged = [ordered]@{
