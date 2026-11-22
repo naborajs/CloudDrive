@@ -1,28 +1,31 @@
 {
-  "taskId": "TASK-022",
-  "goal": "Fix Linux PowerShell 7.7 / Ubuntu 26.04 aarch64 runtime bugs: symlink dereferencing, Add-Type WPF guard, and IsLinux read-only variable collision",
+  "taskId": "TASK-023",
+  "goal": "Build Windows-parity Linux Web UI Dashboard and Native Chromium CDP Automated Cookie Interceptor for Direct TeraBox Sign-In",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Resolve symlink realpath in scripts/nsclouddrive so /usr/local/bin/nsclouddrive correctly locates src/cli/nsclouddrive.ps1.",
-    "2. Guard PresentationCore and System.Web.Extensions Add-Type calls in src/services/CloudTransferManager.ps1 on Linux where missing assemblies cause terminating errors.",
-    "3. Rename local $isLinux variables to $onLinux across ConnectionState.ps1, ProviderContract.ps1, SettingsManager.ps1, and VirtualDriveManager.ps1 to eliminate collision with PowerShell Core 7.4+ read-only $IsLinux automatic constant.",
-    "4. Verify all automated test suites pass with exit code 0."
+    "1. Develop full Windows-parity Web UI dashboard matching the PureBlack desktop layout (Disks, Transfers, Settings, Analytics) on http://127.0.0.1:8899.",
+    "2. Implement direct TeraBox browser sign-in and automated cookie capture using Chrome DevTools Protocol (CDP) over pure-Python RFC 6455 WebSockets without external dependencies.",
+    "3. Add 'ui' CLI action and '--browser' sign-in option to src/cli/nsclouddrive.ps1.",
+    "4. Add scripts/systemd/nsclouddrive-ui.service and update scripts/install-linux.sh.",
+    "5. Verify all automated tests pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
     "orchestra-coder-a",
+    "orchestra-coder-b",
     "orchestra-tester",
     "orchestra-reviewer"
   ],
   "status": "completed",
   "filesChanged": [
-    "scripts/nsclouddrive",
-    "src/services/CloudTransferManager.ps1",
-    "src/models/ConnectionState.ps1",
-    "src/providers/ProviderContract.ps1",
-    "src/services/SettingsManager.ps1",
-    "src/services/VirtualDriveManager.ps1",
+    "src/web/app.py",
+    "src/web/cdp_interceptor.py",
+    "src/web/index.html",
+    "src/cli/nsclouddrive.ps1",
+    "scripts/systemd/nsclouddrive-ui.service",
+    "scripts/install-linux.sh",
+    "tests/Test-WebUiAndBrowserLogin.ps1",
     "task-ledger.json",
     "docs/engineering/INCIDENTS_AND_FIXES.md",
     ".agents/architecture/ISSUE_TRACKER.md"
@@ -30,66 +33,41 @@
   "decisions": [
     {
       "date": "2026-11-22",
-      "decision": "Use readlink -f in scripts/nsclouddrive to resolve symlink target directory before computing REPO_ROOT.",
-      "rationale": "Prevents SCRIPT_DIR from resolving to /usr/local/bin when installed globally."
+      "decision": "Use standard library Python ThreadingHTTPServer and RFC 6455 WebSocket client.",
+      "rationale": "Eliminates third-party pip dependencies on the Linux VPS while providing fast, reliable CDP communication."
     },
     {
       "date": "2026-11-22",
-      "decision": "Wrap Windows-only assembly loads (PresentationCore, System.Web.Extensions) in $onWindows check.",
-      "rationale": "Add-Type for non-existent assemblies in pwsh on Linux produces an uncatchable terminating error under $ErrorActionPreference='Stop'."
+      "decision": "Launch Chromium with --app=https://www.terabox.com/ and --remote-debugging-port=9224 on DISPLAY=:1.",
+      "rationale": "Displays an application-mode login window identical to Windows WebView2, allowing users to sign in directly while CDP intercepts cookies in the background."
     },
     {
       "date": "2026-11-22",
-      "decision": "Rename local $isLinux variables to $onLinux across all modules.",
-      "rationale": "PowerShell variables are case-insensitive and $IsLinux is a built-in read-only automatic variable in PowerShell Core 7.4+."
+      "decision": "Replicate Windows PureBlack theme and UI hierarchy in single-bundle responsive HTML/CSS/JS.",
+      "rationale": "Provides instant load times, zero missing assets, and 1:1 visual parity with the Windows WPF desktop interface."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "date": "2026-11-21",
+      "date": "2026-11-22",
       "status": "approved",
-      "notes": "Audited strict mode safety, POSIX ACL compatibility, non-blocking UI dispatcher, and granular 1:1 commit compliance. All tests passed with exit code 0."
+      "notes": "Verified RFC 6455 framing, CDP token safety, strict mode compliance, absence of plaintext credentials in logs, and responsive layout. All 22 Web UI tests and 71 E2E tests passed cleanly."
     }
   ],
   "testResults": [
     {
+      "suite": "Test-WebUiAndBrowserLogin.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
+      "suite": "Test-LinuxE2EOpaqueBox.ps1",
+      "status": "passed",
+      "exitCode": 0
+    },
+    {
       "suite": "Test-LinuxCrossPlatformSupport.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-PostRestartDropDeduplication.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-TransferRecoveryAndProgression.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-SettingsManager.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-VirtualDriveManager.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-ProviderContracts.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-ConnectionState.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-DesktopUIRegression.ps1",
       "status": "passed",
       "exitCode": 0
     }
