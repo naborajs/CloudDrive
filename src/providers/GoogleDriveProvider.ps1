@@ -2,9 +2,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\models\ConnectionState.ps1')
+. (Join-Path $PSScriptRoot 'ProviderContract.ps1')
 
 function Get-GoogleCredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-GoogleCredentialFilePath([string]$AccountId = '') {
@@ -23,42 +24,12 @@ $script:GoogleDriveApiEndpoint = 'https://www.googleapis.com/drive/v3'
 $script:GoogleDefaultScope = 'https://www.googleapis.com/auth/drive.readonly'
 
 function Set-StrictCredentialAcl([string]$Path) {
+    # SetAccessRuleProtection($true, $false) enforced cross-platform via Set-CloudCredentialAcl
     try {
-        $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
-        $acl = if ($isDir) {
-            [System.IO.Directory]::GetAccessControl($Path)
-        } else {
-            [System.IO.File]::GetAccessControl($Path)
+        if (-not (Test-Path -LiteralPath $Path)) {
+            throw [System.IO.FileNotFoundException]::new("Cannot find path '$Path' because it does not exist.")
         }
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($existingRule in @($acl.Access)) {
-            [void]$acl.RemoveAccessRuleSpecific($existingRule)
-        }
-        foreach ($sid in @($userSid, $systemSid)) {
-            $rule = if ($isDir) {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            } else {
-                [System.Security.AccessControl.FileSystemAccessRule]::new(
-                    $sid,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-            }
-            [void]$acl.SetAccessRule($rule)
-        }
-        if ($isDir) {
-            [System.IO.Directory]::SetAccessControl($Path, $acl)
-        } else {
-            [System.IO.File]::SetAccessControl($Path, $acl)
-        }
+        Set-CloudCredentialAcl -Path $Path
     } catch {
         throw "Unable to restrict permissions on the Google credential path '$Path': $($_.Exception.Message)"
     }
@@ -218,12 +189,12 @@ function Sync-GoogleDriveTokensFromRcloneConfig(
     if ($env:RCLONE_CONFIG -and -not [string]::IsNullOrWhiteSpace($env:RCLONE_CONFIG)) {
         $candidates.Add($env:RCLONE_CONFIG)
     }
-    $isolatedConf = Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config') 'account-mount-isolated.conf'
-    if (Test-Path -LiteralPath $isolatedConf -PathType Leaf) {
+    $isolatedConf = if ($env:LOCALAPPDATA) { Join-Path (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config') 'account-mount-isolated.conf' } elseif (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) { Join-Path (Get-NSCloudDriveConfigRoot) 'account-mount-isolated.conf' } else { $null }
+    if ($isolatedConf -and (Test-Path -LiteralPath $isolatedConf -PathType Leaf)) {
         $candidates.Add($isolatedConf)
     }
-    $globalConf = Join-Path $env:APPDATA 'rclone\rclone.conf'
-    if (Test-Path -LiteralPath $globalConf -PathType Leaf) {
+    $globalConf = if ($env:APPDATA) { Join-Path $env:APPDATA 'rclone\rclone.conf' } else { $null }
+    if ($globalConf -and (Test-Path -LiteralPath $globalConf -PathType Leaf)) {
         $candidates.Add($globalConf)
     }
 
@@ -322,7 +293,9 @@ function Sync-GoogleDriveTokensFromRcloneConfig(
 
 function Remove-GoogleDriveSession([string]$AccountId = '') {
     $tokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
-    $tokenToRevoke = if ($tokens -and $tokens.refresh_token) { $tokens.refresh_token } elseif ($tokens -and $tokens.access_token) { $tokens.access_token } else { $null }
+    $refreshToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'refresh_token' '') } else { '' }
+    $accessToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'access_token' '') } else { '' }
+    $tokenToRevoke = if (-not [string]::IsNullOrWhiteSpace($refreshToken)) { $refreshToken } elseif (-not [string]::IsNullOrWhiteSpace($accessToken)) { $accessToken } else { $null }
     if ($tokenToRevoke) {
         try {
             $body = @{ token = $tokenToRevoke }
@@ -338,7 +311,7 @@ function Remove-GoogleDriveSession([string]$AccountId = '') {
 }
 
 function Get-GoogleOAuthConfig {
-    $userConfigDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    $userConfigDirectory = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config' } elseif (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) { Get-NSCloudDriveConfigRoot } else { $null }
     $appConfigDirectory = Join-Path $PSScriptRoot '..\config'
 
     $clientId = $env:GOOGLE_CLIENT_ID
@@ -363,14 +336,15 @@ function Get-GoogleOAuthConfig {
         }
 
         # 2. Check user LocalAppData configuration
-        $userCandidates = @(
-            (Join-Path $userConfigDirectory 'google-oauth.json'),
-            (Join-Path $userConfigDirectory 'client_secret.json'),
-            (Join-Path $userConfigDirectory 'credentials.json')
-        )
-        if (Test-Path -LiteralPath $userConfigDirectory -PathType Container) {
-            $userGlob = Get-ChildItem -Path $userConfigDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
-            if ($userGlob) { $userCandidates += ($userGlob | Select-Object -ExpandProperty FullName) }
+        $userCandidates = @()
+        if ($userConfigDirectory) {
+            $userCandidates += (Join-Path $userConfigDirectory 'google-oauth.json')
+            $userCandidates += (Join-Path $userConfigDirectory 'client_secret.json')
+            $userCandidates += (Join-Path $userConfigDirectory 'credentials.json')
+            if (Test-Path -LiteralPath $userConfigDirectory -PathType Container) {
+                $userGlob = Get-ChildItem -Path $userConfigDirectory -Filter 'client_secret_*.json' -File -ErrorAction SilentlyContinue
+                if ($userGlob) { $userCandidates += ($userGlob | Select-Object -ExpandProperty FullName) }
+            }
         }
 
         # 3. Check user Downloads and Desktop directories for downloaded Google Cloud client files
@@ -447,7 +421,7 @@ function Import-GoogleOAuthConfigFile([string]$SourceFilePath) {
     if (-not (Test-Path -LiteralPath $SourceFilePath -PathType Leaf)) {
         throw "Source configuration file does not exist: $SourceFilePath"
     }
-    $userConfigDirectory = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config'
+    $userConfigDirectory = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'NSCloudDrive\config' } elseif (Get-Command 'Get-NSCloudDriveConfigRoot' -ErrorAction SilentlyContinue) { Get-NSCloudDriveConfigRoot } else { Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.config\nsclouddrive' }
     if (-not (Test-Path -LiteralPath $userConfigDirectory)) {
         New-Item -ItemType Directory -Path $userConfigDirectory -Force | Out-Null
     }
@@ -633,13 +607,14 @@ function Exchange-GoogleAuthCode(
 
     try {
         $tokenResponse = Invoke-RestMethod -Uri $script:GoogleTokenEndpoint -Method Post -Body $body -TimeoutSec 15 -ErrorAction Stop
-        if ($tokenResponse -and $tokenResponse.access_token) {
+        $respAcc = [string](Get-CloudProviderFieldValue $tokenResponse 'access_token' '')
+        if ($tokenResponse -and (-not [string]::IsNullOrWhiteSpace($respAcc))) {
             $tokenData = [ordered]@{
-                access_token = $tokenResponse.access_token
-                refresh_token = $tokenResponse.refresh_token
-                token_type = $tokenResponse.token_type
-                expires_in = $tokenResponse.expires_in
-                scope = $tokenResponse.scope
+                access_token = $respAcc
+                refresh_token = [string](Get-CloudProviderFieldValue $tokenResponse 'refresh_token' '')
+                token_type = [string](Get-CloudProviderFieldValue $tokenResponse 'token_type' 'Bearer')
+                expires_in = Get-CloudProviderFieldValue $tokenResponse 'expires_in' 3600
+                scope = [string](Get-CloudProviderFieldValue $tokenResponse 'scope' '')
                 obtained_at = [DateTime]::UtcNow.ToString('o')
             }
             Save-GoogleDriveTokens -TokenData $tokenData -AccountId $AccountId
@@ -668,9 +643,9 @@ function Find-GoogleRcloneBinary {
         $found = Find-RcloneBinary
         if ($found) { return $found }
     }
-    $localTool = Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe'
-    if (Test-Path -LiteralPath $localTool) { return $localTool }
-    $onPath = Get-Command 'rclone.exe' -ErrorAction SilentlyContinue
+    $localTool = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe' } else { $null }
+    if ($localTool -and (Test-Path -LiteralPath $localTool)) { return $localTool }
+    $onPath = Get-Command 'rclone' -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
     return $null
 }
@@ -820,14 +795,21 @@ function Refresh-GoogleAccessToken([string]$ClientId, [string]$ClientSecret, [st
 
     try {
         $response = Invoke-RestMethod -Uri $script:GoogleTokenEndpoint -Method Post -Body $body -TimeoutSec 15 -ErrorAction Stop
-        if ($response -and $response.access_token) {
+        $respAccessToken = [string](Get-CloudProviderFieldValue $response 'access_token' '')
+        if ($response -and (-not [string]::IsNullOrWhiteSpace($respAccessToken))) {
             $currentTokens = Get-GoogleDriveStoredTokens -AccountId $AccountId
+            $respRefreshToken = [string](Get-CloudProviderFieldValue $response 'refresh_token' '')
+            $respTokenType = [string](Get-CloudProviderFieldValue $response 'token_type' 'Bearer')
+            $respExpiresIn = Get-CloudProviderFieldValue $response 'expires_in' 3600
+            $respScope = [string](Get-CloudProviderFieldValue $response 'scope' '')
+            $currScope = if ($currentTokens) { [string](Get-CloudProviderFieldValue $currentTokens 'scope' '') } else { '' }
+
             $tokenData = [ordered]@{
-                access_token = $response.access_token
-                refresh_token = $(if ($response.refresh_token) { $response.refresh_token } else { $RefreshToken })
-                token_type = $response.token_type
-                expires_in = $response.expires_in
-                scope = $(if ($response.scope) { $response.scope } else { $currentTokens.scope })
+                access_token = $respAccessToken
+                refresh_token = $(if (-not [string]::IsNullOrWhiteSpace($respRefreshToken)) { $respRefreshToken } else { $RefreshToken })
+                token_type = if (-not [string]::IsNullOrWhiteSpace($respTokenType)) { $respTokenType } else { 'Bearer' }
+                expires_in = $respExpiresIn
+                scope = $(if (-not [string]::IsNullOrWhiteSpace($respScope)) { $respScope } else { $currScope })
                 obtained_at = [DateTime]::UtcNow.ToString('o')
             }
             Save-GoogleDriveTokens -TokenData $tokenData -AccountId $AccountId
@@ -933,7 +915,9 @@ function Invoke-GoogleDriveApiWithRetry(
     [int]$MaxRateLimitRetries = 3
 ) {
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
-    if (-not $tokens -or -not $tokens.access_token) {
+    $accToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'access_token' '') } else { '' }
+    $refToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'refresh_token' '') } else { '' }
+    if (-not $tokens -or [string]::IsNullOrWhiteSpace($accToken)) {
         throw 'No Google Drive tokens available.'
     }
 
@@ -942,21 +926,24 @@ function Invoke-GoogleDriveApiWithRetry(
 
     while ($true) {
         try {
-            return (& $ApiAction $tokens.access_token)
+            return (& $ApiAction $accToken)
         } catch {
             $errDetails = Get-GoogleApiErrorDetails $_
             $sanitized = Format-SanitizedDiagnosticMessage $_.Exception.Message
-            $isAuthError = ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errDetails.Code -eq 401)
-            $isRateLimit = ($errDetails.Reason -match 'rateLimitExceeded|userRateLimitExceeded' -or $sanitized -match 'rateLimitExceeded' -or $sanitized -match '429')
+            $errReason = [string](Get-CloudProviderFieldValue $errDetails 'Reason' '')
+            $errCode = Get-CloudProviderFieldValue $errDetails 'Code' $null
+            $isAuthError = ($sanitized -match '401' -or $sanitized -match 'Invalid Credentials' -or $errCode -eq 401)
+            $isRateLimit = ($errReason -match 'rateLimitExceeded|userRateLimitExceeded' -or $sanitized -match 'rateLimitExceeded' -or $sanitized -match '429')
 
-            if ($isAuthError -and (-not $TokensOverride) -and $tokens.refresh_token) {
+            if ($isAuthError -and (-not $TokensOverride) -and (-not [string]::IsNullOrWhiteSpace($refToken))) {
                 # Attempt automatic token refresh
                 $oauthConfig = Get-GoogleOAuthConfig
                 if ($oauthConfig -and $oauthConfig.ClientId) {
-                    $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $tokens.refresh_token -AccountId $AccountId
-                    if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
+                    $refreshResult = Refresh-GoogleAccessToken -ClientId $oauthConfig.ClientId -ClientSecret $oauthConfig.ClientSecret -RefreshToken $refToken -AccountId $AccountId
+                    $refreshedAcc = if ($refreshResult -and $refreshResult.Tokens) { [string](Get-CloudProviderFieldValue $refreshResult.Tokens 'access_token' '') } else { '' }
+                    if ($refreshResult.Success -and (-not [string]::IsNullOrWhiteSpace($refreshedAcc))) {
                         # Retry once with newly refreshed access token
-                        return (& $ApiAction $refreshResult.Tokens.access_token)
+                        return (& $ApiAction $refreshedAcc)
                     }
                 }
             }
@@ -1037,7 +1024,8 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     }
 
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
-    if (-not $tokens -or -not $tokens.access_token) {
+    $accessToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'access_token' '') } else { '' }
+    if (-not $tokens -or [string]::IsNullOrWhiteSpace($accessToken)) {
         $res = [ordered]@{
             IsValid = $false
             State = 'Disconnected'
@@ -1066,10 +1054,12 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
 
     # Fast-path: check if access token is expired based on obtained_at and expires_in
     $isTokenExpired = $false
-    if ($tokens.obtained_at -and $tokens.expires_in) {
+    $obtainedAtVal = Get-CloudProviderFieldValue $tokens 'obtained_at' $null
+    $expiresInVal = Get-CloudProviderFieldValue $tokens 'expires_in' $null
+    if ($obtainedAtVal -and $expiresInVal) {
         try {
-            $obtained = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
-            $expSec = [double]$tokens.expires_in
+            $obtained = [DateTime]::Parse([string]$obtainedAtVal).ToUniversalTime()
+            $expSec = [double]$expiresInVal
             if (([DateTime]::UtcNow - $obtained).TotalSeconds -ge ($expSec - 60)) {
                 $isTokenExpired = $true
             }
@@ -1145,7 +1135,8 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
     if (-not $userDisplayName -and -not $userEmail) {
         # Check if rclone can validate the session and refresh if expired on shared rclone credentials
         $rclone = Find-GoogleRcloneBinary
-        if ($rclone -and $tokens.refresh_token) {
+        $refreshToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'refresh_token' '') } else { '' }
+        if ($rclone -and (-not [string]::IsNullOrWhiteSpace($refreshToken))) {
             try {
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $safeRemote = [regex]::Replace($remoteName, '[^a-zA-Z0-9_\-]', '_')
@@ -1192,7 +1183,7 @@ function Test-GoogleDriveBackendSession([hashtable]$TokensOverride = $null, [str
         }
 
         # If we have a refresh token and rclone binary, session is valid via rclone token auto-renewal
-        if ($tokens.refresh_token -and $rclone) {
+        if ((-not [string]::IsNullOrWhiteSpace($refreshToken)) -and $rclone) {
             $acc = if (-not [string]::IsNullOrEmpty($AccountId) -and (Get-Command 'Get-CloudAccount' -ErrorAction SilentlyContinue)) {
                 Get-CloudAccount -AccountId $AccountId
             } else { $null }
@@ -1334,7 +1325,8 @@ function Get-GoogleIdentityFailureReason($Verify) {
 
 function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride = $null, [string]$AccountId = '') {
     $tokens = if ($TokensOverride) { $TokensOverride } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
-    if (-not $tokens -or -not $tokens.access_token) {
+    $accessToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'access_token' '') } else { '' }
+    if (-not $tokens -or [string]::IsNullOrWhiteSpace($accessToken)) {
         return [ordered]@{
             Success = $false
             ItemCount = 0
@@ -1377,7 +1369,8 @@ function Get-GoogleDriveFileList([int]$PageSize = 25, [hashtable]$TokensOverride
     } catch {
         # Fallback to rclone lsjson if direct REST API is expired on shared client credentials
         $rclone = Find-GoogleRcloneBinary
-        if ($rclone -and $tokens.refresh_token) {
+        $refreshToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'refresh_token' '') } else { '' }
+        if ($rclone -and (-not [string]::IsNullOrWhiteSpace($refreshToken))) {
             try {
                 $remoteName = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } else { 'gdrive' }
                 $envVars = Get-GoogleDriveRcloneEnvironment -AccountId $AccountId -RemoteName $remoteName
@@ -1424,29 +1417,33 @@ function Get-GoogleDriveRcloneEnvironment(
     $synced = Sync-GoogleDriveTokensFromRcloneConfig -AccountId $AccountId -RemoteName $RemoteName
     $tokens = if ($synced) { $synced } else { Get-GoogleDriveStoredTokens -AccountId $AccountId }
     $oauthConfig = Get-GoogleOAuthConfig
-    if (-not $tokens -or -not $tokens.access_token) {
+    $accessToken = if ($tokens) { [string](Get-CloudProviderFieldValue $tokens 'access_token' '') } else { '' }
+    if (-not $tokens -or [string]::IsNullOrWhiteSpace($accessToken)) {
         throw 'No Google Drive tokens available to configure rclone environment.'
     }
 
     # --- Token validity evaluation ---
-    $hasObtainedAt = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
-    $hasExpiresIn  = ($tokens.PSObject.Properties['expires_in']  -and $tokens.expires_in)
-    $hasRefresh    = ($tokens.PSObject.Properties['refresh_token'] -and -not [string]::IsNullOrEmpty($tokens.refresh_token))
+    $obtainedAtVal   = Get-CloudProviderFieldValue $tokens 'obtained_at' $null
+    $expiresInVal    = Get-CloudProviderFieldValue $tokens 'expires_in' $null
+    $refreshTokenVal = [string](Get-CloudProviderFieldValue $tokens 'refresh_token' '')
+    $expiryVal       = [string](Get-CloudProviderFieldValue $tokens 'expiry' '')
+    $tokenTypeVal    = [string](Get-CloudProviderFieldValue $tokens 'token_type' 'Bearer')
+    if ([string]::IsNullOrWhiteSpace($tokenTypeVal)) { $tokenTypeVal = 'Bearer' }
 
     $tokenIsExpiredOrSoon = $false
-    if ($tokens.PSObject.Properties['expiry'] -and -not [string]::IsNullOrWhiteSpace($tokens.expiry)) {
+    if (-not [string]::IsNullOrWhiteSpace($expiryVal)) {
         try {
-            $expUtc = [DateTime]::Parse($tokens.expiry).ToUniversalTime()
+            $expUtc = [DateTime]::Parse($expiryVal).ToUniversalTime()
             if ([DateTime]::UtcNow.AddSeconds(60) -ge $expUtc) {
                 $tokenIsExpiredOrSoon = $true
             }
         } catch {
             $tokenIsExpiredOrSoon = $true
         }
-    } elseif ($hasObtainedAt -and $hasExpiresIn) {
+    } elseif ($obtainedAtVal -and $expiresInVal) {
         try {
-            $obtainedCheck = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
-            $expSecCheck   = [int]$tokens.expires_in
+            $obtainedCheck = [DateTime]::Parse([string]$obtainedAtVal).ToUniversalTime()
+            $expSecCheck   = [int]$expiresInVal
             if (([DateTime]::UtcNow - $obtainedCheck).TotalSeconds -ge ($expSecCheck - 60)) {
                 $tokenIsExpiredOrSoon = $true
             }
@@ -1457,31 +1454,37 @@ function Get-GoogleDriveRcloneEnvironment(
         $tokenIsExpiredOrSoon = $true
     }
 
-    if ($tokenIsExpiredOrSoon -and $hasRefresh) {
-        if ($oauthConfig.ClientId) {
+    if ($tokenIsExpiredOrSoon -and (-not [string]::IsNullOrWhiteSpace($refreshTokenVal))) {
+        if ($oauthConfig -and $oauthConfig.ClientId) {
             try {
                 $refreshResult = Refresh-GoogleAccessToken `
                     -ClientId     $oauthConfig.ClientId `
                     -ClientSecret $oauthConfig.ClientSecret `
-                    -RefreshToken $tokens.refresh_token `
+                    -RefreshToken $refreshTokenVal `
                     -AccountId    $AccountId
-                if ($refreshResult.Success -and $refreshResult.Tokens -and $refreshResult.Tokens.access_token) {
+                $newRefreshedAcc = if ($refreshResult -and $refreshResult.Tokens) { [string](Get-CloudProviderFieldValue $refreshResult.Tokens 'access_token' '') } else { '' }
+                if ($refreshResult.Success -and (-not [string]::IsNullOrWhiteSpace($newRefreshedAcc))) {
                     $tokens = $refreshResult.Tokens
                     $tokenIsExpiredOrSoon = $false
+                    $accessToken = $newRefreshedAcc
+                    $refreshTokenVal = [string](Get-CloudProviderFieldValue $tokens 'refresh_token' $refreshTokenVal)
+                    $expiryVal = [string](Get-CloudProviderFieldValue $tokens 'expiry' '')
+                    $obtainedAtVal = Get-CloudProviderFieldValue $tokens 'obtained_at' $null
+                    $expiresInVal = Get-CloudProviderFieldValue $tokens 'expires_in' $null
                 }
             } catch { }
         } else {
             # Shared rclone client ID: perform single bounded pre-refresh using rclone about
             $rclone = Find-GoogleRcloneBinary
-            if ($rclone -and $tokens.refresh_token -and $tokens.refresh_token.StartsWith('1//')) {
+            if ($rclone -and $refreshTokenVal.StartsWith('1//')) {
                 try {
                     $preRefreshRemote = if (-not [string]::IsNullOrEmpty($RemoteName)) { $RemoteName } else { 'gdrive' }
                     $safeRemote = [regex]::Replace($preRefreshRemote, '[^a-zA-Z0-9_\-]', '_')
                     $tempUpper = $safeRemote.ToUpperInvariant()
                     $tempTokenObj = [ordered]@{
-                        access_token  = $tokens.access_token
-                        token_type    = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
-                        refresh_token = $tokens.refresh_token
+                        access_token  = $accessToken
+                        token_type    = $tokenTypeVal
+                        refresh_token = $refreshTokenVal
                         expiry        = '2000-01-01T00:00:00Z'
                     }
                     $tempEnv = @{
@@ -1494,6 +1497,11 @@ function Get-GoogleDriveRcloneEnvironment(
                     if ($refreshedSync) {
                         $tokens = $refreshedSync
                         $tokenIsExpiredOrSoon = $false
+                        $accessToken = [string](Get-CloudProviderFieldValue $tokens 'access_token' $accessToken)
+                        $refreshTokenVal = [string](Get-CloudProviderFieldValue $tokens 'refresh_token' $refreshTokenVal)
+                        $expiryVal = [string](Get-CloudProviderFieldValue $tokens 'expiry' '')
+                        $obtainedAtVal = Get-CloudProviderFieldValue $tokens 'obtained_at' $null
+                        $expiresInVal = Get-CloudProviderFieldValue $tokens 'expires_in' $null
                     }
                 } catch { }
             }
@@ -1503,21 +1511,19 @@ function Get-GoogleDriveRcloneEnvironment(
     # --- Build accurate expiry timestamp ---
     # Use real future expiry timestamp so rclone does not force an on-mount refresh
     $expiryStr = '2000-01-01T00:00:00Z'
-    if ($tokens.PSObject.Properties['expiry'] -and -not [string]::IsNullOrWhiteSpace($tokens.expiry)) {
+    if (-not [string]::IsNullOrWhiteSpace($expiryVal)) {
         try {
-            $parsedExp = [DateTime]::Parse($tokens.expiry).ToUniversalTime()
+            $parsedExp = [DateTime]::Parse($expiryVal).ToUniversalTime()
             if ($parsedExp -gt [DateTime]::UtcNow) {
                 $expiryStr = $parsedExp.ToString('o')
             }
         } catch { }
     }
     if ($expiryStr -eq '2000-01-01T00:00:00Z') {
-        $hasObtainedAt2 = ($tokens.PSObject.Properties['obtained_at'] -and $tokens.obtained_at)
-        $hasExpiresIn2  = ($tokens.PSObject.Properties['expires_in']  -and $tokens.expires_in)
-        if ($hasObtainedAt2 -and $hasExpiresIn2) {
+        if ($obtainedAtVal -and $expiresInVal) {
             try {
-                $obtainedUtc = [DateTime]::Parse($tokens.obtained_at).ToUniversalTime()
-                $expSec      = [int]$tokens.expires_in
+                $obtainedUtc = [DateTime]::Parse([string]$obtainedAtVal).ToUniversalTime()
+                $expSec      = [int]$expiresInVal
                 $expUtc      = $obtainedUtc.AddSeconds($expSec)
                 if ($expUtc -gt [DateTime]::UtcNow) {
                     $expiryStr = $expUtc.ToString('o')
@@ -1527,9 +1533,9 @@ function Get-GoogleDriveRcloneEnvironment(
     }
 
     $tokenObj = [ordered]@{
-        access_token  = $tokens.access_token
-        token_type    = if ($tokens.PSObject.Properties['token_type'] -and $tokens.token_type) { $tokens.token_type } else { 'Bearer' }
-        refresh_token = if ($tokens.PSObject.Properties['refresh_token']) { $tokens.refresh_token } else { $null }
+        access_token  = $accessToken
+        token_type    = $tokenTypeVal
+        refresh_token = if (-not [string]::IsNullOrWhiteSpace($refreshTokenVal)) { $refreshTokenVal } else { $null }
         expiry        = $expiryStr
     }
     $tokenJson = $tokenObj | ConvertTo-Json -Compress
