@@ -33,6 +33,7 @@ param(
     [string]$Bucket = '',
     [object]$AutoMount = $true,
     [switch]$ReadOnly,
+    [switch]$Browser,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs = @()
@@ -87,9 +88,12 @@ function Show-CliHelp {
     Write-Host "  queue                       Display current durable transfer queue and progress" -ForegroundColor Gray
     Write-Host "  clear-queue                 Remove completed and settled jobs from transfer queue" -ForegroundColor Gray
     Write-Host "  recover                     Run silent startup recovery and restart reconciliation" -ForegroundColor Gray
+    Write-Host "  ui [start|stop|status]      Launch the Web UI dashboard on http://127.0.0.1:8899" -ForegroundColor Gray
     Write-Host "  daemon                      Run continuous background service (auto-mount & sync)" -ForegroundColor Gray
     Write-Host "  help                        Show this help message`n" -ForegroundColor Gray
     Write-Host "Examples:" -ForegroundColor White
+    Write-Host "  nsclouddrive ui" -ForegroundColor Gray
+    Write-Host "  nsclouddrive login terabox --browser" -ForegroundColor Gray
     Write-Host "  nsclouddrive login terabox --cookie `"ndus=...`" --name `"Personal TeraBox`"" -ForegroundColor Gray
     Write-Host "  nsclouddrive accounts" -ForegroundColor Gray
     Write-Host "  nsclouddrive status" -ForegroundColor Gray
@@ -230,6 +234,7 @@ function Invoke-CliLogin {
         [string]$DriveLetter = '',
         [object]$AutoMount = $true,
         [switch]$ReadOnly,
+        [switch]$Browser,
         [switch]$PassThru,
 
         [Parameter(ValueFromRemainingArguments = $true)]
@@ -243,6 +248,7 @@ function Invoke-CliLogin {
     $cleanProvider = $ProviderId
     $cleanAutoMount = if ($null -ne $AutoMount) { [bool]$AutoMount } else { $true }
     $cleanReadOnly = [bool]$ReadOnly
+    $cleanBrowser = [bool]$Browser
     $cleanCookie = $Cookie
     $cleanToken = $Token
     $cleanDisplayName = $DisplayName
@@ -315,6 +321,7 @@ function Invoke-CliLogin {
                 'no-automount' { $cleanAutoMount = $false }
                 'read-only'    { $cleanReadOnly = ($val -ne 'false' -and $val -ne '0') }
                 'readonly'     { $cleanReadOnly = ($val -ne 'false' -and $val -ne '0') }
+                'browser'      { $cleanBrowser = ($val -ne 'false' -and $val -ne '0') }
                 'passthru'     { $PassThru = ($val -ne 'false' -and $val -ne '0') }
                 'pass-thru'    { $PassThru = ($val -ne 'false' -and $val -ne '0') }
             }
@@ -360,6 +367,29 @@ function Invoke-CliLogin {
     }
     switch ($provKey) {
         'terabox' {
+            if ($cleanBrowser) {
+                Write-Host "Launching automated browser sign-in for TeraBox..." -ForegroundColor Cyan
+                $pyScript = Join-Path $script:SrcDir 'web\cdp_interceptor.py'
+                $pythonBin = if (Get-Command 'python3' -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
+                & $pythonBin -c "import cdp_interceptor, time, json; s = cdp_interceptor.login_session; s.start();
+while s.state in ('launching', 'waiting', 'detected', 'validating'):
+    time.sleep(1.5)
+st = s.get_status()
+print(json.dumps(st))
+" | ForEach-Object {
+                    try {
+                        $st = $_ | ConvertFrom-Json
+                        if ($st.state -eq 'success') {
+                            Write-Host "  [SUCCESS] $($st.message)" -ForegroundColor Green
+                        } else {
+                            Write-Host "  [STATUS] $($st.message)" -ForegroundColor Yellow
+                        }
+                    } catch {
+                        Write-Host "  $_" -ForegroundColor Gray
+                    }
+                }
+                return
+            }
             if ([string]::IsNullOrWhiteSpace($cleanCookie)) {
                 $promptSecret = Read-SafePrompt -Prompt "Enter TeraBox ndus cookie (or full cookie string)"
                 $cleanCookie = if ($promptSecret) { ([string]$promptSecret).Trim() } else { '' }
@@ -1083,6 +1113,64 @@ function Start-CliDaemon {
     }
 }
 
+function Invoke-CliUi {
+    [CmdletBinding()]
+    param(
+        [string]$SubAction = 'start',
+        [int]$Port = 8899
+    )
+
+    $uiScript = Join-Path $script:SrcDir 'web\app.py'
+    if (-not (Test-Path $uiScript)) {
+        Write-Host "Web UI script not found at $uiScript" -ForegroundColor Red
+        return
+    }
+
+    $pythonBin = if (Get-Command 'python3' -ErrorAction SilentlyContinue) { 'python3' } else { 'python' }
+
+    switch ($SubAction.ToLowerInvariant()) {
+        'stop' {
+            Write-Host "Stopping NS Cloud Drive Web UI..." -ForegroundColor Cyan
+            if ($IsLinux) {
+                $null = & fuser -k "${Port}/tcp" 2>&1
+            }
+            Write-Host "Web UI stopped." -ForegroundColor Green
+        }
+        'status' {
+            try {
+                $resp = Invoke-RestMethod -Uri "http://127.0.0.1:${Port}/api/state" -TimeoutSec 3 -ErrorAction Stop
+                Write-Host "NS Cloud Drive Web UI is running on http://127.0.0.1:${Port}" -ForegroundColor Green
+                Write-Host "  Service: $($resp.service)" -ForegroundColor White
+                Write-Host "  Accounts: $(Get-SafeCount $resp.accounts)" -ForegroundColor White
+            } catch {
+                Write-Host "NS Cloud Drive Web UI is not running on port $Port." -ForegroundColor DarkGray
+            }
+        }
+        default {
+            Write-Host "Starting NS Cloud Drive Web UI on http://127.0.0.1:${Port}..." -ForegroundColor Green
+            $envCopy = [System.Collections.IDictionary]([System.Environment]::GetEnvironmentVariables())
+            if ($IsLinux -and -not $envCopy.Contains('DISPLAY')) {
+                $envCopy['DISPLAY'] = ':1'
+            }
+            $procStart = [System.Diagnostics.ProcessStartInfo]::new()
+            $procStart.FileName = $pythonBin
+            $procStart.Arguments = "`"$uiScript`" --port $Port"
+            $procStart.UseShellExecute = $false
+            $procStart.CreateNoWindow = $true
+            foreach ($k in $envCopy.Keys) {
+                $procStart.EnvironmentVariables[[string]$k] = [string]$envCopy[$k]
+            }
+            $proc = [System.Diagnostics.Process]::Start($procStart)
+            Start-Sleep -Milliseconds 1000
+            Write-Host "NS Cloud Drive Web UI launched (PID $($proc.Id)) on http://127.0.0.1:${Port}" -ForegroundColor Green
+
+            if ($IsLinux -and (Get-Command 'chromium' -ErrorAction SilentlyContinue) -and ($envCopy.Contains('DISPLAY') -or (Test-Path '/tmp/.X11-unix/X1'))) {
+                Start-Process -FilePath 'chromium' -ArgumentList "http://127.0.0.1:${Port}" -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 # Command Dispatcher
 if ($MyInvocation.InvocationName -eq '.' -or $Command.ToLowerInvariant() -in @('', 'import', 'none')) {
     return
@@ -1091,6 +1179,7 @@ if ($MyInvocation.InvocationName -eq '.' -or $Command.ToLowerInvariant() -in @('
 switch ($Command.ToLowerInvariant()) {
     'status'       { Show-CliStatus }
     'accounts'     { Show-CliAccounts }
+    'ui'           { Invoke-CliUi -SubAction $Target }
     'login'        {
         $loginProvider = $Target
         $allRemaining = @()
@@ -1107,7 +1196,7 @@ switch ($Command.ToLowerInvariant()) {
         Invoke-CliLogin -ProviderId $loginProvider `
             -Cookie $Cookie -Token $Token -DisplayName $DisplayName -AccountId $AccountId `
             -BaseUrl $BaseUrl -User $User -Password $Password -Endpoint $Endpoint -Bucket $Bucket `
-            -AutoMount $AutoMount -ReadOnly:$ReadOnly -RemainingArgs $allRemaining
+            -AutoMount $AutoMount -ReadOnly:$ReadOnly -Browser:$Browser -RemainingArgs $allRemaining
     }
     'mount'        { Invoke-CliMount -TargetAccount $Target }
     'unmount'      { Invoke-CliUnmount -TargetAccount $Target }
