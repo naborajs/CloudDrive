@@ -735,21 +735,31 @@ function Start-VirtualDriveMount(
     $resolvedProvider = if (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
     $mountKey = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } elseif (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
 
-    # If TeraBox is being mounted, start the local CPX WebDAV bridge and configure WebDAV rclone remote
+    # If TeraBox is being mounted, start the local CPX WebDAV bridge on Windows or configure direct rclone backend on Linux
     if ($RemoteName -eq 'terabox' -or $resolvedProvider -eq 'terabox') {
-        try {
-            $bridgeStatus = Start-TeraBoxBridge -AccountId $AccountId
-            if ($bridgeStatus.Success) {
-                $bridgeEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus.Password -Port $bridgeStatus.Port -RcloneBinary $rclonePath -RemoteName $RemoteName
-                foreach ($k in $bridgeEnv.Keys) {
-                    $EnvironmentVariables[$k] = $bridgeEnv[$k]
+        if ($onLinux) {
+            # On Linux: configure rclone remote for TeraBox directly from stored credentials (bypasses Windows CPX bridge)
+            if (Get-Command 'Get-TeraBoxRcloneEnvironment' -ErrorAction SilentlyContinue) {
+                $tbEnv = Get-TeraBoxRcloneEnvironment -AccountId $AccountId -RemoteName $RemoteName
+                foreach ($k in $tbEnv.Keys) {
+                    $EnvironmentVariables[$k] = $tbEnv[$k]
                 }
-                $remoteKey = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
-                $sessionCookieKey = "RCLONE_CONFIG_${remoteKey}_COOKIE"
-                if ($EnvironmentVariables.ContainsKey($sessionCookieKey)) { $EnvironmentVariables.Remove($sessionCookieKey) }
             }
-        } catch {
-            throw "Failed to start TeraBox WebDAV bridge: $($_.Exception.Message)"
+        } else {
+            try {
+                $bridgeStatus = Start-TeraBoxBridge -AccountId $AccountId
+                if ($bridgeStatus.Success) {
+                    $bridgeEnv = Get-TeraBoxBridgeRcloneEnvironment -BridgePassword $bridgeStatus.Password -Port $bridgeStatus.Port -RcloneBinary $rclonePath -RemoteName $RemoteName
+                    foreach ($k in $bridgeEnv.Keys) {
+                        $EnvironmentVariables[$k] = $bridgeEnv[$k]
+                    }
+                    $remoteKey = [regex]::Replace($RemoteName.ToUpperInvariant(), '[^A-Z0-9_]', '_')
+                    $sessionCookieKey = "RCLONE_CONFIG_${remoteKey}_COOKIE"
+                    if ($EnvironmentVariables.ContainsKey($sessionCookieKey)) { $EnvironmentVariables.Remove($sessionCookieKey) }
+                }
+            } catch {
+                throw "Failed to start TeraBox WebDAV bridge: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -1180,12 +1190,12 @@ function Stop-VirtualDriveMount(
         Clear-StaleDriveLetterMapping -DriveLetter $cl
     }
 
-    # If stopping TeraBox, also gracefully terminate TeraBox bridge daemon
-    if ($ProviderId -eq 'terabox' -or $AccountId -match 'terabox' -or ($targets -contains 'terabox')) {
+    $onLinux = Test-IsLinuxOperatingSystem
+
+    # If stopping TeraBox on Windows, also gracefully terminate TeraBox bridge daemon
+    if (-not $onLinux -and ($ProviderId -eq 'terabox' -or $AccountId -match 'terabox' -or ($targets -contains 'terabox'))) {
         try { Stop-TeraBoxBridge -AccountId $AccountId } catch { }
     }
-
-    $onLinux = Test-IsLinuxOperatingSystem
 
     if ($onLinux) {
         try {
