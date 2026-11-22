@@ -23,3 +23,7 @@
 /scratch/
 *.old
 *.tmp
+
+# Python cache files
+__pycache__/
+*.pyc
