@@ -275,6 +275,10 @@ function Get-NSCloudDriveConfigRoot {
     return (Join-Path (Get-NSCloudDriveDataRoot) 'config')
 }
 
+function Get-CloudCredentialDirectory {
+    return (Join-Path (Get-NSCloudDriveDataRoot) 'credentials')
+}
+
 # ==============================================================================
 # SHARED APPLICATION LOG (bounded JSONL store; safe to call from any runspace)
 # ==============================================================================
@@ -386,6 +390,12 @@ function Get-ApplicationLogSettingEnabled {
             return $script:ApplicationLogCheckState.Setting
         }
         $settingsPath = Join-Path (Get-NSCloudDriveConfigRoot) 'settings.json'
+        if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+            $legacyPath = Join-Path (Get-NSCloudDriveDataRoot) 'settings.json'
+            if (Test-Path -LiteralPath $legacyPath -PathType Leaf) {
+                $settingsPath = $legacyPath
+            }
+        }
         $enabled = $true
         if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
             $raw = [System.IO.File]::ReadAllText($settingsPath)
