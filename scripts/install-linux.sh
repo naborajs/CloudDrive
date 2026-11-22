@@ -60,11 +60,14 @@ echo "[3/4] Installing /usr/local/bin/nsclouddrive..."
 $SUDO chmod +x "$SCRIPT_DIR/nsclouddrive"
 $SUDO ln -sf "$SCRIPT_DIR/nsclouddrive" /usr/local/bin/nsclouddrive
 
-# 4. Configure Systemd Service (Optional)
-echo "[4/4] Configuring systemd user service..."
+# 4. Configure Systemd Services (Daemon & Web UI)
+echo "[4/4] Configuring systemd user services..."
 USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
 mkdir -p "$USER_SYSTEMD_DIR"
 cp "$SCRIPT_DIR/systemd/nsclouddrive.service" "$USER_SYSTEMD_DIR/nsclouddrive.service"
+if [ -f "$SCRIPT_DIR/systemd/nsclouddrive-ui.service" ]; then
+    cp "$SCRIPT_DIR/systemd/nsclouddrive-ui.service" "$USER_SYSTEMD_DIR/nsclouddrive-ui.service"
+fi
 systemctl --user daemon-reload || true
 
 echo ""
@@ -72,3 +75,5 @@ echo "=== Installation Complete! ==="
 echo "Run 'nsclouddrive status' to check your setup."
 echo "To enable background auto-mount & sync daemon on boot:"
 echo "  systemctl --user enable --now nsclouddrive"
+echo "To enable Web UI dashboard & automated browser sign-in:"
+echo "  systemctl --user enable --now nsclouddrive-ui"
