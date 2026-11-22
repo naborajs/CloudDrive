@@ -1,4 +1,28 @@
 function Resolve-SafeCacheDirectory([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw 'The cache directory must be an absolute local drive path.'
+    }
+
+    $linuxVar = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction SilentlyContinue
+    $onLinux = if ($null -ne $linuxVar) { [bool]$linuxVar } elseif ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $true } else { $false }
+
+    if ($onLinux) {
+        if (-not $Path.StartsWith('/') -and -not [System.IO.Path]::IsPathRooted($Path)) {
+            throw 'The cache directory must be an absolute local Unix path.'
+        }
+        $normalizedPath = $Path.Replace('\', '/').TrimEnd('/')
+        if ([string]::IsNullOrWhiteSpace($normalizedPath)) {
+            $normalizedPath = '/'
+        }
+        if ($normalizedPath -eq '/') {
+            throw 'The cache directory cannot be the root of a volume.'
+        }
+        if ($normalizedPath -match '(^|/)\.\.(/|$)') {
+            throw 'The cache path cannot contain directory traversal sequences (..).'
+        }
+        return $normalizedPath
+    }
+
     if (-not [System.IO.Path]::IsPathRooted($Path)) {
         throw 'The cache directory must be an absolute local drive path.'
     }
