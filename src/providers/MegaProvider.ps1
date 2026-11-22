@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 #>
 
 function Get-MegaCredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-MegaCredentialFilePath([string]$AccountId = '') {
@@ -53,8 +53,8 @@ function Get-MegaProviderInfo {
 function Obscure-MegaPassword([string]$PlainText, [string]$RcloneBinary = $null) {
     if ([string]::IsNullOrEmpty($PlainText)) { return '' }
     if (-not $RcloneBinary -or -not (Test-Path -LiteralPath $RcloneBinary -PathType Leaf)) {
-        $cand = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+        $cand = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+        if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
             $RcloneBinary = $cand
         } else {
             $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
@@ -248,8 +248,8 @@ function Get-MegaFileList(
     $testRemote = "mega_browse_$($AccountId -replace '[^a-zA-Z0-9_]', '_')"
     $envVars = Get-MegaRcloneEnvironment -AccountId $AccountId -RemoteName $testRemote -SessionOverride $session -RcloneBinary $RcloneBinary
 
-    $rclone = if ($RcloneBinary) { $RcloneBinary } else { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') }
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($RcloneBinary) { $RcloneBinary } elseif ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
