@@ -1,0 +1,16 @@
+[Unit]
+Description=NS Cloud Drive Web UI & Browser Automation
+After=network.target nsclouddrive.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/CloudDrive
+ExecStart=/usr/bin/python3 src/web/app.py --port 8899
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:1
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
