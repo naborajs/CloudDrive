@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 #>
 
 function Get-S3CredentialDirectory {
-    return (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\credentials')
+    return (Get-CloudCredentialDirectory)
 }
 
 function Get-S3CredentialFilePath([string]$AccountId = '') {
@@ -54,8 +54,8 @@ function Get-S3ProviderInfo {
 function Obscure-S3Secret([string]$PlainText, [string]$RcloneBinary = $null) {
     if ([string]::IsNullOrEmpty($PlainText)) { return '' }
     if (-not $RcloneBinary -or -not (Test-Path -LiteralPath $RcloneBinary -PathType Leaf)) {
-        $cand = (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe')
-        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+        $cand = if ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+        if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
             $RcloneBinary = $cand
         } else {
             $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
@@ -95,7 +95,13 @@ function Save-S3Session([string]$AccountId, [object]$SessionData) {
     $endpoint = Get-S3FieldValue $SessionData 'Endpoint' ''
     $region = Get-S3FieldValue $SessionData 'Region' 'auto'
     $accessKey = Get-S3FieldValue $SessionData 'AccessKey' ''
+    if ([string]::IsNullOrWhiteSpace([string]$accessKey)) {
+        $accessKey = Get-S3FieldValue $SessionData 'AccessKeyId' ''
+    }
     $secretKey = Get-S3FieldValue $SessionData 'SecretKey' ''
+    if ([string]::IsNullOrWhiteSpace([string]$secretKey)) {
+        $secretKey = Get-S3FieldValue $SessionData 'SecretAccessKey' ''
+    }
     $bucket = Get-S3FieldValue $SessionData 'Bucket' ''
     $provider = Get-S3FieldValue $SessionData 'Provider' 'Other'
 
@@ -273,8 +279,8 @@ function Get-S3FileList(
     $testRemote = "s3_browse_$($AccountId -replace '[^a-zA-Z0-9_]', '_')"
     $envVars = Get-S3RcloneEnvironment -AccountId $AccountId -RemoteName $testRemote -SessionOverride $session -RcloneBinary $RcloneBinary
 
-    $rclone = if ($RcloneBinary) { $RcloneBinary } else { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') }
-    if (-not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
+    $rclone = if ($RcloneBinary) { $RcloneBinary } elseif ($env:LOCALAPPDATA) { (Join-Path $env:LOCALAPPDATA 'NSCloudDrive\tools\rclone\rclone.exe') } else { $null }
+    if (-not $rclone -or -not (Test-Path -LiteralPath $rclone -PathType Leaf)) {
         $cmd = Get-Command 'rclone' -ErrorAction SilentlyContinue
         if ($cmd) { $rclone = $cmd.Source }
     }
