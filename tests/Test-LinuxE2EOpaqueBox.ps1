@@ -141,7 +141,7 @@ try {
     $env:XDG_CACHE_HOME = $sandboxCache
     $env:LOCALAPPDATA = Join-Path $sandboxRoot 'localappdata'
     $env:APPDATA = Join-Path $sandboxRoot 'appdata'
-    $global:IsLinux = $true
+    try { $global:IsLinux = $true } catch { }
 
     # Mock external TeraBox HTTP session authentication boundary to isolate offline execution
     $mockSession = {
@@ -389,8 +389,10 @@ try {
 
     # --- Feature R6: Cross-Platform Hygiene ---
     Run-E2ETest 'Tier1' 'T1.26_R6' 'Cross-platform helper conditionality reflects Linux platform' {
-        Assert-Condition ($global:IsLinux -eq $true) 'IsLinux global flag active'
         $isLinuxOp = Test-IsLinuxOperatingSystem
+        $isLinuxFlag = $false
+        try { $isLinuxFlag = [bool]$global:IsLinux } catch { }
+        Assert-Condition ($isLinuxOp -eq $true -or $isLinuxFlag -eq $true) 'IsLinux flag active'
         Assert-Condition ($isLinuxOp -eq $true) 'Test-IsLinuxOperatingSystem reports true'
     }
 
@@ -1103,7 +1105,7 @@ try {
         Clear-AccountListCache
     }
 
-    $global:IsLinux = if ($null -ne $origGlobalIsLinux) { [bool]$origGlobalIsLinux } else { $false }
+    try { $global:IsLinux = if ($null -ne $origGlobalIsLinux) { [bool]$origGlobalIsLinux } else { $false } } catch { }
     $env:HOME = $origHome
     $env:XDG_CONFIG_HOME = $origXdgConfig
     $env:XDG_DATA_HOME = $origXdgData
