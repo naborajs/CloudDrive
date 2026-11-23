@@ -17,6 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 # Import CDP interceptor
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
@@ -87,6 +88,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_html(f.read())
             else:
                 self.send_html("<h1>NS Cloud Drive UI</h1><p>index.html not found</p>", 404)
+
+        elif path.startswith("/assets/"):
+            rel_path = path.lstrip("/").replace("/", os.sep)
+            full_asset_path = os.path.join(REPO_ROOT, rel_path)
+            if os.path.isfile(full_asset_path):
+                ext = os.path.splitext(full_asset_path)[1].lower()
+                mime = "image/png" if ext == ".png" else "image/svg+xml" if ext == ".svg" else "image/x-icon" if ext == ".ico" else "application/octet-stream"
+                with open(full_asset_path, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            else:
+                self.send_json({"error": "Asset not found"}, 404)
+                return
 
         elif path == "/api/state":
             # 1. Daemon service state
