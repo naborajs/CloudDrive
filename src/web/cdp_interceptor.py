@@ -149,7 +149,11 @@ class TeraBoxBrowserLoginSession:
         self.error: Optional[str] = None
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
-        self.profile_dir = os.path.expanduser("~/.config/nsclouddrive/browser-login")
+        snap_dir = os.path.expanduser("~/snap/chromium")
+        if os.path.isdir(snap_dir):
+            self.profile_dir = os.path.expanduser("~/snap/chromium/common/nsclouddrive/browser-login")
+        else:
+            self.profile_dir = os.path.expanduser("~/.config/nsclouddrive/browser-login")
 
     def start(self) -> Tuple[bool, str]:
         if self.state in ("launching", "waiting", "detected", "validating"):

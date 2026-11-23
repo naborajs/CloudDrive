@@ -100,7 +100,11 @@ if [ -z "$CHROME_BIN" ]; then
     CHROME_BIN="$(command -v chromium || command -v google-chrome || command -v x-www-browser || true)"
 fi
 
-PROFILE_DIR="${HOME}/.config/nsclouddrive/app-profile"
+if [ -d "${HOME}/snap/chromium" ]; then
+    PROFILE_DIR="${HOME}/snap/chromium/common/nsclouddrive/app-profile"
+else
+    PROFILE_DIR="${HOME}/.config/nsclouddrive/app-profile"
+fi
 mkdir -p "$PROFILE_DIR"
 
 # 6. Launch Dedicated Application Window
