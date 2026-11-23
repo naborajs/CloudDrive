@@ -1,0 +1,26 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NS Cloud Drive
+GenericName=Multi-Cloud Storage Drive
+Comment=Mount TeraBox, Google Drive, and remote cloud storage as local drives
+Exec=/usr/local/bin/nsclouddrive-app %U
+Icon=nsclouddrive
+Terminal=false
+Categories=Network;FileTransfer;Utility;GTK;
+Keywords=cloud;drive;terabox;gdrive;storage;mount;backup;sync;
+StartupWMClass=nsclouddrive
+MimeType=x-scheme-handler/nsclouddrive;
+Actions=MountAll;UnmountAll;Status;
+
+[Desktop Action MountAll]
+Name=Mount All Cloud Drives
+Exec=/usr/local/bin/nsclouddrive mount all
+
+[Desktop Action UnmountAll]
+Name=Unmount All Cloud Drives
+Exec=/usr/local/bin/nsclouddrive unmount all
+
+[Desktop Action Status]
+Name=Show Cloud Drive Status
+Exec=/usr/local/bin/nsclouddrive status
