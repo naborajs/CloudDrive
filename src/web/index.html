@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NS Cloud Drive</title>
+  <link rel="icon" type="image/png" href="/assets/logos/clouddrive.png">
   <style>
     :root {
       --bg-window: #000000;
@@ -568,10 +569,8 @@
   <!-- Left Sidebar Navigation -->
   <aside class="sidebar">
     <div class="brand-header">
-      <div class="brand-logo">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
-        </svg>
+      <div class="brand-logo" style="background:transparent; box-shadow:none;">
+        <img src="/assets/logos/clouddrive.png" style="width:34px; height:34px; border-radius:8px;" alt="NS Cloud Drive">
       </div>
       <div>
         <div class="brand-title">NS Cloud Drive</div>
@@ -731,36 +730,28 @@
       <div class="modal-body" id="modalProviderSelection">
         <div class="provider-grid">
           <div class="provider-btn featured" onclick="selectProvider('terabox')">
-            <svg class="provider-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2">
-              <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
-            </svg>
+            <img class="provider-btn-icon" src="/assets/logos/terabox.png" alt="TeraBox">
             <div class="provider-btn-text">
               <h5>TeraBox</h5>
               <p>Direct Browser Sign-In (Auto-Capture)</p>
             </div>
           </div>
           <div class="provider-btn" onclick="selectProvider('gdrive')">
-            <svg class="provider-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#34a853" stroke-width="2">
-              <polygon points="12 2 2 19 7 19 12 10 17 19 22 19 12 2"/>
-            </svg>
+            <img class="provider-btn-icon" src="/assets/logos/googledrive.png" alt="Google Drive">
             <div class="provider-btn-text">
               <h5>Google Drive</h5>
               <p>OAuth 2.0 PKCE</p>
             </div>
           </div>
           <div class="provider-btn" onclick="selectProvider('vps')">
-            <svg class="provider-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2">
-              <rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>
-            </svg>
+            <img class="provider-btn-icon" src="/assets/logos/vps.png" alt="VPS">
             <div class="provider-btn-text">
               <h5>VPS / SFTP</h5>
               <p>Remote Linux Server</p>
             </div>
           </div>
           <div class="provider-btn" onclick="selectProvider('proton')">
-            <svg class="provider-btn-icon" viewBox="0 0 24 24" fill="none" stroke="#6d28d9" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/>
-            </svg>
+            <img class="provider-btn-icon" src="/assets/logos/protondrive.png" alt="Proton Drive">
             <div class="provider-btn-text">
               <h5>Proton Drive</h5>
               <p>End-to-End Encrypted</p>
@@ -1039,15 +1030,22 @@
       accounts.forEach(acc => {
         const isMounted = mounts.some(m => m.toLowerCase().includes(acc.id.toLowerCase()) || m.toLowerCase().includes(acc.provider.toLowerCase()));
         const mountPath = acc.mount_path || `~/CloudDrives/${acc.id}`;
+        const logoMap = {
+          'terabox': '/assets/logos/terabox.png',
+          'gdrive': '/assets/logos/googledrive.png',
+          'vps': '/assets/logos/vps.png',
+          'proton': '/assets/logos/protondrive.png',
+          'mega': '/assets/logos/mega.png',
+          's3': '/assets/logos/s3.png'
+        };
+        const logoSrc = logoMap[acc.provider] || '/assets/logos/clouddrive.png';
 
         const card = document.createElement('div');
         card.className = 'account-card';
         card.innerHTML = `
           <div class="account-info-left">
             <div class="disk-icon-box">
-              <svg class="provider-badge-icon" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2">
-                <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
-              </svg>
+              <img class="provider-badge-icon" src="${logoSrc}" alt="${acc.provider}">
             </div>
             <div class="account-details">
               <h4>${acc.name}</h4>
