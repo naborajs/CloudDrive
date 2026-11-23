@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# NS Cloud Drive - Linux Desktop Application Launcher
+# Launches NS Cloud Drive as a dedicated standalone desktop application window.
+# Automatically manages background daemon, ensures single-instance activation,
+# and integrates with X11 / Wayland / XFCE / GNOME desktop environments.
+# ==============================================================================
+
+set -euo pipefail
+
+# 1. Resolve repository root
+REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# 2. Configure Display & Runtime Environment
+if [ -z "${DISPLAY:-}" ]; then
+    if [ -e "/tmp/.X11-unix/X1" ]; then
+        export DISPLAY=":1"
+    elif [ -e "/tmp/.X11-unix/X0" ]; then
+        export DISPLAY=":0"
+    else
+        export DISPLAY=":1"
+    fi
+fi
+
+USER_ID="$(id -u)"
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    if [ -d "/run/user/$USER_ID" ]; then
+        export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+    fi
+fi
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    fi
+fi
+
+# 3. Ensure Backend UI & Daemon Service is Active
+PORT=8899
+SERVER_URL="http://127.0.0.1:$PORT"
+
+test_server() {
+    curl -m 1 -s -o /dev/null "$SERVER_URL/api/state" 2>/dev/null
+}
+
+if ! test_server; then
+    # Try systemd user service first
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user start nsclouddrive-ui.service 2>/dev/null || true
+    fi
+
+    # Fallback: start standalone background process if still not responding
+    if ! test_server; then
+        APP_PY="$REPO_ROOT/src/web/app.py"
+        if [ -f "$APP_PY" ]; then
+            python3 "$APP_PY" --port "$PORT" >/dev/null 2>&1 &
+        fi
+    fi
+
+    # Wait up to 3 seconds for port to become ready
+    for _ in $(seq 1 15); do
+        if test_server; then
+            break
+        fi
+        sleep 0.2
+    done
+fi
+
+# 4. Single-Instance Window Activation
+# If window is already present on current display, bring it to front
+if command -v wmctrl >/dev/null 2>&1; then
+    if wmctrl -l | grep -i "NS Cloud Drive" >/dev/null 2>&1; then
+        wmctrl -a "NS Cloud Drive" || true
+        exit 0
+    fi
+fi
+
+# 5. Discover Browser / Application Runtime
+CHROME_BIN=""
+CANDIDATES=(
+    "/snap/bin/chromium"
+    "/usr/bin/chromium-browser"
+    "/usr/bin/chromium"
+    "/usr/bin/google-chrome-stable"
+    "/usr/bin/google-chrome"
+    "/usr/bin/brave-browser"
+    "/usr/bin/microsoft-edge-stable"
+)
+
+for c in "${CANDIDATES[@]}"; do
+    if [ -x "$c" ]; then
+        CHROME_BIN="$c"
+        break
+    fi
+done
+
+if [ -z "$CHROME_BIN" ]; then
+    CHROME_BIN="$(command -v chromium || command -v google-chrome || command -v x-www-browser || true)"
+fi
+
+PROFILE_DIR="${HOME}/.config/nsclouddrive/app-profile"
+mkdir -p "$PROFILE_DIR"
+
+# 6. Launch Dedicated Application Window
+if [ -n "$CHROME_BIN" ]; then
+    exec "$CHROME_BIN" \
+        --app="$SERVER_URL" \
+        --class="nsclouddrive" \
+        --name="NS Cloud Drive" \
+        --user-data-dir="$PROFILE_DIR" \
+        --window-size=1120,740 \
+        --disable-features=TranslateUI,OptimizationHints \
+        --no-first-run \
+        --no-default-browser-check \
+        "$@"
+else
+    # Fallback to default desktop browser
+    if command -v xdg-open >/dev/null 2>&1; then
+        exec xdg-open "$SERVER_URL"
+    else
+        echo "[ERROR] No suitable desktop browser or webview runtime found to open NS Cloud Drive." >&2
+        exit 1
+    fi
+fi
