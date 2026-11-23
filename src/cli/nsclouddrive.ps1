@@ -79,6 +79,7 @@ function Show-CliHelp {
     Show-CliBanner
     Write-Host "Usage: nsclouddrive <command> [arguments] [options]`n" -ForegroundColor Yellow
     Write-Host "Commands:" -ForegroundColor White
+    Write-Host "  app, gui                    Launch the standalone Desktop GUI application" -ForegroundColor Gray
     Write-Host "  login [provider] [options]  Authenticate and onboard cloud account (e.g. login terabox)" -ForegroundColor Gray
     Write-Host "  status                      Show connection, mount states, and active transfers" -ForegroundColor Gray
     Write-Host "  accounts                    List all configured cloud accounts" -ForegroundColor Gray
@@ -1171,12 +1172,37 @@ function Invoke-CliUi {
     }
 }
 
+function Invoke-CliApp {
+    [CmdletBinding()]
+    param()
+
+    $appLauncher = Join-Path (Split-Path -Parent $script:SrcDir) 'scripts/nsclouddrive-app'
+    if ($IsLinux -and (Test-Path $appLauncher)) {
+        Write-Host "Launching NS Cloud Drive Desktop Application..." -ForegroundColor Green
+        $null = Start-Process -FilePath '/usr/bin/env' -ArgumentList "bash `"$appLauncher`"" -ErrorAction SilentlyContinue
+        return
+    }
+
+    # Fallback to UI server & browser
+    Invoke-CliUi -SubAction 'start'
+}
+
 # Command Dispatcher
 if ($MyInvocation.InvocationName -eq '.' -or $Command.ToLowerInvariant() -in @('', 'import', 'none')) {
     return
 }
 
+# Auto-launch desktop app if invoked with no arguments in a graphical desktop session
+if (-not $PSBoundParameters.ContainsKey('Command') -and -not $Help -and $IsLinux) {
+    if ($env:DISPLAY -or (Test-Path '/tmp/.X11-unix/X1') -or (Test-Path '/tmp/.X11-unix/X0')) {
+        Invoke-CliApp
+        return
+    }
+}
+
 switch ($Command.ToLowerInvariant()) {
+    'app'          { Invoke-CliApp }
+    'gui'          { Invoke-CliApp }
     'status'       { Show-CliStatus }
     'accounts'     { Show-CliAccounts }
     'ui'           { Invoke-CliUi -SubAction $Target }
