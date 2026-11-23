@@ -1,14 +1,15 @@
 {
-  "taskId": "TASK-023",
-  "goal": "Build Windows-parity Linux Web UI Dashboard and Native Chromium CDP Automated Cookie Interceptor for Direct TeraBox Sign-In",
+  "taskId": "TASK-024",
+  "goal": "Build full Linux desktop application: desktop launcher (.desktop), application launcher script (nsclouddrive-app), system menu/desktop integration, and high-res icon packaging",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Develop full Windows-parity Web UI dashboard matching the PureBlack desktop layout (Disks, Transfers, Settings, Analytics) on http://127.0.0.1:8899.",
-    "2. Implement direct TeraBox browser sign-in and automated cookie capture using Chrome DevTools Protocol (CDP) over pure-Python RFC 6455 WebSockets without external dependencies.",
-    "3. Add 'ui' CLI action and '--browser' sign-in option to src/cli/nsclouddrive.ps1.",
-    "4. Add scripts/systemd/nsclouddrive-ui.service and update scripts/install-linux.sh.",
-    "5. Verify all automated tests pass with exit code 0."
+    "1. Create scripts/desktop/nsclouddrive.desktop compliant with XDG Desktop Entry Specification.",
+    "2. Implement scripts/nsclouddrive-app standalone window application launcher with auto-daemon management, single-instance activation, and dedicated app mode.",
+    "3. Add 'app' and 'gui' commands and auto-launch in graphical sessions to src/cli/nsclouddrive.ps1.",
+    "4. Update src/web/app.py to serve static assets and brand/provider logos (/assets/logos/*).",
+    "5. Update scripts/install-linux.sh to install launchers, desktop entries, desktop shortcuts on ~/Desktop, and hicolor icons.",
+    "6. Verify all automated tests pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
@@ -19,50 +20,50 @@
   ],
   "status": "completed",
   "filesChanged": [
+    "scripts/desktop/nsclouddrive.desktop",
+    "scripts/nsclouddrive-app",
     "src/web/app.py",
-    "src/web/cdp_interceptor.py",
     "src/web/index.html",
     "src/cli/nsclouddrive.ps1",
-    "scripts/systemd/nsclouddrive-ui.service",
     "scripts/install-linux.sh",
-    "tests/Test-WebUiAndBrowserLogin.ps1",
+    "tests/Test-LinuxDesktopApp.ps1",
     "task-ledger.json",
     "docs/engineering/INCIDENTS_AND_FIXES.md",
     ".agents/architecture/ISSUE_TRACKER.md"
   ],
   "decisions": [
     {
-      "date": "2026-11-22",
-      "decision": "Use standard library Python ThreadingHTTPServer and RFC 6455 WebSocket client.",
-      "rationale": "Eliminates third-party pip dependencies on the Linux VPS while providing fast, reliable CDP communication."
+      "date": "2026-11-23",
+      "decision": "Use FreeDesktop.org standard .desktop entry with Actions for quick mounting and unmounting.",
+      "rationale": "Allows users to launch NS Cloud Drive from system application menus (XFCE, GNOME, KDE) and execute quick actions from desktop context menus."
     },
     {
-      "date": "2026-11-22",
-      "decision": "Launch Chromium with --app=https://www.terabox.com/ and --remote-debugging-port=9224 on DISPLAY=:1.",
-      "rationale": "Displays an application-mode login window identical to Windows WebView2, allowing users to sign in directly while CDP intercepts cookies in the background."
+      "date": "2026-11-23",
+      "decision": "Provide dedicated standalone application mode via Chromium --app flag and nsclouddrive-app wrapper.",
+      "rationale": "Creates an authentic desktop application window without browser controls or tabs, matching native desktop feel."
     },
     {
-      "date": "2026-11-22",
-      "decision": "Replicate Windows PureBlack theme and UI hierarchy in single-bundle responsive HTML/CSS/JS.",
-      "rationale": "Provides instant load times, zero missing assets, and 1:1 visual parity with the Windows WPF desktop interface."
+      "date": "2026-11-23",
+      "decision": "Install desktop shortcut directly to ~/Desktop with executable permissions and GIO trusted metadata.",
+      "rationale": "Allows users on XFCE and Ubuntu VNC desktops to double-click the desktop icon directly to open NS Cloud Drive."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "date": "2026-11-22",
+      "date": "2026-11-23",
       "status": "approved",
-      "notes": "Verified RFC 6455 framing, CDP token safety, strict mode compliance, absence of plaintext credentials in logs, and responsive layout. All 22 Web UI tests and 71 E2E tests passed cleanly."
+      "notes": "Verified desktop launcher paths, single-instance activation logic, FreeDesktop specification compliance, and 100% test pass rate across 24 desktop app test assertions."
     }
   ],
   "testResults": [
     {
-      "suite": "Test-WebUiAndBrowserLogin.ps1",
+      "suite": "Test-LinuxDesktopApp.ps1",
       "status": "passed",
       "exitCode": 0
     },
     {
-      "suite": "Test-LinuxE2EOpaqueBox.ps1",
+      "suite": "Test-WebUiAndBrowserLogin.ps1",
       "status": "passed",
       "exitCode": 0
     },
