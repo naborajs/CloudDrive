@@ -1064,6 +1064,37 @@ On Linux / Ubuntu VPS desktop environments, users lacked a visual interface with
 - `tests/Test-LinuxE2EOpaqueBox.ps1`: PASSED all 71 tests with exit code 0.
 - `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED all phases with exit code 0.
 
+## 42. Linux Full Desktop Application Packaging & XDG Desktop Integration (TASK-024, 2026-11-23)
+
+**Observed symptom:**
+Users on Linux desktop environments (XFCE, GNOME, Ubuntu VNC) lacked an authentic desktop application experience. The tool functioned solely via terminal commands or manual browser URL navigation, without desktop menu entries, desktop launcher icons, or a dedicated application window.
+
+**Root causes:**
+1. **Missing XDG Desktop Entry:** No `nsclouddrive.desktop` was installed in `/usr/share/applications` or `~/.local/share/applications`, making the application invisible in system application menus (e.g. XFCE "Applications -> Internet").
+2. **Missing Desktop Shortcut:** No double-clickable launcher existed on `~/Desktop` with executable permissions and GIO trusted metadata.
+3. **Missing Standalone Window Wrapper:** Running the app relied on opening a standard web browser with tabs and address bars rather than a dedicated standalone application window.
+4. **Missing Icon Integration:** Icons were not installed into standard XDG hicolor directories (`/usr/share/icons/hicolor/...` and `/usr/share/pixmaps`).
+
+**Fix:**
+1. **XDG Desktop Entry (`scripts/desktop/nsclouddrive.desktop`):**
+   - Implemented compliant `.desktop` specification with application metadata, categories (`Network;FileTransfer;Utility;`), window matching class (`StartupWMClass=nsclouddrive`), and quick actions (`MountAll`, `UnmountAll`, `Status`).
+2. **Application Launcher (`scripts/nsclouddrive-app`):**
+   - Implemented `/usr/local/bin/nsclouddrive-app` and `nsclouddrive-gui` that auto-detects `DISPLAY` and runtime buses, verifies backend service liveness (with auto-restart if inactive), and launches in dedicated standalone application window mode (`--app=http://127.0.0.1:8899`, `--class=nsclouddrive`, `--window-size=1120,740`).
+   - Implemented single-instance activation via `wmctrl` to bring existing window to front instead of spawning duplicate processes.
+3. **CLI Subcommand Integration:**
+   - Added `app` and `gui` commands to `src/cli/nsclouddrive.ps1` (`nsclouddrive app`).
+   - Added auto-launch behavior when `nsclouddrive` is executed with zero arguments in an interactive graphical desktop environment.
+4. **Desktop & System Menu Installer (`scripts/install-linux.sh`):**
+   - Automatically installs `/usr/share/applications/nsclouddrive.desktop`, places `NS Cloud Drive.desktop` on `~/Desktop` with `gio set ... metadata::trusted true`, installs high-resolution icons to `/usr/share/pixmaps` and `/usr/share/icons/hicolor/`, and updates icon/desktop databases.
+5. **Static Asset Serving (`src/web/app.py`):**
+   - Added static file serving under `/assets/` for high-resolution PNG brand icons and cloud provider logos.
+
+**Verification:**
+- `tests/Test-LinuxDesktopApp.ps1`: PASSED all 24 tests with exit code 0.
+- `tests/Test-WebUiAndBrowserLogin.ps1`: PASSED all 22 tests with exit code 0.
+- `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED with exit code 0.
+
+
 
 
 
