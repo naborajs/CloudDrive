@@ -13,7 +13,7 @@ namespace NSCloudDrive.Launcher
 {
     static class Program
     {
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport("user32.dll", EntryPoint = "FindWindowW", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
         [DllImport("user32.dll")]
@@ -243,20 +243,22 @@ namespace NSCloudDrive.Launcher
 
                     ps.Invoke();
 
-                    if (ps.HadErrors)
+                    if (ps.HadErrors && ps.Streams.Error.Count > 0)
                     {
+                        StringBuilder sb = new StringBuilder();
+                        foreach (var err in ps.Streams.Error)
+                        {
+                            sb.AppendLine(err.ToString());
+                        }
                         try
                         {
                             string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NSCloudDrive\\logs");
                             if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
-                            StringBuilder sb = new StringBuilder();
-                            foreach (var err in ps.Streams.Error)
-                            {
-                                sb.AppendLine(err.ToString());
-                            }
                             File.AppendAllText(Path.Combine(logDir, "launcher-error.log"), DateTime.UtcNow.ToString("o") + " [PowerShell Errors]: " + sb.ToString() + Environment.NewLine);
                         }
                         catch { }
+
+                        throw new InvalidOperationException("In-process PowerShell script execution reported errors: " + sb.ToString());
                     }
 
                     return 0;

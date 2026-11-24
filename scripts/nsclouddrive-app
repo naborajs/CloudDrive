@@ -80,12 +80,12 @@ fi
 # 5. Discover Browser / Application Runtime
 CHROME_BIN=""
 CANDIDATES=(
-    "/snap/bin/chromium"
-    "/usr/bin/chromium-browser"
-    "/usr/bin/chromium"
     "/usr/bin/google-chrome-stable"
     "/usr/bin/google-chrome"
     "/usr/bin/brave-browser"
+    "/usr/bin/chromium-browser"
+    "/usr/bin/chromium"
+    "/snap/bin/chromium"
     "/usr/bin/microsoft-edge-stable"
 )
 
@@ -97,7 +97,7 @@ for c in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$CHROME_BIN" ]; then
-    CHROME_BIN="$(command -v chromium || command -v google-chrome || command -v x-www-browser || true)"
+    CHROME_BIN="$(command -v google-chrome || command -v brave-browser || command -v chromium || command -v x-www-browser || true)"
 fi
 
 if [ -d "${HOME}/snap/chromium" ]; then
@@ -115,6 +115,7 @@ if [ -n "$CHROME_BIN" ]; then
         --name="NS Cloud Drive" \
         --user-data-dir="$PROFILE_DIR" \
         --window-size=1120,740 \
+        --disable-gpu \
         --disable-features=TranslateUI,OptimizationHints \
         --no-first-run \
         --no-default-browser-check \

@@ -185,14 +185,16 @@ class TeraBoxBrowserLoginSession:
 
     def _find_chromium_binary(self) -> str:
         candidates = [
-            "/snap/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
             "/usr/bin/google-chrome-stable",
             "/usr/bin/google-chrome",
+            "/usr/bin/brave-browser",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/snap/bin/chromium",
+            shutil.which("brave-browser") or "",
+            shutil.which("google-chrome") or "",
             shutil.which("chromium") or "",
-            shutil.which("chromium-browser") or "",
-            shutil.which("google-chrome") or ""
+            shutil.which("chromium-browser") or ""
         ]
         for c in candidates:
             if c and os.path.isfile(c) and os.access(c, os.X_OK):
@@ -223,6 +225,7 @@ class TeraBoxBrowserLoginSession:
                 f"--remote-debugging-port={self.port}",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--disable-gpu",
                 "--window-size=1024,768",
                 "--disable-background-networking",
                 "--disable-default-apps"
