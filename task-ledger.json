@@ -1,74 +1,68 @@
 {
-  "taskId": "TASK-024",
-  "goal": "Build full Linux desktop application: desktop launcher (.desktop), application launcher script (nsclouddrive-app), system menu/desktop integration, and high-res icon packaging",
+  "taskId": "TASK-025",
+  "goal": "Diagnose Windows startup barrier, author comprehensive end-to-end Windows UI test suite, and ensure software rendering resilience on Linux virtual display (TightVNC)",
   "repo": "C:\\Users\\Naboraj_sarkar\\Documents\\Codex\\CloudDrive",
   "branch": "main",
   "acceptanceCriteria": [
-    "1. Create scripts/desktop/nsclouddrive.desktop compliant with XDG Desktop Entry Specification.",
-    "2. Implement scripts/nsclouddrive-app standalone window application launcher with auto-daemon management, single-instance activation, and dedicated app mode.",
-    "3. Add 'app' and 'gui' commands and auto-launch in graphical sessions to src/cli/nsclouddrive.ps1.",
-    "4. Update src/web/app.py to serve static assets and brand/provider logos (/assets/logos/*).",
-    "5. Update scripts/install-linux.sh to install launchers, desktop entries, desktop shortcuts on ~/Desktop, and hicolor icons.",
-    "6. Verify all automated tests pass with exit code 0."
+    "1. Diagnose root cause of Windows launch failure and eliminate any startup crashes or background mutex blocks.",
+    "2. Fix variable scope ordering for $onLinux in VirtualDriveManager.ps1 and bind valid SynchronizationContext in NSCloudDrive.ps1.",
+    "3. Update launcher P/Invoke to FindWindowW with CharSet.Unicode and propagate in-process errors.",
+    "4. Create comprehensive end-to-end test suite tests/Test-FullWindowsUIEndToEnd.ps1 covering all views, buttons, themes, modals, and tray actions.",
+    "5. Resolve DRM dumb buffer failure on Linux TightVNC virtual display (:1) by prioritizing native desktop browsers and adding --disable-gpu flag.",
+    "6. Recompile NSCloudDrive.exe and regenerate release distribution packages.",
+    "7. Verify all automated tests pass with exit code 0."
   ],
   "assignedAgents": [
     "orchestra-boss",
-    "orchestra-coder-a",
-    "orchestra-coder-b",
     "orchestra-tester",
     "orchestra-reviewer"
   ],
   "status": "completed",
   "filesChanged": [
-    "scripts/desktop/nsclouddrive.desktop",
+    "src/services/VirtualDriveManager.ps1",
+    "src/NSCloudDrive.ps1",
+    "src/launcher/Program.cs",
+    "NSCloudDrive.exe",
     "scripts/nsclouddrive-app",
-    "src/web/app.py",
-    "src/web/index.html",
-    "src/cli/nsclouddrive.ps1",
-    "scripts/install-linux.sh",
-    "tests/Test-LinuxDesktopApp.ps1",
-    "task-ledger.json",
+    "src/web/cdp_interceptor.py",
+    "tests/Test-FullWindowsUIEndToEnd.ps1",
     "docs/engineering/INCIDENTS_AND_FIXES.md",
-    ".agents/architecture/ISSUE_TRACKER.md"
+    ".agents/architecture/ISSUE_TRACKER.md",
+    "task-ledger.json"
   ],
   "decisions": [
     {
-      "date": "2026-11-23",
-      "decision": "Use FreeDesktop.org standard .desktop entry with Actions for quick mounting and unmounting.",
-      "rationale": "Allows users to launch NS Cloud Drive from system application menus (XFCE, GNOME, KDE) and execute quick actions from desktop context menus."
+      "date": "2026-11-24",
+      "decision": "Initialize $onLinux at the start of Start-VirtualDriveMount.",
+      "rationale": "Prevents terminating PropertyNotFoundException under strict mode when auto-mounting TeraBox accounts during startup restore."
     },
     {
-      "date": "2026-11-23",
-      "decision": "Provide dedicated standalone application mode via Chromium --app flag and nsclouddrive-app wrapper.",
-      "rationale": "Creates an authentic desktop application window without browser controls or tabs, matching native desktop feel."
+      "date": "2026-11-24",
+      "decision": "Bind fallback DispatcherSynchronizationContext in WindowRestoreHelper.",
+      "rationale": "Ensures the single-instance wait handle callback is properly marshaled to the WPF Dispatcher UI thread."
     },
     {
-      "date": "2026-11-23",
-      "decision": "Install desktop shortcut directly to ~/Desktop with executable permissions and GIO trusted metadata.",
-      "rationale": "Allows users on XFCE and Ubuntu VNC desktops to double-click the desktop icon directly to open NS Cloud Drive."
+      "date": "2026-11-24",
+      "decision": "Prioritize native desktop browsers (brave-browser, google-chrome) and add --disable-gpu flag in Linux launcher.",
+      "rationale": "Eliminates DRM dumb buffer permission errors on virtual X11 displays (TightVNC) where GPU acceleration nodes are absent."
     }
   ],
   "reviewFindings": [
     {
       "reviewer": "orchestra-reviewer",
-      "date": "2026-11-23",
+      "date": "2026-11-24",
       "status": "approved",
-      "notes": "Verified desktop launcher paths, single-instance activation logic, FreeDesktop specification compliance, and 100% test pass rate across 24 desktop app test assertions."
+      "notes": "Verified all 26 UI end-to-end assertions, all 6 desktop regression phases, Unicode window caption lookup, and live standalone application window rendering on TightVNC."
     }
   ],
   "testResults": [
     {
-      "suite": "Test-LinuxDesktopApp.ps1",
+      "suite": "Test-DesktopUIRegression.ps1",
       "status": "passed",
       "exitCode": 0
     },
     {
-      "suite": "Test-WebUiAndBrowserLogin.ps1",
-      "status": "passed",
-      "exitCode": 0
-    },
-    {
-      "suite": "Test-LinuxCrossPlatformSupport.ps1",
+      "suite": "Test-FullWindowsUIEndToEnd.ps1",
       "status": "passed",
       "exitCode": 0
     }

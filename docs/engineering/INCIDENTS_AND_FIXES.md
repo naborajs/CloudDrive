@@ -33,6 +33,7 @@ history unless explicitly noted otherwise.
 | Post-Restart Cloud File Deduplication, Notification De-Spamming, and Dispatcher Unfreezing | Unbounded virtual drive tree enumeration, PSCustomObject type mismatch in binding, zombie recovery batch loops, and unthrottled cache scans | Implemented O(1) mount dedup with format and byte size check, PSCustomObject support, suppressed recovery notifications, and throttled cache scans |
 | Linux VPS FUSE Support, Silent Background Restart Resumption, and Resumable Progression (20% -> 21%) | WinFsp flags invalid on Linux FUSE, Windows-specific LocalAppData and ACL paths, prompt notifications on restart requiring manual re-drop, and batches resetting to 0% | Implemented cross-platform XDG roots, POSIX permissions, directory FUSE mounts, headless CLI, systemd service, silent automatic restart queue resumption, and 20% -> 21% progress retention |
 | Linux (PowerShell 7.7 / Ubuntu aarch64) Runtime Bugs | Symlink path resolution in scripts/nsclouddrive, unguarded WPF Add-Type terminating on Linux, and $isLinux assignment colliding with read-only automatic variable $IsLinux | Implemented readlink -f in wrapper, guarded Windows-only Add-Type in CloudTransferManager, and renamed local variables to $onLinux across core modules |
+| Windows Startup Scope Resolution, End-to-End UI Suite & Virtual Display Compatibility | $onLinux variable evaluated before definition in VirtualDriveManager, null DispatcherSynchronizationContext in WindowRestoreHelper, FindWindow ANSI charset, and snap DRM dumb buffer failure on TightVNC | Reordered $onLinux definition, bound fallback DispatcherSynchronizationContext, added FindWindowW with CharSet.Unicode, prioritized native desktop browsers, added --disable-gpu flag, and created comprehensive 26-assertion E2E test suite |
 
 ## 1. Merged Google cards and wrong provider icon
 
@@ -1093,6 +1094,31 @@ Users on Linux desktop environments (XFCE, GNOME, Ubuntu VNC) lacked an authenti
 - `tests/Test-LinuxDesktopApp.ps1`: PASSED all 24 tests with exit code 0.
 - `tests/Test-WebUiAndBrowserLogin.ps1`: PASSED all 22 tests with exit code 0.
 - `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED with exit code 0.
+
+## 43. Windows Startup Scope Resolution, End-to-End UI Test Suite, and Virtual Display (TightVNC) Software Rendering (2026-11-24)
+
+**Observed symptoms:**
+1. Under Windows, launching `NSCloudDrive.exe` was reported as "not starting in Windows right now".
+2. Under TightVNC virtual display (`DISPLAY=:1`) on Ubuntu Linux, snap-packaged Chromium failed to render due to DRM dumb buffer permissions (`KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied`).
+
+**Root causes:**
+1. **Uninitialized Variable under Strict Mode:** In `src/services/VirtualDriveManager.ps1` line 740, `$onLinux` was evaluated in an `if ($onLinux)` block before its definition at line 786 (`$onLinux = Test-IsLinuxOperatingSystem`). Under `Set-StrictMode -Version Latest`, this threw a terminating `PropertyNotFoundException` whenever saved TeraBox accounts were evaluated during startup restore.
+2. **Missing SynchronizationContext in WindowRestoreHelper:** In `src/NSCloudDrive.ps1`, `WindowRestoreHelper.StartListening` aborted registration when `SynchronizationContext.Current` was null prior to `Application.Run()`.
+3. **ANSI vs Unicode Window Caption Search:** `FindWindow` in `src/launcher/Program.cs` lacked `CharSet = CharSet.Unicode`, defaulting to ANSI `FindWindowA`, failing to locate WPF top-level caption windows.
+4. **DRM Dumb Buffer Failure on TightVNC:** Snap Chromium attempts hardware acceleration / DRM dumb buffer allocation on TightVNC virtual X11 displays where no GPU device nodes exist, failing to initialize display windows without `--disable-gpu`.
+
+**Fix:**
+1. **Variable Scope Ordering:** Moved `$onLinux = Test-IsLinuxOperatingSystem` to the very top (line 726) of `Start-VirtualDriveMount`.
+2. **Synchronization Context Binding:** Provided a fallback `DispatcherSynchronizationContext` derived from `Dispatcher.CurrentDispatcher` and bound via `SynchronizationContext.SetSynchronizationContext`.
+3. **Unicode Window Lookup & Error Propagation:** Updated P/Invoke to `FindWindowW` with `CharSet = CharSet.Unicode` and improved PowerShell error stream inspection in `RunInProcess` to throw terminating exceptions so fallback out-of-process execution is triggered if in-process execution fails.
+4. **Virtual Display & Browser Resilience:** Updated `scripts/nsclouddrive-app` and `src/web/cdp_interceptor.py` to prioritize native desktop browsers (`brave-browser`, `google-chrome`) over snap packages, and added `--disable-gpu` to launch flags for universal software rasterization on headless/VNC X11 displays.
+5. **Full Windows UI E2E Test Suite (`tests/Test-FullWindowsUIEndToEnd.ps1`):** Authored 26 automated assertions testing Window initialization, Left navigation sidebar, View switching (Disks, Options, Analytics, Logs, Help), Toolbar buttons (Refresh, Add Cloud Disk, Transfers, Agent Transfer), Theme switching (PureBlack, Translucent, PureWhite), Modal dialogs (Google Drive, TeraBox, VPS, Proton Drive, MEGA, S3), Options checkboxes, Tray icon context menu, Window closing cancellation with MinimizeToTrayOnClose, and window restoration.
+
+**Verification:**
+- `tests/Test-FullWindowsUIEndToEnd.ps1`: PASSED all 26 assertions with exit code 0.
+- `tests/Test-DesktopUIRegression.ps1`: PASSED all 6 test phases with exit code 0.
+- Live VNC screen capture on Linux `DISPLAY=:1`: Verified standalone NS Cloud Drive desktop app window with PureBlack theme, sidebar navigation, and 1-click TeraBox direct sign-in.
+- Windows Release Zip & Linux Tarball re-packaged cleanly.
 
 
 
