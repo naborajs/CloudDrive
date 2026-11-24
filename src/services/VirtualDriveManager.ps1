@@ -723,6 +723,7 @@ function Start-VirtualDriveMount(
     [string]$InitialBwLimit = '',
     [hashtable]$Progress = $null
 ) {
+    $onLinux = Test-IsLinuxOperatingSystem
     if (-not (Test-WinFspInstalled)) {
         throw 'WinFsp is not installed or running. Cannot mount virtual drive.'
     }

@@ -85,7 +85,21 @@ namespace NSCloudDrive
 
         public static void StartListening(EventWaitHandle restoreEvent, SynchronizationContext syncContext, Action onRestore)
         {
-            if (restoreEvent == null || syncContext == null || onRestore == null) return;
+            if (restoreEvent == null || onRestore == null) return;
+            if (syncContext == null)
+            {
+                syncContext = SynchronizationContext.Current;
+                if (syncContext == null)
+                {
+                    try
+                    {
+                        syncContext = new System.Windows.Threading.DispatcherSynchronizationContext(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+                        SynchronizationContext.SetSynchronizationContext(syncContext);
+                    }
+                    catch { }
+                }
+            }
+            if (syncContext == null) return;
             StopListening();
 
             _waitHandle = ThreadPool.RegisterWaitForSingleObject(
@@ -10518,7 +10532,14 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Update-AllUIState
             } catch { }
         }
-        [NSCloudDrive.WindowRestoreHelper]::StartListening($script:RestoreEvent, [System.Threading.SynchronizationContext]::Current, $restoreAction)
+        $syncContext = if ([System.Threading.SynchronizationContext]::Current) {
+            [System.Threading.SynchronizationContext]::Current
+        } else {
+            $sc = [System.Windows.Threading.DispatcherSynchronizationContext]::new([System.Windows.Threading.Dispatcher]::CurrentDispatcher)
+            [System.Threading.SynchronizationContext]::SetSynchronizationContext($sc)
+            $sc
+        }
+        [NSCloudDrive.WindowRestoreHelper]::StartListening($script:RestoreEvent, $syncContext, $restoreAction)
     }
     if ($Minimized) {
         $window.Hide()
