@@ -156,6 +156,32 @@ try {
     Set-Item -Path 'Function:\Test-TeraBoxBackendSession' -Value $mockSession
     Set-Item -Path 'Function:\global:Test-TeraBoxBackendSession' -Value $mockSession
 
+    # Cloud deduplication and restart recovery now require provider-backed
+    # evidence. Keep this E2E hermetic by exposing files under the sandbox's
+    # synthetic remote roots through the same directory-listing contract.
+    function Get-CloudDirectoryContents {
+        param([object]$Account, [string]$Path = '', [switch]$BypassLocalMount)
+        $accountId = [string](Get-CloudTransferFieldValue $Account 'Id')
+        $providerId = [string](Get-CloudTransferProviderId $Account)
+        if (-not $providerId) { $providerId = 'terabox' }
+        $remoteRoot = Join-Path $sandboxCloudDrives "${providerId}_$accountId"
+        $remoteFolder = if ($Path) { Join-Path $remoteRoot ($Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar)) } else { $remoteRoot }
+        if (-not (Test-Path -LiteralPath $remoteFolder -PathType Container)) { return @() }
+        $items = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($remoteFile in @(Get-ChildItem -LiteralPath $remoteFolder -File -ErrorAction SilentlyContinue)) {
+            $relativePath = if ($Path) { "$($Path.Trim('/'))/$($remoteFile.Name)" } else { $remoteFile.Name }
+            $items.Add(@{
+                Name = $remoteFile.Name
+                Path = $relativePath
+                IsDir = $false
+                Size = [int64]$remoteFile.Length
+                ModTime = $remoteFile.LastWriteTimeUtc.ToString('o')
+                Hash = ''
+            })
+        }
+        return $items.ToArray()
+    }
+
     # ==========================================================================
     # TIER 1: Feature Coverage (Category-Partition Testing: R1 - R6)
     # ==========================================================================
@@ -1044,7 +1070,11 @@ try {
         [System.IO.File]::WriteAllText($interruptedFile, 'Simulated ISO stream payload')
         $isoSize = (Get-Item $interruptedFile).Length
 
-        # Remote arrival confirmed in cloud dedup ledger before reboot
+        $scenario5RemoteRoot = Join-Path $sandboxCloudDrives 'terabox_acc_scenario5'
+        New-Item -ItemType Directory -Path $scenario5RemoteRoot -Force | Out-Null
+        Copy-Item -LiteralPath $interruptedFile -Destination (Join-Path $scenario5RemoteRoot 'interrupted_upload.iso') -Force
+
+        # Remote arrival is confirmed by the synthetic live provider listing.
         Record-CloudDedupVerifiedFile -AccountId 'acc_scenario5' -ProviderId 'terabox' -RemotePath 'interrupted_upload.iso' -SizeBytes $isoSize
         Save-CloudDedupLedger
 
