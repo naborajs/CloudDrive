@@ -34,6 +34,7 @@ param(
     [object]$AutoMount = $true,
     [switch]$ReadOnly,
     [switch]$Browser,
+    [switch]$LoginSecretsFromEnv,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs = @()
@@ -41,6 +42,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($LoginSecretsFromEnv) {
+    if (-not $Cookie -and $env:NS_CLOUD_DRIVE_LOGIN_COOKIE) { $Cookie = $env:NS_CLOUD_DRIVE_LOGIN_COOKIE }
+    if (-not $Token -and $env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN) { $Token = $env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN }
+    Remove-Item Env:NS_CLOUD_DRIVE_LOGIN_COOKIE -ErrorAction SilentlyContinue
+    Remove-Item Env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN -ErrorAction SilentlyContinue
+}
 
 $script:CliDir = $PSScriptRoot
 $script:SrcDir = (Split-Path -Parent $script:CliDir)
@@ -236,6 +244,7 @@ function Invoke-CliLogin {
         [object]$AutoMount = $true,
         [switch]$ReadOnly,
         [switch]$Browser,
+        [switch]$LoginSecretsFromEnv,
         [switch]$PassThru,
 
         [Parameter(ValueFromRemainingArguments = $true)]
@@ -250,6 +259,7 @@ function Invoke-CliLogin {
     $cleanAutoMount = if ($null -ne $AutoMount) { [bool]$AutoMount } else { $true }
     $cleanReadOnly = [bool]$ReadOnly
     $cleanBrowser = [bool]$Browser
+    $cleanLoginSecretsFromEnv = [bool]$LoginSecretsFromEnv
     $cleanCookie = $Cookie
     $cleanToken = $Token
     $cleanDisplayName = $DisplayName
@@ -323,11 +333,19 @@ function Invoke-CliLogin {
                 'read-only'    { $cleanReadOnly = ($val -ne 'false' -and $val -ne '0') }
                 'readonly'     { $cleanReadOnly = ($val -ne 'false' -and $val -ne '0') }
                 'browser'      { $cleanBrowser = ($val -ne 'false' -and $val -ne '0') }
+                'login-secrets-from-env' { $cleanLoginSecretsFromEnv = ($val -ne 'false' -and $val -ne '0') }
                 'passthru'     { $PassThru = ($val -ne 'false' -and $val -ne '0') }
                 'pass-thru'    { $PassThru = ($val -ne 'false' -and $val -ne '0') }
             }
             $i++
         }
+    }
+
+    if ($cleanLoginSecretsFromEnv) {
+        if (-not $cleanCookie -and $env:NS_CLOUD_DRIVE_LOGIN_COOKIE) { $cleanCookie = $env:NS_CLOUD_DRIVE_LOGIN_COOKIE }
+        if (-not $cleanToken -and $env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN) { $cleanToken = $env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN }
+        Remove-Item Env:NS_CLOUD_DRIVE_LOGIN_COOKIE -ErrorAction SilentlyContinue
+        Remove-Item Env:NS_CLOUD_DRIVE_LOGIN_JSTOKEN -ErrorAction SilentlyContinue
     }
 
     if ([string]::IsNullOrWhiteSpace($cleanProvider)) {
@@ -1081,16 +1099,18 @@ function Show-CliQueue {
 function Start-CliDaemon {
     Show-CliBanner
     Write-Host "Starting NS Cloud Drive Daemon for Linux VPS / Background Service..." -ForegroundColor Green
-    Write-Host "Running initial startup recovery & restart reconciliation..." -ForegroundColor Cyan
+    Write-Host "Auto-mounting configured accounts..." -ForegroundColor Cyan
+    Invoke-CliMount -TargetAccount 'all' -OnlyAutoMount
+
+    # Recovery needs a live provider view to tell an absent object from an
+    # unreachable remote. Start the configured mounts before reconciling jobs.
+    Write-Host "Running startup recovery after mount initialization..." -ForegroundColor Cyan
     try {
         $rec = Invoke-StartupTransferQueueRecovery
         Write-Host "  Recovery Summary: $($rec.RecoveredCount) recovered, $($rec.ConfirmedCount) confirmed, $($rec.ResetCount) reset." -ForegroundColor White
     } catch {
         Write-Host "  Recovery notice: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
-
-    Write-Host "Auto-mounting configured accounts..." -ForegroundColor Cyan
-    Invoke-CliMount -TargetAccount 'all' -OnlyAutoMount
 
     $pidFile = Get-CliDaemonPidPath
     [System.IO.File]::WriteAllText($pidFile, [System.Diagnostics.Process]::GetCurrentProcess().Id.ToString())
@@ -1222,7 +1242,7 @@ switch ($Command.ToLowerInvariant()) {
         Invoke-CliLogin -ProviderId $loginProvider `
             -Cookie $Cookie -Token $Token -DisplayName $DisplayName -AccountId $AccountId `
             -BaseUrl $BaseUrl -User $User -Password $Password -Endpoint $Endpoint -Bucket $Bucket `
-            -AutoMount $AutoMount -ReadOnly:$ReadOnly -Browser:$Browser -RemainingArgs $allRemaining
+            -AutoMount $AutoMount -ReadOnly:$ReadOnly -Browser:$Browser -LoginSecretsFromEnv:$LoginSecretsFromEnv -RemainingArgs $allRemaining
     }
     'mount'        { Invoke-CliMount -TargetAccount $Target }
     'unmount'      { Invoke-CliUnmount -TargetAccount $Target }
