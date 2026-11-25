@@ -83,6 +83,18 @@ def save_settings_dict(settings):
         raise
 
 
+def _is_safe_cloud_path(value, allow_empty=False):
+    if not isinstance(value, str) or len(value) > 4096:
+        return False
+    if not value:
+        return allow_empty
+    if value.startswith(('/', '\\')) or '\\' in value or value.startswith('-'):
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    return all(part not in ('.', '..') for part in value.split('/'))
+
+
 def get_data_root():
     override = os.environ.get("NS_CLOUD_DRIVE_DATA_DIR")
     if override and os.path.isdir(override):
@@ -410,7 +422,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Unknown account"}, 404)
                 return
 
-            if action == "mount_all":
+            if action == "cloud_copy":
+                source_id = payload.get("source_account")
+                source_path = payload.get("source_path")
+                destination_id = payload.get("destination_account")
+                destination_path = payload.get("destination_path", "")
+                if not all(isinstance(value, str) and value for value in (source_id, source_path, destination_id)):
+                    self.send_json({"error": "Choose source and destination accounts and a source path."}, 400)
+                    return
+                if not _is_safe_cloud_path(source_path) or not _is_safe_cloud_path(destination_path, allow_empty=True):
+                    self.send_json({"error": "Cloud paths must be relative, use forward slashes, and contain no parent-directory segments."}, 400)
+                    return
+
+                account_by_id = {
+                    entry.get("Id"): entry
+                    for entry in configured_accounts
+                    if isinstance(entry, dict) and isinstance(entry.get("Id"), str)
+                }
+                source_account = account_by_id.get(source_id)
+                destination_account = account_by_id.get(destination_id)
+                if source_account is None or destination_account is None:
+                    self.send_json({"error": "Unknown source or destination account."}, 404)
+                    return
+                if source_account.get("ProviderId") == "local" or destination_account.get("ProviderId") == "local":
+                    self.send_json({"error": "Cloud copy requires cloud accounts at both endpoints."}, 400)
+                    return
+                cmd = ["nsclouddrive", "cloud-copy", source_id, source_path, destination_id, destination_path]
+            elif action == "mount_all":
                 cmd = ["nsclouddrive", "mount", "all"]
             elif action == "unmount_all":
                 cmd = ["nsclouddrive", "unmount", "all"]
@@ -439,10 +477,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120 if action == "cloud_copy" else 30)
                 self.send_json({
                     "success": res.returncode == 0,
-                    "message": "Action completed." if res.returncode == 0 else "Action failed. Check the local application logs."
+                    "message": "Cloud-copy scan completed. Check Transfers for queued and already tracked jobs." if action == "cloud_copy" and res.returncode == 0 else "Action completed." if res.returncode == 0 else "Action failed. Check the local application logs."
                 })
             except Exception:
                 self.send_json({"error": "Action could not be completed."}, 500)
