@@ -33,7 +33,8 @@
       color: var(--text-primary);
       font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
       display: flex;
-      height: 100vh;
+      min-height: 100dvh;
+      height: 100dvh;
       overflow: hidden;
       user-select: none;
     }
@@ -148,6 +149,7 @@
 
     /* Main Content Area */
     .main-content {
+      min-width: 0;
       flex-grow: 1;
       display: flex;
       flex-direction: column;
@@ -161,6 +163,8 @@
       align-items: center;
       border-bottom: 1px solid var(--border-sidebar);
       background: #040405;
+      flex-wrap: wrap;
+      gap: 14px;
     }
     .view-title-group h2 {
       font-size: 20px;
@@ -175,6 +179,7 @@
     .toolbar-actions {
       display: flex;
       gap: 10px;
+      flex-wrap: wrap;
     }
 
     /* Buttons */
@@ -255,6 +260,7 @@
       align-items: center;
       justify-content: space-between;
       transition: border-color 0.15s ease, background 0.15s ease;
+      min-width: 0;
     }
     .account-card:hover {
       background: var(--bg-card-hover);
@@ -264,6 +270,7 @@
       display: flex;
       align-items: center;
       gap: 18px;
+      min-width: 0;
     }
     .disk-icon-box {
       width: 48px;
@@ -284,6 +291,7 @@
       font-size: 15px;
       font-weight: 600;
       color: #fff;
+      overflow-wrap: anywhere;
     }
     .account-meta {
       font-size: 12px;
@@ -292,6 +300,8 @@
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
+      overflow-wrap: anywhere;
     }
     .mount-tag {
       font-family: monospace;
@@ -324,6 +334,7 @@
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
     }
 
     /* Empty state */
@@ -361,7 +372,7 @@
       display: flex;
     }
     .modal-window {
-      width: 580px;
+      width: min(580px, calc(100vw - 24px));
       background: #0d0e12;
       border: 1px solid #242730;
       border-radius: 14px;
@@ -549,6 +560,7 @@
       border-collapse: collapse;
       text-align: left;
       font-size: 13px;
+      min-width: 720px;
     }
     .data-table th {
       padding: 12px 16px;
@@ -561,6 +573,45 @@
       padding: 12px 16px;
       border-bottom: 1px solid #141518;
       color: #cbd5e1;
+    }
+    .table-wrapper {
+      max-width: 100%;
+      overflow: auto;
+      max-height: min(65dvh, 680px);
+      overscroll-behavior: contain;
+    }
+    .queue-file-path { overflow-wrap: anywhere; }
+    #view-analytics > div { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+
+    @media (max-width: 900px) {
+      .sidebar { width: 190px; }
+      .top-toolbar { padding: 16px 18px; }
+      .view-container { padding: 18px; }
+      .account-card { align-items: flex-start; flex-direction: column; gap: 14px; }
+      .account-actions-right { width: 100%; }
+    }
+    @media (max-width: 640px) {
+      body { flex-direction: column; overflow: auto; }
+      .sidebar { width: 100%; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border-sidebar); }
+      .brand-header { padding: 10px 14px; }
+      .nav-menu { flex-direction: row; overflow-x: auto; padding: 7px 8px; gap: 4px; }
+      .nav-item { flex: 0 0 auto; min-height: 44px; padding: 9px 12px; }
+      .sidebar-footer { display: none; }
+      .main-content { overflow: visible; }
+      .top-toolbar { align-items: flex-start; flex-direction: column; padding: 14px; }
+      .toolbar-actions { width: 100%; }
+      .toolbar-actions .btn { flex: 1 1 auto; justify-content: center; }
+      .view-container { padding: 14px; }
+      .account-card { padding: 14px; }
+      .account-info-left { align-items: flex-start; gap: 12px; }
+      .account-meta { align-items: flex-start; flex-direction: column; gap: 6px; }
+      .account-actions-right .btn { flex: 1 1 130px; justify-content: center; min-height: 44px; }
+      #view-analytics > div { grid-template-columns: 1fr !important; }
+      .modal-window { max-height: calc(100dvh - 20px); }
+      .modal-header, .modal-body { padding: 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
@@ -656,6 +707,7 @@
         <h3 style="font-size:16px;">Active & Completed Queue</h3>
         <button class="btn btn-secondary btn-sm" onclick="runAction('clear_queue')">Clear Completed</button>
       </div>
+      <div class="table-wrapper" tabindex="0" role="region" aria-label="Transfer queue">
       <div style="background:var(--bg-card); border:1px solid var(--border-card); border-radius:10px; overflow:hidden;">
         <table class="data-table">
           <thead>
@@ -673,6 +725,7 @@
           </tbody>
         </table>
       </div>
+      </div>
     </section>
 
     <!-- Settings View -->
@@ -680,9 +733,9 @@
       <div style="background:var(--bg-card); border:1px solid var(--border-card); border-radius:10px; padding:24px; max-width:680px; display:flex; flex-direction:column; gap:20px;">
         <h3 style="font-size:16px; border-bottom:1px solid #1c1e26; padding-bottom:12px;">Storage & Daemon Configuration</h3>
         <div class="form-group">
-          <label>VFS Cache Directory (Tmpfs Recommended)</label>
-          <input class="form-control" id="cfgCacheDir" value="/run/user/1001/nsclouddrive/cache">
-          <span style="font-size:11.5px; color:#22c55e; margin-top:2px;">✔ Located in tmpfs memory; uploaded files automatically evict to free space.</span>
+          <label>Cache Directory</label>
+          <input class="form-control" id="cfgCacheDir" placeholder="Loading configured cache path...">
+          <span style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">Uses the path configured for this user and system.</span>
         </div>
         <div class="form-group">
           <label>Auto-Mount on Startup</label>
@@ -713,7 +766,7 @@
         <div style="background:var(--bg-card); border:1px solid var(--border-card); border-radius:10px; padding:20px;">
           <div style="font-size:12px; color:var(--text-muted);">Transfer Queue</div>
           <div style="font-size:22px; font-weight:700; color:#fbbf24; margin-top:6px;" id="statQueue">0</div>
-          <div style="font-size:11.5px; color:var(--text-muted); margin-top:4px;">Items processed</div>
+        <div style="font-size:11.5px; color:var(--text-muted); margin-top:4px;">Active or waiting</div>
         </div>
       </div>
     </section>
@@ -820,6 +873,8 @@
   <script>
     let pollInterval = null;
     let browserPollInterval = null;
+    let stateRequestInFlight = false;
+    let settingsInitialized = false;
 
     // View Switching
     function switchView(viewName) {
@@ -960,10 +1015,12 @@
       const resMsg = document.getElementById('manualResultMsg');
 
       if (!cookie) {
-        resMsg.innerHTML = '<span style="color:#ef4444">Session cookie (ndus) is required.</span>';
+        resMsg.textContent = 'Session cookie (ndus) is required.';
+        resMsg.style.color = '#ef4444';
         return;
       }
-      resMsg.innerHTML = '<span style="color:#38bdf8">Connecting and validating...</span>';
+      resMsg.textContent = 'Connecting and validating...';
+      resMsg.style.color = '#38bdf8';
 
       try {
         const resp = await fetch('/api/login/manual', {
@@ -973,63 +1030,88 @@
         });
         const result = await resp.json();
         if (result.success) {
-          resMsg.innerHTML = '<span style="color:#4ade80">Connected successfully!</span>';
+          document.getElementById('manualCookie').value = '';
+          document.getElementById('manualJsToken').value = '';
+          resMsg.textContent = 'Connected successfully!';
+          resMsg.style.color = '#4ade80';
           setTimeout(() => {
             closeAddDiskModal();
             fetchState();
           }, 1500);
         } else {
-          resMsg.innerHTML = `<span style="color:#ef4444">Failed: ${result.error || 'Invalid credentials'}</span>`;
+          resMsg.textContent = `Failed: ${result.error || 'Invalid credentials'}`;
+          resMsg.style.color = '#ef4444';
         }
       } catch (err) {
-        resMsg.innerHTML = `<span style="color:#ef4444">Error: ${err}</span>`;
+        resMsg.textContent = `Error: ${err.message || 'Request failed'}`;
+        resMsg.style.color = '#ef4444';
       }
     }
 
     // State Polling & Actions
     async function fetchState() {
+      if (stateRequestInFlight) return;
+      stateRequestInFlight = true;
+      if (pollInterval) clearTimeout(pollInterval);
+      const controller = new AbortController();
+      const requestTimeout = setTimeout(() => controller.abort(), 8000);
       try {
-        const resp = await fetch('/api/state');
+        const resp = await fetch('/api/state', { signal: controller.signal, cache: 'no-store' });
+        if (!resp.ok) throw new Error(`State request failed (${resp.status})`);
         const data = await resp.json();
 
         // Update Sidebar & Analytics
         const svcDot = document.getElementById('sidebarDot');
         const svcText = document.getElementById('sidebarServiceText');
-        const isActive = data.service && data.service.includes('active');
+        const isActive = data.service && data.service.startsWith('active');
         svcDot.className = 'status-dot ' + (isActive ? 'active' : '');
-        svcText.innerText = 'Daemon: ' + (isActive ? 'Running' : 'Stopped');
-        document.getElementById('statService').innerText = data.service || 'unknown';
-        document.getElementById('statMounts').innerText = (data.mounts ? data.mounts.length : 0);
-        document.getElementById('statQueue').innerText = (data.queue ? data.queue.length : 0);
+        svcText.textContent = 'Daemon: ' + (isActive ? 'Running' : 'Stopped');
+        document.getElementById('statService').textContent = data.service || 'unknown';
+        document.getElementById('statMounts').textContent = String(data.mounts ? data.mounts.length : 0);
+        const queueAvailable = data.queue_summary?.available !== false;
+        document.getElementById('statQueue').textContent = queueAvailable ? String(data.queue_summary?.active ?? 0) : 'Unavailable';
+        if (!settingsInitialized) {
+          document.getElementById('cfgCacheDir').value = String(data.cache_directory || '');
+          document.getElementById('cfgAutoMount').value = data.auto_mount ? 'true' : 'false';
+          settingsInitialized = true;
+        }
 
         // Render Disks
         renderDisks(data.accounts || [], data.mounts || []);
-        renderTransfers(data.queue || []);
+        renderTransfers(data.queue || [], data.queue_error || '', data.queue_summary?.truncated, data.queue_summary?.total);
       } catch (err) {
-        console.error('State fetch failed', err);
+        if (err.name !== 'AbortError') console.error('State fetch failed', err);
+      } finally {
+        clearTimeout(requestTimeout);
+        stateRequestInFlight = false;
+        if (!document.hidden) pollInterval = setTimeout(fetchState, 8000);
       }
     }
 
     function renderDisks(accounts, mounts) {
       const grid = document.getElementById('accountsGrid');
       if (!accounts || accounts.length === 0) {
-        grid.innerHTML = `
-          <div class="empty-state-box">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.5" style="margin-bottom:12px;">
-              <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
-            </svg>
-            <h3>No Cloud Disks Connected</h3>
-            <p>Connect your TeraBox account directly to mount remote cloud storage as a local folder.</p>
-            <button class="btn btn-primary" onclick="openAddDiskModal()">+ Connect TeraBox Now</button>
-          </div>
-        `;
+        const empty = document.createElement('div');
+        empty.className = 'empty-state-box';
+        const heading = document.createElement('h3');
+        heading.textContent = 'No Cloud Disks Connected';
+        const description = document.createElement('p');
+        description.textContent = 'Connect a cloud account to mount remote storage directly into your file manager.';
+        const addButton = document.createElement('button');
+        addButton.className = 'btn btn-primary';
+        addButton.textContent = '+ Connect Cloud Storage';
+        addButton.addEventListener('click', openAddDiskModal);
+        empty.append(heading, description, addButton);
+        grid.replaceChildren(empty);
         return;
       }
 
-      grid.innerHTML = '';
+      grid.replaceChildren();
       accounts.forEach(acc => {
-        const isMounted = mounts.some(m => m.toLowerCase().includes(acc.id.toLowerCase()) || m.toLowerCase().includes(acc.provider.toLowerCase()));
-        const mountPath = acc.mount_path || `~/CloudDrives/${acc.id}`;
+        const accountId = String(acc.id || '');
+        const provider = String(acc.provider || '');
+        const isMounted = mounts.some(m => m.toLowerCase().includes(accountId.toLowerCase()) || m.toLowerCase().includes(provider.toLowerCase()));
+        const mountPath = String(acc.mount_path || `~/CloudDrives/${accountId}`);
         const logoMap = {
           'terabox': '/assets/logos/terabox.png',
           'gdrive': '/assets/logos/googledrive.png',
@@ -1038,56 +1120,121 @@
           'mega': '/assets/logos/mega.png',
           's3': '/assets/logos/s3.png'
         };
-        const logoSrc = logoMap[acc.provider] || '/assets/logos/clouddrive.png';
+        const logoSrc = logoMap[provider] || '/assets/logos/clouddrive.png';
 
         const card = document.createElement('div');
         card.className = 'account-card';
-        card.innerHTML = `
-          <div class="account-info-left">
-            <div class="disk-icon-box">
-              <img class="provider-badge-icon" src="${logoSrc}" alt="${acc.provider}">
-            </div>
-            <div class="account-details">
-              <h4>${acc.name}</h4>
-              <div class="account-meta">
-                <span class="pill ${isMounted ? 'pill-mounted' : 'pill-disconnected'}">
-                  ${isMounted ? '● Mounted' : '○ Disconnected'}
-                </span>
-                <span>Mount: <code class="mount-tag">${mountPath}</code></span>
-              </div>
-            </div>
-          </div>
-          <div class="account-actions-right">
-            ${isMounted ? `
-              <button class="btn btn-secondary btn-sm" onclick="runAction('open_folder', '${acc.id}')">📂 Open Files</button>
-              <button class="btn btn-secondary btn-sm" onclick="runAction('unmount_account', '${acc.id}')">Unmount</button>
-            ` : `
-              <button class="btn btn-accent btn-sm" onclick="runAction('mount_account', '${acc.id}')">Mount Drive</button>
-            `}
-            <button class="btn btn-danger btn-sm" onclick="runAction('remove_account', '${acc.id}')">Disconnect</button>
-          </div>
-        `;
+        const info = document.createElement('div');
+        info.className = 'account-info-left';
+        const iconBox = document.createElement('div');
+        iconBox.className = 'disk-icon-box';
+        const icon = document.createElement('img');
+        icon.className = 'provider-badge-icon';
+        icon.src = logoSrc;
+        icon.alt = provider;
+        iconBox.append(icon);
+        const details = document.createElement('div');
+        details.className = 'account-details';
+        const name = document.createElement('h4');
+        name.textContent = String(acc.name || accountId || provider || 'Cloud account');
+        const meta = document.createElement('div');
+        meta.className = 'account-meta';
+        const mountPill = document.createElement('span');
+        mountPill.className = `pill ${isMounted ? 'pill-mounted' : 'pill-disconnected'}`;
+        mountPill.textContent = isMounted ? 'Mounted' : 'Disconnected';
+        const mountLabel = document.createElement('span');
+        mountLabel.append(document.createTextNode('Mount: '));
+        const mountCode = document.createElement('code');
+        mountCode.className = 'mount-tag';
+        mountCode.textContent = mountPath;
+        mountLabel.append(mountCode);
+        meta.append(mountPill, mountLabel);
+        details.append(name, meta);
+        info.append(iconBox, details);
+
+        const actions = document.createElement('div');
+        actions.className = 'account-actions-right';
+        const addAction = (label, action, className) => {
+          const button = document.createElement('button');
+          button.className = `btn ${className} btn-sm`;
+          button.textContent = label;
+          button.addEventListener('click', () => runAction(action, accountId));
+          actions.append(button);
+        };
+        if (isMounted) {
+          addAction('Open Files', 'open_folder', 'btn-secondary');
+          addAction('Unmount', 'unmount_account', 'btn-secondary');
+        } else {
+          addAction('Mount Drive', 'mount_account', 'btn-accent');
+        }
+        addAction('Disconnect', 'remove_account', 'btn-danger');
+        card.append(info, actions);
         grid.appendChild(card);
       });
     }
 
-    function renderTransfers(queue) {
+    function renderTransfers(queue, queueError = '', truncated = false, total = 0) {
       const tbody = document.getElementById('transferQueueBody');
-      if (!queue || queue.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding:32px; color:var(--text-muted);">Transfer queue is idle. Drag and drop files into ~/CloudDrives to upload.</td></tr>`;
+      if (queueError) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.style.cssText = 'text-align:center; padding:32px; color:var(--danger);';
+        cell.textContent = queueError;
+        row.append(cell);
+        tbody.replaceChildren(row);
         return;
       }
-      tbody.innerHTML = '';
+      if (!queue || queue.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.style.cssText = 'text-align:center; padding:32px; color:var(--text-muted);';
+        cell.textContent = 'No transfer jobs are recorded.';
+        row.append(cell);
+        tbody.replaceChildren(row);
+        return;
+      }
+      tbody.replaceChildren();
       queue.forEach(item => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><span class="pill pill-mounted">Uploaded & Confirmed</span></td>
-          <td><code>${item}</code></td>
-          <td>TeraBox</td>
-          <td>Evicted from tmpfs</td>
-        `;
+        const statusCell = document.createElement('td');
+        const statusPill = document.createElement('span');
+        const status = String(item.status || 'Unknown');
+        statusPill.className = `pill ${status === 'Completed and remotely confirmed' ? 'pill-mounted' : status === 'Failed' || status.startsWith('Needs attention') ? 'pill-disconnected' : 'pill-warning'}`;
+        statusPill.textContent = status;
+        statusCell.append(statusPill);
+        const pathCell = document.createElement('td');
+        pathCell.className = 'queue-file-path';
+        const code = document.createElement('code');
+        code.textContent = String(item.destination_path || item.file_name || '(unknown file)');
+        pathCell.append(code);
+        const accountCell = document.createElement('td');
+        accountCell.textContent = `${String(item.provider || 'Unknown provider')} · ${String(item.account_id || 'Unknown account')}`;
+        const sizeCell = document.createElement('td');
+        const size = Number(item.size_bytes || 0);
+        const transferred = Number(item.bytes_transferred || 0);
+        const percent = Math.max(0, Math.min(100, Number(item.percentage || 0)));
+        sizeCell.textContent = `${formatBytes(size)} · ${formatBytes(transferred)} sent · ${percent.toFixed(0)}%`;
+        tr.append(statusCell, pathCell, accountCell, sizeCell);
         tbody.appendChild(tr);
       });
+      if (truncated) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.style.cssText = 'text-align:center; padding:14px; color:var(--text-muted);';
+        cell.textContent = `Showing ${queue.length} of ${Number(total) || 0} jobs. The active count includes the full queue.`;
+        row.append(cell);
+        tbody.appendChild(row);
+      }
+    }
+
+    function formatBytes(value) {
+      if (!Number.isFinite(value) || value <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+      return `${(value / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
     }
 
     async function runAction(action, target = '') {
@@ -1104,19 +1251,31 @@
     }
 
     async function saveSettings() {
-      const cacheDir = document.getElementById('cfgCacheDir').value;
-      const autoMount = document.getElementById('cfgAutoMount').value === 'true';
-      await fetch('/api/settings/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cache_dir: cacheDir, auto_mount: autoMount })
-      });
-      alert('Settings saved successfully.');
+      try {
+        const cacheDir = document.getElementById('cfgCacheDir').value;
+        const autoMount = document.getElementById('cfgAutoMount').value === 'true';
+        const resp = await fetch('/api/settings/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cache_dir: cacheDir, auto_mount: autoMount })
+        });
+        const result = await resp.json();
+        if (!resp.ok) throw new Error(result.error || `Settings save failed (${resp.status})`);
+        alert('Settings saved successfully.');
+      } catch (err) {
+        alert(`Settings could not be saved: ${err.message || 'Request failed'}`);
+      }
     }
 
     // Auto Refresh
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (pollInterval) clearTimeout(pollInterval);
+      } else if (!stateRequestInFlight) {
+        fetchState();
+      }
+    });
     fetchState();
-    pollInterval = setInterval(fetchState, 4000);
   </script>
 </body>
 </html>
