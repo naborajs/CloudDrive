@@ -1144,7 +1144,39 @@ Users on Linux desktop environments (XFCE, GNOME, Ubuntu VNC) lacked an authenti
 - `tests/Test-TransferRecoveryAndProgression.ps1` and `tests/Test-CloudDeduplicationService.ps1`: PASSED with exit code 0 under Windows PowerShell 5.1 and PowerShell 7.
 - `python -m unittest discover -s tests -p "test_linux_web_dashboard.py" -v`: PASSED all 9 tests on Windows and WSL Ubuntu.
 - `python -m py_compile src/web/app.py` and the dashboard inline JavaScript syntax check: PASSED with exit code 0.
-- Linux PowerShell E2E execution remains unverified in this workstation because WSL Ubuntu does not have `pwsh` installed (`pwsh: command not found`).
+- At the time of this incident, Linux PowerShell E2E was unverified because WSL Ubuntu had no installed `pwsh`; the same-provider transfer E2E was later run with a temporary PowerShell runtime as recorded in Incident 45.
+
+## 45. Durable Same-Provider Cloud Copy, Duplicate Re-Drops, and Linux Runtime Portability (2026-11-25)
+
+**Observed symptoms:**
+1. Copying within the same provider could still start a cloud-to-cloud transfer even when the selected account and source/destination path identified the same object.
+2. An exact destination match was not consistently checked before a remote copy, and a repeated drop could be reported as “no transfer needed” even when the matching file was still pending in the durable queue.
+3. A same-path destination with a different size could be retained by rclone's path-only `--ignore-existing` behavior.
+4. Windows PowerShell 7 credential setup could fail because static .NET ACL methods were unavailable; Linux installation also assumed a narrow package-manager and PowerShell runtime set.
+
+**Root causes:**
+1. The desktop cloud-copy flow invoked rclone directly instead of ingesting per-file operations into the durable queue and restart-reconciliation path.
+2. Queue preflight deduplication covered local uploads, but did not compare live source and destination inventories for remote-to-remote jobs.
+3. A durable duplicate-suppression result did not distinguish an existing queued job from a confirmed destination match in the UI.
+4. The Linux installer hard-coded an Ubuntu package source and did not select the musl PowerShell archive for Alpine; Windows ACL persistence depended on static .NET Framework-era APIs.
+
+**Fix:**
+1. Same-provider cloud-copy batches now scan cloud files, compute exact relative destination paths, and persist per-file `CloudCopy` jobs. An exact same account/path copy is a no-op. Copies within the same provider to a different destination remain allowed.
+2. Live source and destination listings are checked by exact relative path and byte size before each queued cloud copy and on restart. Source modification time is also checked when the provider supplies it; a changed revision becomes actionable `Needs attention`, while unavailable revision metadata or provider listings fail closed. Exact destination matches are marked remotely confirmed; changed-size or missing destination files transfer.
+3. Failed, cancelled, and source-changed attempts can be retried by re-dropping. A repeat drop while the retry is active reuses its job, and the queue reports existing jobs separately from remote exact matches and empty source folders.
+4. The Windows folder scan now runs in an MTA runspace and returns a scan-only plan to the UI thread. Account and path controls remain disabled for the duration; cancellation signals the listing and its cleanup kills/disposes the active rclone child process.
+5. The Linux installer detects common package managers and Linux x64/ARM runtime assets, selects the musl x64 archive on Alpine, verifies PowerShell archives against the official SHA-256 digest before extraction, validates required tools, and the CLI launcher finds the per-user PowerShell runtime. Sudo re-entry explicitly invokes `bash` so it works with the repository's non-executable script mode, and the per-user systemd unit is generated with the actual checkout path. Windows credential ACL updates use PowerShell ACL cmdlets with a DACL-only `icacls` fallback.
+6. The Linux dashboard cloud-copy action validates account IDs and relative paths, uses argument-vector process launch, and explains that jobs may already exist in Transfers.
+
+**Verification:**
+- `tests/Test-CloudCopySameProviderE2E.ps1`: PASSED under Windows PowerShell 5.1, PowerShell 7, and Ubuntu WSL PowerShell 7.7 with rclone 1.76 local remotes. It covered exact skips, same-location no-op, changed-size replacement, missing nested-file copy, duplicate retries, same-size source revision changes, and cancellation cleanup of the rclone child.
+- `tests/Test-TransferDirectionAndIdentity.ps1`: PASSED under Windows PowerShell 5.1 and 7 and Ubuntu WSL; all 16 operation identity cases passed.
+- `tests/Test-TransferRecoveryAndProgression.ps1` and `tests/Test-PostRestartDropDeduplication.ps1`: PASSED under Windows PowerShell 5.1 and 7; restart simulation confirmed 75 exact matches skipped and 25 unsent files retained without duplicate jobs.
+- `tests/Test-LinuxCrossPlatformSupport.ps1`: PASSED under Windows PowerShell 5.1 and 7; the PowerShell 7 run exercised the Windows ACL fallback.
+- `tests/Test-LinuxDesktopApp.ps1`: PASSED all 30 assertions under Windows PowerShell 5.1 and 7, including scan cancellation cleanup, sudo-safe installer re-entry, and dynamic service path generation.
+- `tests/Test-WebUiAndBrowserLogin.ps1` and `python tests/test_linux_web_dashboard.py`: PASSED under Windows; dashboard Python tests also passed in Ubuntu WSL.
+- `bash -n scripts/install-linux.sh`, the systemd path escaping check, and `git diff --check`: PASSED.
+- These provider tests use isolated rclone local remotes. No authenticated live-cloud account, physical device reboot, or install/GUI matrix across Linux distributions was used; these remain release qualification work.
 
 
 
