@@ -265,7 +265,11 @@ function Test-RemoteCloudFileDeduplication {
         [string]$LocalFilePath = '',
 
         [Parameter(Mandatory = $false)]
-        [object]$Account = $null
+        [object]$Account = $null,
+
+        # Recovery and re-drop flows must check live provider state instead of
+        # trusting a ledger entry that may have become stale since it was written.
+        [switch]$RequireLiveCheck
     )
 
     $cleanPath = $RemotePath.Trim().Replace('\', '/').TrimStart('/')
@@ -276,8 +280,10 @@ function Test-RemoteCloudFileDeduplication {
     $localExt = [System.IO.Path]::GetExtension($cleanPath).ToLowerInvariant()
     $localFmt = Get-FileFormatCategory $localExt
 
-    # 1. Fast Path: Check in-memory deduplication ledger cache (0 ms)
-    if (Test-CloudDedupVerifiedFile -AccountId $AccountId -RemotePath $cleanPath -SizeBytes $LocalSizeBytes -Format $localFmt) {
+    # 1. Fast Path: Check in-memory deduplication ledger cache (0 ms). This is
+    # useful for ordinary UI summaries, but it is not authoritative during a
+    # restart or a user re-drop: the remote object may since have changed.
+    if (-not $RequireLiveCheck -and (Test-CloudDedupVerifiedFile -AccountId $AccountId -RemotePath $cleanPath -SizeBytes $LocalSizeBytes -Format $localFmt)) {
         return [ordered]@{
             IsPresent       = $true
             Status          = 'AlreadyInCloud'
@@ -289,6 +295,7 @@ function Test-RemoteCloudFileDeduplication {
 
     # 2. Fast Path: Direct virtual mount check (O(1) filesystem query)
     $mountRoot = ''
+    $mountRcPort = 0
     $prov = if ($ProviderId) { $ProviderId } else { 'gdrive' }
 
     if ($AccountId -and $script:AccountMountRootCache.ContainsKey($AccountId)) {
@@ -312,15 +319,6 @@ function Test-RemoteCloudFileDeduplication {
             }
         }
 
-        if (-not $mountRoot -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
-            try {
-                $status = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $prov
-                if ($status -and $status.IsMounted -and $status.DriveRoot -and (Test-Path -LiteralPath $status.DriveRoot -ErrorAction SilentlyContinue)) {
-                    $mountRoot = $status.DriveRoot
-                }
-            } catch { }
-        }
-
         if (-not $mountRoot -and (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue)) {
             try {
                 $candMount = Resolve-ProviderMountPoint -ProviderId $prov -AccountId $AccountId
@@ -335,7 +333,21 @@ function Test-RemoteCloudFileDeduplication {
         }
     }
 
-    if ($mountRoot -and (Test-Path -LiteralPath $mountRoot -ErrorAction SilentlyContinue)) {
+    if (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue) {
+        try {
+            $status = Get-VirtualDriveStatus -AccountId $AccountId -ProviderId $prov
+            if (-not $mountRoot -and $status -and $status.IsMounted -and $status.DriveRoot -and (Test-Path -LiteralPath $status.DriveRoot -ErrorAction SilentlyContinue)) {
+                $mountRoot = [string]$status.DriveRoot
+            }
+            if ($status -and $status.DriveLetter -and ($status.IsMounted -or $status.ProcessRunning) -and (Get-Command Get-VirtualDriveRcPort -ErrorAction SilentlyContinue)) {
+                $mountRcPort = [int](Get-VirtualDriveRcPort -DriveLetter ([string]$status.DriveLetter))
+            } elseif ($status -and $status.PSObject.Properties['RcPort']) {
+                $mountRcPort = [int]$status.RcPort
+            }
+        } catch { }
+    }
+
+    if (-not $RequireLiveCheck -and $mountRoot -and (Test-Path -LiteralPath $mountRoot -ErrorAction SilentlyContinue)) {
         $sep = [System.IO.Path]::DirectorySeparatorChar
         $cleanRel = $cleanPath.Replace('/', $sep).Replace('\', $sep)
         $targetCloudPath = Join-Path $mountRoot $cleanRel
@@ -424,7 +436,7 @@ function Test-RemoteCloudFileDeduplication {
     # 3. Direct Rclone RC operations/stat fallback (only if virtual drive is unmounted/headless)
     try {
         $cleanLetter = if ($mountRoot) { $mountRoot.ToUpperInvariant().TrimEnd(':').TrimEnd('\') } else { '' }
-        $rcPort = 0
+        $rcPort = $mountRcPort
         if ($cleanLetter.Length -eq 1) {
             $rcPort = 5580 + ([int]$cleanLetter[0] - [int][char]'A')
         }
@@ -452,7 +464,43 @@ function Test-RemoteCloudFileDeduplication {
                     if ($respJson) {
                         $statObj = ConvertFrom-Json $respJson
                         if ($statObj -and $statObj.item) {
-                            $rcSize = [int64]$statObj.item.Size
+                            $requestedName = [System.IO.Path]::GetFileName($cleanPath)
+                            $returnedName = [string]$statObj.item.Name
+                            $statSize = 0L
+                            if (-not $statObj.item.PSObject.Properties['IsDir'] -or -not $statObj.item.PSObject.Properties['Size'] -or -not [int64]::TryParse([string]$statObj.item.Size, [ref]$statSize) -or $statSize -lt 0L) {
+                                return [ordered]@{
+                                    IsPresent = $false
+                                    Status = 'Unavailable'
+                                    RemoteSizeBytes = 0L
+                                    Format = 'unknown'
+                                    Reason = 'The provider stat response did not include a valid file type and byte size.'
+                                }
+                            }
+                            if ([bool]$statObj.item.IsDir) {
+                                return [ordered]@{
+                                    IsPresent = $false
+                                    Status = 'PathMismatch'
+                                    RemoteSizeBytes = $statSize
+                                    Format = 'directory'
+                                    Reason = 'A directory exists at the destination path; it is not an uploaded file.'
+                                }
+                            }
+                            $returnedPath = if ($statObj.item.PSObject.Properties['Path']) { ([string]$statObj.item.Path).Trim('/').Replace('\', '/') } else { '' }
+                            $exactPathMatches = if ($returnedPath) {
+                                [string]::Equals($returnedPath, $cleanPath, [System.StringComparison]::Ordinal)
+                            } else {
+                                [string]::Equals($returnedName, $requestedName, [System.StringComparison]::Ordinal)
+                            }
+                            if (-not $exactPathMatches) {
+                                return [ordered]@{
+                                    IsPresent = $false
+                                    Status = 'PathMismatch'
+                                    RemoteSizeBytes = $statSize
+                                    Format = Get-FileFormatCategory ([System.IO.Path]::GetExtension($returnedName))
+                                    Reason = 'The provider returned a different file name or path than the requested destination.'
+                                }
+                            }
+                            $rcSize = $statSize
                             $rcExt = [System.IO.Path]::GetExtension([string]$statObj.item.Name).ToLowerInvariant()
                             $rcFmt = Get-FileFormatCategory $rcExt
                             if ($rcFmt -eq $localFmt -and $rcSize -eq $LocalSizeBytes) {
@@ -498,14 +546,171 @@ function Test-RemoteCloudFileDeduplication {
                 $resp.Dispose()
             }
         }
-    } catch { }
+    } catch {
+        # A failed stat request is not evidence that the object is absent. Rclone
+        # returns a not-found error for a confirmed miss; transport/auth/provider
+        # failures must remain distinct so schedulers can safely defer the upload.
+        $responseBody = ''
+        try {
+            $response = $_.Exception.Response
+            if ($response) {
+                $responseStream = $response.GetResponseStream()
+                if ($responseStream) {
+                    $reader = [System.IO.StreamReader]::new($responseStream, [System.Text.Encoding]::UTF8)
+                    try { $responseBody = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                }
+            }
+        } catch { }
+        $errorText = ([string]$_.Exception.Message + ' ' + $responseBody)
+        if ($errorText -match '(?i)(object|file|directory|path).{0,40}(not found|does not exist|doesn''t exist)|\b404\b.{0,30}\bnot found\b') {
+            return [ordered]@{
+                IsPresent = $false
+                Status = 'New'
+                RemoteSizeBytes = 0L
+                Format = $localFmt
+                Reason = 'Provider confirmed that the destination path is absent.'
+            }
+        }
+    }
+
+    # Some platforms/providers do not expose a mounted RC endpoint. Fall back to
+    # a fresh provider directory listing so absence and unavailability remain
+    # distinct without depending on drive letters or a stale VFS cache.
+    $liveAccount = $Account
+    if (-not $liveAccount -and (Get-Command Get-CloudAccounts -ErrorAction SilentlyContinue)) {
+        try {
+            $liveAccount = @(Get-CloudAccounts | Where-Object { [string](Get-SafeFieldValue $_ 'Id') -eq $AccountId } | Select-Object -First 1)[0]
+        } catch { }
+    }
+    if ($liveAccount -and (Get-Command Get-CloudDirectoryContents -ErrorAction SilentlyContinue)) {
+        $separator = $cleanPath.LastIndexOf('/')
+        $parentPath = if ($separator -ge 0) { $cleanPath.Substring(0, $separator) } else { '' }
+        $expectedName = if ($separator -ge 0) { $cleanPath.Substring($separator + 1) } else { $cleanPath }
+        try {
+            $providerItems = @(Get-CloudDirectoryContents -Account $liveAccount -Path $parentPath -BypassLocalMount)
+            $remoteItem = $null
+            $remoteDirectory = $false
+            foreach ($providerItem in $providerItems) {
+                if ($providerItem -and $providerItem.Contains('Name') -and [string]::Equals([string]$providerItem['Name'], $expectedName, [System.StringComparison]::Ordinal)) {
+                    if (-not $providerItem.Contains('IsDir')) {
+                        return [ordered]@{
+                            IsPresent = $false
+                            Status = 'Unavailable'
+                            RemoteSizeBytes = 0L
+                            Format = 'unknown'
+                            Reason = 'The provider listing did not identify whether the destination item is a file.'
+                        }
+                    }
+                    if ([bool]$providerItem['IsDir']) {
+                        $remoteDirectory = $true
+                        continue
+                    }
+                    $candidateSize = 0L
+                    if (-not $providerItem.Contains('Size') -or -not [int64]::TryParse([string]$providerItem['Size'], [ref]$candidateSize) -or $candidateSize -lt 0L) {
+                        return [ordered]@{
+                            IsPresent = $false
+                            Status = 'Unavailable'
+                            RemoteSizeBytes = 0L
+                            Format = 'unknown'
+                            Reason = 'The provider listing did not include a valid file byte size.'
+                        }
+                    }
+                    if (-not $remoteItem) { $remoteItem = $providerItem }
+                    if ($candidateSize -eq $LocalSizeBytes) {
+                        $remoteItem = $providerItem
+                        break
+                    }
+                }
+            }
+            if (-not $remoteItem) {
+                if ($remoteDirectory) {
+                    return [ordered]@{
+                        IsPresent = $false
+                        Status = 'PathMismatch'
+                        RemoteSizeBytes = 0L
+                        Format = 'directory'
+                        Reason = 'A directory exists at the destination path; it is not an uploaded file.'
+                    }
+                }
+                return [ordered]@{
+                    IsPresent = $false
+                    Status = 'New'
+                    RemoteSizeBytes = 0L
+                    Format = $localFmt
+                    Reason = 'The live provider listing confirmed that the destination path is absent.'
+                }
+            }
+
+            $reportedPath = if ($remoteItem.Contains('Path')) { ([string]$remoteItem['Path']).Trim('/').Replace('\', '/') } else { '' }
+            # rclone lsjson reports Path relative to the path being listed. Since
+            # this request lists the destination's parent folder, restore that
+            # prefix before comparing it with the queued destination path.
+            if (-not $reportedPath) {
+                $remotePath = $cleanPath
+            } elseif ($parentPath -and -not [string]::Equals($reportedPath, $parentPath, [System.StringComparison]::Ordinal) -and -not $reportedPath.StartsWith("$parentPath/", [System.StringComparison]::Ordinal)) {
+                $remotePath = "$parentPath/$reportedPath"
+            } else {
+                $remotePath = $reportedPath
+            }
+            if (-not [string]::Equals($remotePath, $cleanPath, [System.StringComparison]::Ordinal)) {
+                return [ordered]@{
+                    IsPresent = $false
+                    Status = 'PathMismatch'
+                    RemoteSizeBytes = [int64]$remoteItem['Size']
+                    Format = Get-FileFormatCategory ([System.IO.Path]::GetExtension([string]$remoteItem['Name']))
+                    Reason = 'The provider returned a different destination path than the requested file.'
+                }
+            }
+            $remoteSize = [int64]$remoteItem['Size']
+            $remoteFormat = Get-FileFormatCategory ([System.IO.Path]::GetExtension([string]$remoteItem['Name']))
+            if ($remoteFormat -ne $localFmt) {
+                return [ordered]@{
+                    IsPresent = $false
+                    Status = 'FormatMismatch'
+                    RemoteSizeBytes = $remoteSize
+                    Format = $remoteFormat
+                    Reason = 'A different file format exists at the destination path.'
+                }
+            }
+            if ($remoteSize -ne $LocalSizeBytes) {
+                return [ordered]@{
+                    IsPresent = $false
+                    Status = 'SizeMismatch'
+                    RemoteSizeBytes = $remoteSize
+                    Format = $remoteFormat
+                    Reason = "Destination size is $remoteSize bytes; local file is $LocalSizeBytes bytes."
+                }
+            }
+            try {
+                Record-CloudDedupVerifiedFile -AccountId $AccountId -ProviderId $prov -RemotePath $cleanPath -SizeBytes $LocalSizeBytes -Format $localFmt -SkipPersist
+            } catch { }
+            return [ordered]@{
+                IsPresent = $true
+                Status = 'AlreadyInCloud'
+                RemoteSizeBytes = $remoteSize
+                Format = $remoteFormat
+                Reason = 'The live provider listing confirmed the exact name, path, and byte size.'
+            }
+        } catch {
+            $listingError = [string]$_.Exception.Message
+            if ($listingError -match '(?i)(directory|folder|path).{0,40}(not found|does not exist|doesn''t exist)|\b404\b.{0,30}\bnot found\b') {
+                return [ordered]@{
+                    IsPresent = $false
+                    Status = 'New'
+                    RemoteSizeBytes = 0L
+                    Format = $localFmt
+                    Reason = 'The provider confirmed that the destination folder is absent.'
+                }
+            }
+        }
+    }
 
     return [ordered]@{
         IsPresent       = $false
-        Status          = 'New'
+        Status          = 'Unavailable'
         RemoteSizeBytes = 0L
         Format          = $localFmt
-        Reason          = 'Not found in cloud storage. Queued for upload.'
+        Reason          = 'No live provider check was available. Transfer is deferred until the destination can be verified.'
     }
 }
 
@@ -573,18 +778,25 @@ function Get-RemoteFileInventoryMap {
         [string]$DestinationFolderPath = '',
 
         [Parameter(Mandatory = $false)]
-        [switch]$BypassMount
+        [string[]]$DestinationFolderPaths = @(),
+
+        [Parameter(Mandatory = $false)]
+        [switch]$BypassMount,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$BypassLedger
     )
 
-    $inventory = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $inventory = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
     $accId = [string](Get-SafeFieldValue $DestinationAccount 'Id')
     $provId = [string](Get-SafeFieldValue $DestinationAccount 'ProviderId')
     if (-not $provId) { $provId = 'gdrive' }
 
     $cleanFolder = if ($DestinationFolderPath) { $DestinationFolderPath.Trim().Replace('\', '/').TrimStart('/').TrimEnd('/') } else { '' }
 
-    # Fast-Path 1: Read through mounted Windows Virtual Drive if active
-    if (-not $BypassMount -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
+    # Fast-Path 1: Read through mounted virtual drive for non-recovery lookups.
+    # Recovery/drop scans bypass the mount cache and query the provider directly.
+    if (-not $BypassMount -and -not $BypassLedger -and (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue)) {
         try {
             $mountStatus = Get-VirtualDriveStatus -AccountId $accId -ProviderId $provId
             if ($mountStatus -and $mountStatus.IsMounted -and (Test-Path -LiteralPath $mountStatus.DriveRoot)) {
@@ -598,7 +810,7 @@ function Get-RemoteFileInventoryMap {
                         $fi = [System.IO.FileInfo]::new($f)
                         $rel = $f.Substring($rootLen).TrimStart('\', '/').Replace('\', '/')
                         $fullRel = if ($cleanFolder) { "$cleanFolder/$rel" } else { $rel }
-                        $normKey = $fullRel.ToLowerInvariant()
+                        $normKey = $fullRel
                         $fmt = Get-FileFormatCategory $fi.Extension
                         $inventory[$normKey] = [ordered]@{
                             Name      = $fi.Name
@@ -628,6 +840,109 @@ function Get-RemoteFileInventoryMap {
         } catch { }
     }
 
+    # Live listing is limited to destination parent folders represented by the
+    # current batch. Each successfully listed folder records an exact scope;
+    # missing paths outside those folders still require a direct provider check.
+    if ($BypassLedger) {
+        if (Get-Command Get-CloudDirectoryContents -ErrorAction SilentlyContinue) {
+            $folders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            if ($DestinationFolderPaths -and $DestinationFolderPaths.Count -gt 0) {
+                foreach ($folderPath in $DestinationFolderPaths) {
+                    if ($null -eq $folderPath) { continue }
+                    $normalizedFolder = ([string]$folderPath).Trim().Replace('\', '/').Trim('/').TrimStart('/')
+                    [void]$folders.Add($normalizedFolder)
+                }
+            } else {
+                [void]$folders.Add($cleanFolder)
+            }
+
+            foreach ($normalizedFolder in $folders) {
+                try {
+                    $children = @(Get-CloudDirectoryContents -Account $DestinationAccount -Path $normalizedFolder -BypassLocalMount)
+                } catch {
+                    $listingError = [string]$_.Exception.Message
+                    $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $normalizedFolder
+                    if ($listingError -match '(?i)(directory|folder|path).{0,40}(not found|does not exist|doesn''t exist)|\b404\b.{0,30}\bnot found\b') {
+                        $inventory[$scopeKey] = [ordered]@{ Name = ''; RelPath = $normalizedFolder; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryScope' }
+                    } else {
+                        $inventory[$scopeKey] = [ordered]@{ Name = ''; RelPath = $normalizedFolder; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryUnavailableScope' }
+                    }
+                    continue
+                }
+                $folderComplete = $true
+                foreach ($child in $children) {
+                    if (-not $child -or -not $child.Contains('Name') -or -not $child.Contains('IsDir')) {
+                        $folderComplete = $false
+                        break
+                    }
+                    $childName = [string]$child['Name']
+                    if ([string]::IsNullOrWhiteSpace($childName) -or $childName -in @('.', '..') -or $childName.Contains('/') -or $childName.Contains('\')) {
+                        $folderComplete = $false
+                        break
+                    }
+                    $childPath = if ($normalizedFolder) { "$normalizedFolder/$childName" } else { $childName }
+                    if ([bool]$child['IsDir']) {
+                        $inventory[$childPath] = [ordered]@{
+                            Name = $childName
+                            RelPath = $childPath
+                            SizeBytes = 0L
+                            Format = 'directory'
+                            Extension = ''
+                            Source = 'LiveProviderInventory'
+                            IsDirectory = $true
+                        }
+                        continue
+                    }
+                    $fiName = $childName
+                    $sizeBytes = 0L
+                    if (-not $child.Contains('Size') -or -not [int64]::TryParse([string]$child['Size'], [ref]$sizeBytes) -or $sizeBytes -lt 0L) {
+                        $folderComplete = $false
+                        break
+                    }
+                    $extension = [System.IO.Path]::GetExtension($fiName).ToLowerInvariant()
+                    $inventory[$childPath] = [ordered]@{
+                        Name = $fiName
+                        RelPath = $childPath
+                        SizeBytes = $sizeBytes
+                        Format = Get-FileFormatCategory $extension
+                        Extension = $extension
+                        Source = 'LiveProviderInventory'
+                        IsDirectory = $false
+                    }
+                }
+                if ($folderComplete) {
+                    $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $normalizedFolder
+                    $inventory[$scopeKey] = [ordered]@{
+                        Name = ''
+                        RelPath = $normalizedFolder
+                        SizeBytes = 0L
+                        Format = ''
+                        Extension = ''
+                        Source = 'LiveProviderInventoryScope'
+                    }
+                } else {
+                    $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $normalizedFolder
+                    $inventory[$scopeKey] = [ordered]@{
+                        Name = ''
+                        RelPath = $normalizedFolder
+                        SizeBytes = 0L
+                        Format = ''
+                        Extension = ''
+                        Source = 'LiveProviderInventoryUnavailableScope'
+                    }
+                }
+            }
+        } else {
+            $unavailableFolders = if ($DestinationFolderPaths -and $DestinationFolderPaths.Count -gt 0) { $DestinationFolderPaths } else { @($cleanFolder) }
+            foreach ($folderPath in $unavailableFolders) {
+                $normalizedFolder = ([string]$folderPath).Trim().Replace('\', '/').Trim('/').TrimStart('/')
+                $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $normalizedFolder
+                $inventory[$scopeKey] = [ordered]@{ Name = ''; RelPath = $normalizedFolder; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryUnavailableScope' }
+            }
+        }
+        return $inventory
+    }
+
     # Fast-Path 2: Inspect durable local deduplication ledger
     if (-not $script:DedupLedgerLoaded) {
         Load-CloudDedupLedger | Out-Null
@@ -643,7 +958,7 @@ function Get-RemoteFileInventoryMap {
         if ($kLower.StartsWith($prefix) -or ($cleanFolder -eq '' -and $kLower.StartsWith("${accId}:"))) {
             $entry = $script:DedupLedgerCache[$k]
             $entryRel = [string]$entry['RemotePath']
-            $normKey = $entryRel.ToLowerInvariant()
+        $normKey = $entryRel
             if (-not $inventory.ContainsKey($normKey)) {
                 $inventory[$normKey] = [ordered]@{
                     Name      = [string]$entry['FileName']
@@ -696,14 +1011,44 @@ function Classify-TransferCandidate {
     $localFmt = Get-FileFormatCategory $localExt
 
     $cleanRel = $DestinationRelativePath.Trim().Replace('\', '/').TrimStart('/')
-    $key = $cleanRel.ToLowerInvariant()
+    $key = $cleanRel
+    $inventoryScopePrefix = "`0nscd_live_inventory_scope:"
 
     # 1. Does candidate file exist in destination inventory?
     if (-not $RemoteInventoryMap.ContainsKey($key)) {
+        $parent = [string][System.IO.Path]::GetDirectoryName($cleanRel).Replace('\', '/')
+        $scopeKey = '{0}{1}' -f $inventoryScopePrefix, $parent
+        if ($RemoteInventoryMap.ContainsKey($scopeKey)) {
+            $scope = $RemoteInventoryMap[$scopeKey]
+            if ([string]$scope['Source'] -ne 'LiveProviderInventoryScope') {
+                return [ordered]@{
+                    Status = 'Unavailable'
+                    ShouldTransfer = $false
+                    Reason = 'The live provider listing for this destination folder could not be verified; transfer is deferred.'
+                    LocalFilePath = $LocalFilePath
+                    RelativePath = $cleanRel
+                    LocalSizeBytes = $localSize
+                    RemoteSizeBytes = 0L
+                    LocalFormat = $localFmt
+                    RemoteFormat = 'unknown'
+                }
+            }
+            return [ordered]@{
+                Status = 'New'
+                ShouldTransfer = $true
+                Reason = 'The live provider listing confirmed this destination path is absent.'
+                LocalFilePath = $LocalFilePath
+                RelativePath = $cleanRel
+                LocalSizeBytes = $localSize
+                RemoteSizeBytes = 0L
+                LocalFormat = $localFmt
+                RemoteFormat = 'none'
+            }
+        }
         if ($DestinationAccount) {
             $accId = [string](Get-SafeFieldValue $DestinationAccount 'Id')
             $provId = [string](Get-SafeFieldValue $DestinationAccount 'ProviderId')
-            $directCheck = Test-RemoteCloudFileDeduplication -AccountId $accId -ProviderId $provId -RemotePath $cleanRel -LocalSizeBytes $localSize -LocalFilePath $LocalFilePath -Account $DestinationAccount
+            $directCheck = Test-RemoteCloudFileDeduplication -AccountId $accId -ProviderId $provId -RemotePath $cleanRel -LocalSizeBytes $localSize -LocalFilePath $LocalFilePath -Account $DestinationAccount -RequireLiveCheck
             if ($directCheck.IsPresent) {
                 return [ordered]@{
                     Status          = 'AlreadyInCloud'
@@ -716,7 +1061,7 @@ function Classify-TransferCandidate {
                     LocalFormat     = $localFmt
                     RemoteFormat    = [string]$directCheck.Format
                 }
-            } elseif ($directCheck.Status -in @('FormatMismatch', 'SizeMismatch')) {
+            } elseif ($directCheck.Status -in @('FormatMismatch', 'SizeMismatch', 'PathMismatch')) {
                 return [ordered]@{
                     Status          = [string]$directCheck.Status
                     ShouldTransfer  = $true
@@ -728,6 +1073,18 @@ function Classify-TransferCandidate {
                     LocalFormat     = $localFmt
                     RemoteFormat    = [string]$directCheck.Format
                 }
+            } elseif ($directCheck.Status -eq 'Unavailable') {
+                return [ordered]@{
+                    Status = 'Unavailable'
+                    ShouldTransfer = $false
+                    Reason = [string]$directCheck.Reason
+                    LocalFilePath = $LocalFilePath
+                    RelativePath = $cleanRel
+                    LocalSizeBytes = $localSize
+                    RemoteSizeBytes = [int64]$directCheck.RemoteSizeBytes
+                    LocalFormat = $localFmt
+                    RemoteFormat = 'unknown'
+                }
             }
         }
 
@@ -737,10 +1094,11 @@ function Classify-TransferCandidate {
         $matchedDifferentFormat = $null
 
         foreach ($existingKey in $RemoteInventoryMap.Keys) {
+            if ($existingKey.StartsWith($inventoryScopePrefix, [System.StringComparison]::Ordinal)) { continue }
             $exItem = $RemoteInventoryMap[$existingKey]
             $exBase = [System.IO.Path]::GetFileNameWithoutExtension([string]$exItem['RelPath'])
             $exParent = [System.IO.Path]::GetDirectoryName([string]$exItem['RelPath']).Replace('\', '/')
-            if ($exBase -eq $baseName -and $exParent -eq $parentRel) {
+            if ([string]::Equals($exBase, $baseName, [System.StringComparison]::Ordinal) -and [string]::Equals($exParent, $parentRel, [System.StringComparison]::Ordinal)) {
                 $matchedDifferentFormat = $exItem
                 break
             }
@@ -775,6 +1133,19 @@ function Classify-TransferCandidate {
 
     # 2. File exists at exact destination path: inspect format and size
     $remote = $RemoteInventoryMap[$key]
+    if ($remote.ContainsKey('IsDirectory') -and [bool]$remote['IsDirectory']) {
+        return [ordered]@{
+            Status = 'PathMismatch'
+            ShouldTransfer = $true
+            Reason = 'A directory exists at the exact destination path; it is not an uploaded file.'
+            LocalFilePath = $LocalFilePath
+            RelativePath = $cleanRel
+            LocalSizeBytes = $localSize
+            RemoteSizeBytes = 0L
+            LocalFormat = $localFmt
+            RemoteFormat = 'directory'
+        }
+    }
     $remoteSize = [int64]$remote['SizeBytes']
     $remoteFmt = [string]$remote['Format']
     $remoteExt = [string]$remote['Extension']
