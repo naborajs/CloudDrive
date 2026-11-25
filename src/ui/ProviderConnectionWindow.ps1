@@ -2642,6 +2642,12 @@ function Show-CloudTransferModal(
     $script:DstCurrentPath = ''
     $script:SelectedSourceItem = $null
     $script:ActiveTransferJobId = $null
+    $script:ActiveTransferBatchId = $null
+    $script:CloudCopyScanPowerShell = $null
+    $script:CloudCopyScanRunspace = $null
+    $script:CloudCopyScanAsyncHandle = $null
+    $script:CloudCopyScanContext = $null
+    $script:CloudCopyScanCancellationSource = $null
 
     $availableAccounts = Get-AvailableTransferAccounts
     if (-not $availableAccounts -or $availableAccounts.Count -eq 0) {
@@ -2794,7 +2800,144 @@ function Show-CloudTransferModal(
     # Live Transfer Polling Timer
     $pollTimer = [System.Windows.Threading.DispatcherTimer]::new()
     $pollTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $setCloudCopySelectionEnabled = {
+        param([bool]$enabled)
+        $srcCombo.IsEnabled = $enabled
+        $dstCombo.IsEnabled = $enabled
+        $srcUpBtn.IsEnabled = $enabled
+        $dstUpBtn.IsEnabled = $enabled
+        $srcList.IsEnabled = $enabled
+        $dstList.IsEnabled = $enabled
+    }
+    $completeCloudCopyBatch = {
+        param([object]$batch)
+        if ([int]$batch.QueuedCount -eq 0) {
+            if ([int]$batch.AlreadyQueuedCount -gt 0) {
+                $statusBadge.Text = ([string][char]0x25CF + " $($batch.AlreadyQueuedCount) file(s) already tracked in the durable queue")
+                $bytesText.Text = "$($batch.AlreadyQueuedCount) file(s) already have a durable queue entry"
+                $speedEtaText.Text = 'Check Transfers for each existing job status.'
+            } elseif ([int]$batch.TotalFiles -eq 0) {
+                $statusBadge.Text = ([string][char]0x25CF + ' No files found in the selected source folder')
+                $bytesText.Text = '0 files scanned; no transfer was started'
+                $speedEtaText.Text = 'Choose a folder that contains files to copy.'
+            } else {
+                $statusBadge.Text = ([string][char]0x25CF + " No transfer needed; skipped $($batch.AlreadyPresentCount) exact match(es)")
+                $bytesText.Text = "0 B transferred; $($batch.AlreadyPresentCount) file(s) already match the destination"
+                $speedEtaText.Text = 'No cloud transfer was started.'
+            }
+            $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
+            $progressBar.IsIndeterminate = $false
+            $progressBar.Value = if ([int]$batch.AlreadyPresentCount -gt 0 -and [int]$batch.AlreadyQueuedCount -eq 0) { 100 } else { 0 }
+            $startBtn.IsEnabled = $true
+            $pauseBtn.IsEnabled = $false
+            $cancelBtn.IsEnabled = $false
+            & $refreshDest
+            return
+        }
+
+        $script:ActiveTransferBatchId = [string]$batch.BatchId
+        $statusBadge.Text = ([string][char]0x25CF + " Queued $($batch.QueuedCount) file(s); $($batch.AlreadyQueuedCount) already tracked; skipped $($batch.AlreadyPresentCount) exact match(es)")
+        $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+        $progressBar.IsIndeterminate = $true
+        $bytesText.Text = "$($batch.QueuedCount) file(s) queued; $($batch.AlreadyQueuedCount) already tracked; $($batch.AlreadyPresentCount) already present"
+        $speedEtaText.Text = 'Transfers resume automatically after an application or device restart.'
+        $script:ActiveTransferJobId = $null
+        $startBtn.IsEnabled = $false
+        $pauseBtn.IsEnabled = $false
+        $cancelBtn.IsEnabled = $true
+    }
     $pollTimer.Add_Tick({
+        if ($script:CloudCopyScanPowerShell -and $script:CloudCopyScanAsyncHandle) {
+            if (-not $script:CloudCopyScanAsyncHandle.IsCompleted) {
+                $statusBadge.Text = ([string][char]0x25CF + ' Scanning cloud folders in the background...')
+                return
+            }
+
+            $pollTimer.Stop()
+            try {
+                $scanOutput = @($script:CloudCopyScanPowerShell.EndInvoke($script:CloudCopyScanAsyncHandle))
+                if ($scanOutput.Count -eq 0 -or $null -eq $scanOutput[0]) {
+                    throw 'Cloud scan completed without returning a transfer plan.'
+                }
+                $context = $script:CloudCopyScanContext
+                $batch = Add-CloudTransferRemoteBatch `
+                    -SourceAccount $context.SourceAccount `
+                    -SourcePath $context.SourcePath `
+                    -SourceIsDirectory:$context.SourceIsDirectory `
+                    -DestinationAccount $context.DestinationAccount `
+                    -DestinationFolderPath $context.DestinationFolderPath `
+                    -ConflictAction 'Skip' `
+                    -ScanPlan ([hashtable]$scanOutput[0])
+                & $completeCloudCopyBatch $batch
+                if ($script:ActiveTransferBatchId) { $pollTimer.Start() }
+            } catch {
+                $statusBadge.Text = ([string][char]0x25CF + ' Start Failed')
+                $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+                $logMsgText.Text = "Error scanning cloud folders: $($_.Exception.Message)"
+                $logMsgText.Visibility = 'Visible'
+                $startBtn.IsEnabled = $true
+                $pauseBtn.IsEnabled = $false
+                $cancelBtn.IsEnabled = $false
+            } finally {
+                & $setCloudCopySelectionEnabled $true
+                try { $script:CloudCopyScanPowerShell.Dispose() } catch { }
+                try { $script:CloudCopyScanRunspace.Dispose() } catch { }
+                try { $script:CloudCopyScanCancellationSource.Dispose() } catch { }
+                $script:CloudCopyScanPowerShell = $null
+                $script:CloudCopyScanRunspace = $null
+                $script:CloudCopyScanAsyncHandle = $null
+                $script:CloudCopyScanContext = $null
+                $script:CloudCopyScanCancellationSource = $null
+            }
+            return
+        }
+
+        if ($script:ActiveTransferBatchId) {
+            $summary = Get-CloudTransferBatchSummary -BatchId $script:ActiveTransferBatchId
+            if ($summary) {
+                $progressBar.IsIndeterminate = $false
+                $progressBar.Value = [double]$summary.OverallPercentage
+                $bytesFmt = (Format-TransferSpeed ([int64]$summary.BytesTransferred)).Replace('/s', '')
+                $totalFmt = (Format-TransferSpeed ([int64]$summary.TotalBytes)).Replace('/s', '')
+                $bytesText.Text = "$bytesFmt of $totalFmt transferred ($($summary.OverallPercentage)%)"
+                $speedEtaText.Text = "$($summary.CompletedCount) of $($summary.TotalFiles) files confirmed; $($summary.QueuedCount) queued; $($summary.AttentionCount) need attention"
+
+                if ($summary.IsComplete) {
+                    if ([int]$summary.FailedCount -gt 0 -or [int]$summary.AttentionCount -gt 0) {
+                        $attentionTotal = [int]$summary.FailedCount + [int]$summary.AttentionCount
+                        $statusBadge.Text = ([string][char]0x25CF + " $attentionTotal file(s) need attention")
+                        $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
+                        $attentionMessage = @($summary.AttentionItems | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.LastError) } | Select-Object -First 1)
+                        if ($attentionMessage.Count -gt 0) {
+                            $logMsgText.Text = "$( [string]$attentionMessage[0].LastError ) Fix the reported cause, then re-drop the same source selection to retry."
+                        } else {
+                            $logMsgText.Text = 'The durable queue retained items for review. Fix the reported cause, then re-drop the same source selection to retry.'
+                        }
+                        $logMsgText.Visibility = 'Visible'
+                    } elseif ([int]$summary.CancelledCount -gt 0) {
+                        $statusBadge.Text = ([string][char]0x25CF + ' Cloud copy cancelled')
+                        $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+                    } else {
+                        $statusBadge.Text = ([string][char]0x25CF + ' Cloud copy complete (remotely confirmed)')
+                        $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#22C55E')
+                        $progressBar.Value = 100
+                    }
+                    $cancelBtn.IsEnabled = $false
+                    $startBtn.IsEnabled = $true
+                    $script:ActiveTransferBatchId = $null
+                    $pollTimer.Stop()
+                    & $refreshDest
+                } elseif ($summary.UploadingCount -gt 0) {
+                    $statusBadge.Text = ([string][char]0x25CF + " Copying $($summary.UploadingCount) file(s) through the durable queue")
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
+                } else {
+                    $statusBadge.Text = ([string][char]0x25CF + " $($summary.QueuedCount) file(s) queued for durable cloud copy")
+                    $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FBBF24')
+                }
+            }
+            return
+        }
+
         if ($script:ActiveTransferJobId) {
             $st = Get-CloudTransferStatus -JobId $script:ActiveTransferJobId
             if ($st) {
@@ -2880,34 +3023,83 @@ function Show-CloudTransferModal(
         $srcAcc = $availableAccounts[$srcCombo.SelectedIndex]
         $dstAcc = $availableAccounts[$dstCombo.SelectedIndex]
 
-        if ($srcAcc.Id -eq $dstAcc.Id -and $script:SrcCurrentPath -eq $script:DstCurrentPath) {
-            [System.Windows.MessageBox]::Show('Source and destination cannot be identical in the same directory.', 'Transfer Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-            return
-        }
-
         # Path to transfer: specific selected item or current folder
         $srcTarget = if ($script:SelectedSourceItem) {
             if ($script:SrcCurrentPath) { "$($script:SrcCurrentPath)/$($script:SelectedSourceItem.Name)" } else { $script:SelectedSourceItem.Name }
         } else {
             $script:SrcCurrentPath
         }
+        $sourceIsDirectory = if ($script:SelectedSourceItem) { [bool]$script:SelectedSourceItem.IsDir } else { $true }
+        if ([string]::IsNullOrWhiteSpace($srcTarget)) {
+            [System.Windows.MessageBox]::Show('Choose a file or folder in the source account before starting. Copying the entire account root is not started implicitly.', 'Transfer Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
 
         $logMsgText.Visibility = 'Collapsed'
-        $statusBadge.Text = 'Initializing streaming transfer...'
+        & $setCloudCopySelectionEnabled $false
+        $startBtn.IsEnabled = $false
+        $pauseBtn.IsEnabled = $false
+        $cancelBtn.IsEnabled = $true
+        $progressBar.IsIndeterminate = $true
+        $bytesText.Text = 'Scanning source and destination folders...'
+        $speedEtaText.Text = 'The window remains responsive while cloud listings are checked.'
+        $statusBadge.Text = ([string][char]0x25CF + ' Scanning cloud folders in the background...')
         $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B82F6')
 
         try {
-            $job = Start-CloudTransfer -SourceAccount $srcAcc -SourcePath $srcTarget -DestinationAccount $dstAcc -DestinationPath $script:DstCurrentPath -ConflictAction 'Skip'
-            $script:ActiveTransferJobId = $job.JobId
+            $sourceRoot = Split-Path -Parent $PSScriptRoot
+            $script:CloudCopyScanContext = @{
+                SourceAccount = $srcAcc
+                SourcePath = $srcTarget
+                SourceIsDirectory = [bool]$sourceIsDirectory
+                DestinationAccount = $dstAcc
+                DestinationFolderPath = [string]$script:DstCurrentPath
+            }
+            $script:CloudCopyScanCancellationSource = [System.Threading.CancellationTokenSource]::new()
+            $script:CloudCopyScanRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+            $script:CloudCopyScanRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+            $script:CloudCopyScanRunspace.Open()
+            $script:CloudCopyScanPowerShell = [System.Management.Automation.PowerShell]::Create()
+            $script:CloudCopyScanPowerShell.Runspace = $script:CloudCopyScanRunspace
+            $null = $script:CloudCopyScanPowerShell.AddScript({
+                param($moduleRoot, $sourceAccount, $sourcePath, $isDirectory, $destinationAccount, $destinationPath, $cancelSource)
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = 'Stop'
+                . (Join-Path $moduleRoot 'services\SettingsManager.ps1')
+                . (Join-Path $moduleRoot 'services\CloudTransferManager.ps1')
+                $global:CloudDirectoryListingCancellationSource = $cancelSource
+                $scanParameters = @{
+                    SourceAccount = $sourceAccount
+                    SourcePath = $sourcePath
+                    DestinationAccount = $destinationAccount
+                    DestinationFolderPath = $destinationPath
+                    ConflictAction = 'Skip'
+                    OnlyScan = $true
+                }
+                if ($isDirectory) { $scanParameters.SourceIsDirectory = $true }
+                $scanPlan = Add-CloudTransferRemoteBatch @scanParameters
+                $global:CloudDirectoryListingCancellationSource = $null
+                Write-Output -NoEnumerate $scanPlan
+            }).AddArgument($sourceRoot).AddArgument($srcAcc).AddArgument($srcTarget).AddArgument([bool]$sourceIsDirectory).AddArgument($dstAcc).AddArgument([string]$script:DstCurrentPath).AddArgument($script:CloudCopyScanCancellationSource)
+            $script:CloudCopyScanAsyncHandle = $script:CloudCopyScanPowerShell.BeginInvoke()
             $pollTimer.Start()
-            $startBtn.IsEnabled = $false
-            $pauseBtn.IsEnabled = $true
-            $cancelBtn.IsEnabled = $true
         } catch {
+            try { if ($script:CloudCopyScanPowerShell) { $script:CloudCopyScanPowerShell.Dispose() } } catch { }
+            try { if ($script:CloudCopyScanRunspace) { $script:CloudCopyScanRunspace.Dispose() } } catch { }
+            try { if ($script:CloudCopyScanCancellationSource) { $script:CloudCopyScanCancellationSource.Dispose() } } catch { }
+            $script:CloudCopyScanPowerShell = $null
+            $script:CloudCopyScanRunspace = $null
+            $script:CloudCopyScanAsyncHandle = $null
+            $script:CloudCopyScanContext = $null
+            $script:CloudCopyScanCancellationSource = $null
             $statusBadge.Text = ([string][char]0x25CF + ' Start Failed')
             $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EF4444')
             $logMsgText.Text = "Error starting transfer: $($_.Exception.Message)"
             $logMsgText.Visibility = 'Visible'
+            $startBtn.IsEnabled = $true
+            $cancelBtn.IsEnabled = $false
+            $progressBar.IsIndeterminate = $false
+            & $setCloudCopySelectionEnabled $true
         }
     })
 
@@ -2922,14 +3114,67 @@ function Show-CloudTransferModal(
     })
 
     $cancelBtn.Add_Click({
-        if ($script:ActiveTransferJobId) {
+        if ($script:CloudCopyScanPowerShell) {
+            $pollTimer.Stop()
+            try { $script:CloudCopyScanCancellationSource.Cancel() } catch { }
+            try { $script:CloudCopyScanPowerShell.Stop() } catch { }
+            try { $script:CloudCopyScanPowerShell.Dispose() } catch { }
+            try { $script:CloudCopyScanRunspace.Dispose() } catch { }
+            try { $script:CloudCopyScanCancellationSource.Dispose() } catch { }
+            $script:CloudCopyScanPowerShell = $null
+            $script:CloudCopyScanRunspace = $null
+            $script:CloudCopyScanAsyncHandle = $null
+            $script:CloudCopyScanContext = $null
+            $script:CloudCopyScanCancellationSource = $null
+            $progressBar.IsIndeterminate = $false
+            & $setCloudCopySelectionEnabled $true
+            $statusBadge.Text = ([string][char]0x25CF + ' Cloud scan cancelled; no files were queued')
+            $statusBadge.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.TextMuted)
+            $startBtn.IsEnabled = $true
+            $pauseBtn.IsEnabled = $false
+            $cancelBtn.IsEnabled = $false
+        } elseif ($script:ActiveTransferBatchId) {
+            Stop-CloudTransferBatch -BatchId $script:ActiveTransferBatchId | Out-Null
+            $script:ActiveTransferBatchId = $null
+            $pollTimer.Stop()
+            $statusBadge.Text = ([string][char]0x25CF + ' Cloud copy cancelled')
+            $startBtn.IsEnabled = $true
+            $pauseBtn.IsEnabled = $false
+            $cancelBtn.IsEnabled = $false
+        } elseif ($script:ActiveTransferJobId) {
             Stop-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
         }
     })
 
     $win.Add_Closing({
         param($sender, $eventArgs)
-        if ($script:ActiveTransferJobId) {
+        if ($script:CloudCopyScanPowerShell) {
+            $c = [System.Windows.MessageBox]::Show('A cloud folder scan is still running. Cancel the scan and exit?', 'Cancel Cloud Scan', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+            if ($c -eq [System.Windows.MessageBoxResult]::Yes) {
+                $pollTimer.Stop()
+                try { $script:CloudCopyScanCancellationSource.Cancel() } catch { }
+                try { $script:CloudCopyScanPowerShell.Stop() } catch { }
+                try { $script:CloudCopyScanPowerShell.Dispose() } catch { }
+                try { $script:CloudCopyScanRunspace.Dispose() } catch { }
+                try { $script:CloudCopyScanCancellationSource.Dispose() } catch { }
+                $script:CloudCopyScanPowerShell = $null
+                $script:CloudCopyScanRunspace = $null
+                $script:CloudCopyScanAsyncHandle = $null
+                $script:CloudCopyScanContext = $null
+                $script:CloudCopyScanCancellationSource = $null
+            } else {
+                $eventArgs.Cancel = $true
+            }
+        } elseif ($script:ActiveTransferBatchId) {
+            $c = [System.Windows.MessageBox]::Show('A durable cloud-copy batch is active. Cancel the remaining queued files and exit?', 'Cancel Transfer Batch', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+            if ($c -eq [System.Windows.MessageBoxResult]::Yes) {
+                Stop-CloudTransferBatch -BatchId $script:ActiveTransferBatchId | Out-Null
+                $script:ActiveTransferBatchId = $null
+                $pollTimer.Stop()
+            } else {
+                $eventArgs.Cancel = $true
+            }
+        } elseif ($script:ActiveTransferJobId) {
             $c = [System.Windows.MessageBox]::Show('A cloud transfer is currently running. Do you want to cancel the transfer and exit?', 'Cancel Transfer', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
             if ($c -eq [System.Windows.MessageBoxResult]::Yes) {
                 Stop-CloudTransfer -JobId $script:ActiveTransferJobId | Out-Null
