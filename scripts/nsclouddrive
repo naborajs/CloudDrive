@@ -17,6 +17,8 @@ elif [ -x "/usr/bin/pwsh" ]; then
     PWSH_BIN="/usr/bin/pwsh"
 elif [ -x "/snap/bin/pwsh" ]; then
     PWSH_BIN="/snap/bin/pwsh"
+elif [ -n "${HOME:-}" ] && [ -x "${HOME}/.local/bin/pwsh" ]; then
+    PWSH_BIN="${HOME}/.local/bin/pwsh"
 else
     echo "[ERROR] PowerShell Core ('pwsh') is required to run NS Cloud Drive on Linux." >&2
     echo "To install on Ubuntu / Debian:" >&2
