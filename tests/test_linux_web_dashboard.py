@@ -90,6 +90,60 @@ class LinuxWebDashboardTests(unittest.TestCase):
             )
         self.assertEqual(status, 403)
 
+    def test_same_provider_cloud_copy_uses_account_ids_and_relative_paths(self):
+        payload = json.dumps({
+            "action": "cloud_copy",
+            "source_account": "drive-1",
+            "source_path": "Projects/report.pdf",
+            "destination_account": "drive-1",
+            "destination_path": "Archive",
+        })
+        accounts = [{"Id": "drive-1", "ProviderId": "gdrive", "DisplayName": "Drive"}]
+        fake_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(dashboard, "load_settings", return_value={"Accounts": accounts}), \
+             mock.patch.object(dashboard.subprocess, "run", return_value=fake_result) as run_mock:
+            status, _, response_body = self.request(
+                "POST", "/api/action", body=payload,
+                headers=self.same_origin_headers(content_type=True),
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(response_body)["success"])
+        self.assertIn("cloud-copy", run_mock.call_args.args[0])
+        self.assertEqual(run_mock.call_args.args[0], [
+            "nsclouddrive", "cloud-copy", "drive-1", "Projects/report.pdf", "drive-1", "Archive"
+        ])
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 120)
+
+    def test_cloud_copy_rejects_traversal_and_non_cloud_accounts(self):
+        accounts = [
+            {"Id": "drive-1", "ProviderId": "gdrive"},
+            {"Id": "local-1", "ProviderId": "local"},
+        ]
+        unsafe_payload = json.dumps({
+            "action": "cloud_copy", "source_account": "drive-1",
+            "source_path": "../../secret", "destination_account": "drive-1",
+            "destination_path": "Archive",
+        })
+        local_payload = json.dumps({
+            "action": "cloud_copy", "source_account": "drive-1",
+            "source_path": "report.pdf", "destination_account": "local-1",
+            "destination_path": "Archive",
+        })
+        with mock.patch.object(dashboard, "load_settings", return_value={"Accounts": accounts}), \
+             mock.patch.object(dashboard.subprocess, "run", side_effect=AssertionError("invalid cloud copy must not run")):
+            unsafe_status, _, _ = self.request(
+                "POST", "/api/action", body=unsafe_payload,
+                headers=self.same_origin_headers(content_type=True),
+            )
+            local_status, _, _ = self.request(
+                "POST", "/api/action", body=local_payload,
+                headers=self.same_origin_headers(content_type=True),
+            )
+
+        self.assertEqual(unsafe_status, 400)
+        self.assertEqual(local_status, 400)
+
     def test_asset_path_traversal_is_rejected(self):
         status, _, body = self.request("GET", "/assets/%2e%2e/%2e%2e/src/NSCloudDrive.ps1")
         self.assertEqual(status, 404)
