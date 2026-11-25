@@ -98,6 +98,23 @@ Every job tracked in `transfer-jobs.json` moves through well-defined, honest lif
 
 ---
 
+## 3.1 Remote Cloud Copy Identity and Restart Behavior
+
+Cloud-to-cloud copies, including copies between two paths in the same provider account, use the same durable per-file queue as uploads and downloads.
+
+- An identical source and destination account/path is a no-op.
+- A different destination in the same provider is allowed. Before a worker starts, live source and destination listings compare the exact relative path and byte size. A destination match is marked remotely confirmed; a same-path different-size file is copied.
+- The queued source revision includes its byte size and, when supplied by the provider, modification time. A same-size source revision change becomes an actionable `Needs attention` state; absent or invalid revision metadata fails closed rather than copying an unverified source.
+- If either live listing is unavailable, the job waits for a later check. An outage is never treated as proof that the destination is empty.
+- The persisted `CloudCopy` operation is reconciled against the destination after restart. A completed file is confirmed, and remaining files resume from the durable queue.
+- Repeating the same request suppresses duplicate active jobs. Failed, cancelled, or source-changed jobs can be retried by re-dropping, while a second re-drop reuses the active retry. The UI reports existing queue entries separately from remote exact matches and gives an actionable reason for `Needs attention` jobs.
+- `ConflictAction = Skip` uses rclone's size-only comparison as a final worker guard, so a different-size destination is replaced while a same-size path is skipped.
+- Desktop folder inventory runs in an MTA runspace and returns a scan-only plan before the UI queues it. Account/path controls stay locked during the scan; cancellation signals the listing process and its `finally` block kills and disposes the rclone child.
+
+The same-provider E2E test uses two local rclone aliases to verify this behavior without requiring cloud credentials. It does not replace live-provider validation during release qualification.
+
+---
+
 ## 4. Worker Concurrency & Rate Limiting
 
 ### 4.1 Bounded Worker Concurrency
