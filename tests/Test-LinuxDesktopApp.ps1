@@ -41,6 +41,8 @@ $repoRoot = (Split-Path -Parent $testRoot)
 $desktopFile = Join-Path $repoRoot 'scripts\desktop\nsclouddrive.desktop'
 $appLauncher = Join-Path $repoRoot 'scripts\nsclouddrive-app'
 $installer = Join-Path $repoRoot 'scripts\install-linux.sh'
+$providerWindow = Join-Path $repoRoot 'src\ui\ProviderConnectionWindow.ps1'
+$transferManager = Join-Path $repoRoot 'src\services\CloudTransferManager.ps1'
 $cliFile = Join-Path $repoRoot 'src\cli\nsclouddrive.ps1'
 $appPy = Join-Path $repoRoot 'src\web\app.py'
 $logoPng = Join-Path $repoRoot 'assets\logos\clouddrive.png'
@@ -77,6 +79,29 @@ Assert-Condition "Installer installs /usr/local/bin/nsclouddrive-gui" ($installC
 Assert-Condition "Installer installs nsclouddrive.desktop" ($installContent.Contains("/usr/share/applications/nsclouddrive.desktop"))
 Assert-Condition "Installer installs desktop shortcut on ~/Desktop" ($installContent.Contains('USER_DESKTOP_DIR') -and $installContent.Contains('NS Cloud Drive.desktop'))
 Assert-Condition "Installer copies official logos to /usr/share/pixmaps & hicolor" ($installContent.Contains("/usr/share/pixmaps") -and $installContent.Contains("hicolor"))
+Assert-Condition "Installer preserves the invoking desktop user's HOME when called through sudo" ($installContent.Contains('SUDO_USER') -and $installContent.Contains('NSCD_INSTALLER_USER_CONTEXT'))
+Assert-Condition "Installer re-enters through bash when the script is not executable" ($installContent.Contains('NSCD_INSTALLER_USER_CONTEXT=1 bash "$SCRIPT_DIR/install-linux.sh"'))
+Assert-Condition "Installer supports musl detection and validates portable PowerShell startup" ($installContent.Contains("ld-musl-") -and $installContent.Contains('PowerShell could not start with this distribution'))
+Assert-Condition "Installer writes the real checkout path into the per-user UI service" ($installContent.Contains('systemd_quote_path') -and $installContent.Contains('WorkingDirectory=%s'))
+
+# Phase 3b: Responsive same-provider cloud-copy scanning
+$providerWindowContent = Get-Content -LiteralPath $providerWindow -Raw
+Assert-Condition "Cloud-copy folder inventory runs in an MTA runspace and returns a scan-only plan" (
+    $providerWindowContent.Contains('CreateRunspace()') -and
+    $providerWindowContent.Contains('ApartmentState]::MTA') -and
+    $providerWindowContent.Contains('BeginInvoke()') -and
+    $providerWindowContent.Contains('OnlyScan = $true') -and
+    $providerWindowContent.Contains('-ScanPlan') -and
+    $providerWindowContent.Contains('setCloudCopySelectionEnabled $false') -and
+    $providerWindowContent.Contains('setCloudCopySelectionEnabled $true')
+)
+$transferManagerContent = Get-Content -LiteralPath $transferManager -Raw
+Assert-Condition "Cancelled cloud listings clean up their child rclone process" (
+    $transferManagerContent.Contains('CloudDirectoryListingCancellationSource') -and
+    $transferManagerContent.Contains('$listingCancellationSource.IsCancellationRequested') -and
+    $transferManagerContent.Contains('finally {') -and
+    $transferManagerContent.Contains('$proc.Kill()')
+)
 
 # Phase 4: CLI Dispatcher Commands (app / gui)
 Write-Host "`n[Phase 4] CLI Dispatcher Commands" -ForegroundColor White
@@ -105,7 +130,8 @@ if ($pyBin) {
         $logoUrl = "http://127.0.0.1:$testPort/assets/logos/clouddrive.png"
         $resp = Invoke-WebRequest -Uri $logoUrl -UseBasicParsing -TimeoutSec 4
         Assert-Condition "GET /assets/logos/clouddrive.png returns 200 OK" ($resp.StatusCode -eq 200)
-        Assert-Condition "GET /assets/logos/clouddrive.png Content-Type is image/png" ($resp.Headers['Content-Type'] -like "*image/png*")
+        $contentType = @($resp.Headers['Content-Type']) -join ';'
+        Assert-Condition "GET /assets/logos/clouddrive.png Content-Type is image/png" ([string]$contentType -like "*image/png*")
         Assert-Condition "GET /assets/logos/clouddrive.png returned valid byte stream" ($resp.RawContentLength -gt 1000)
 
         # Test TeraBox logo
