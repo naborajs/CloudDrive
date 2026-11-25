@@ -230,15 +230,11 @@ function Set-CloudCredentialAcl([string]$Path) {
         return
     }
 
+    $isDir = (Test-Path -LiteralPath $Path -PathType Container)
     try {
         $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-        $isDir = (Test-Path -LiteralPath $Path -PathType Container)
-        $acl = if ($isDir) {
-            [System.IO.Directory]::GetAccessControl($Path)
-        } else {
-            [System.IO.File]::GetAccessControl($Path)
-        }
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
         $acl.SetAccessRuleProtection($true, $false)
         foreach ($existingRule in @($acl.Access)) {
             [void]$acl.RemoveAccessRuleSpecific($existingRule)
@@ -261,13 +257,28 @@ function Set-CloudCredentialAcl([string]$Path) {
             }
             [void]$acl.SetAccessRule($rule)
         }
-        if ($isDir) {
-            [System.IO.Directory]::SetAccessControl($Path, $acl)
-        } else {
-            [System.IO.File]::SetAccessControl($Path, $acl)
-        }
+        Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
     } catch {
-        throw "Unable to restrict permissions on credential path '$Path': $($_.Exception.Message)"
+        $aclApiError = $_.Exception.Message
+        try {
+            # Some PowerShell 7/.NET combinations cannot write an ACL read back
+            # from Get-Acl when the descriptor includes unsupported audit data.
+            # icacls changes the DACL only and keeps the credential path usable.
+            $icaclsPath = Join-Path $env:SystemRoot 'System32\icacls.exe'
+            if (-not (Test-Path -LiteralPath $icaclsPath -PathType Leaf)) { throw 'icacls.exe is unavailable.' }
+            $permission = if ($isDir) { '(OI)(CI)F' } else { '(F)' }
+            $userGrant = "*$($userSid.Value):$permission"
+            $systemGrant = "*$($systemSid.Value):$permission"
+
+            & $icaclsPath $Path '/reset' 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "icacls reset failed with exit code $LASTEXITCODE." }
+            & $icaclsPath $Path '/inheritance:r' 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "icacls inheritance update failed with exit code $LASTEXITCODE." }
+            & $icaclsPath $Path '/grant:r' $userGrant $systemGrant 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "icacls grant failed with exit code $LASTEXITCODE." }
+        } catch {
+            throw "Unable to restrict permissions on credential path '$Path': ACL API failed ($aclApiError); icacls fallback failed ($($_.Exception.Message))."
+        }
     }
 }
 
