@@ -546,9 +546,14 @@ try {
         ProviderId = 'mock_liveness'
         DisplayName = 'Liveness Test Provider'
     }
+    $localLivenessAccount = @{
+        Id = 'local_liveness_test'
+        ProviderId = 'local'
+        DisplayName = 'Local Test Source'
+    }
 
     $liveJob1 = Add-CloudTransferQueueItem `
-        -SourceAccount $livenessAccount `
+        -SourceAccount $localLivenessAccount `
         -SourcePath (Join-Path $sandboxDir 'live_file_1.dat') `
         -DestinationAccount $livenessAccount `
         -DestinationPath 'live_dst' `
@@ -556,7 +561,7 @@ try {
         -MaxRetries 3
 
     $liveJob2 = Add-CloudTransferQueueItem `
-        -SourceAccount $livenessAccount `
+        -SourceAccount $localLivenessAccount `
         -SourcePath (Join-Path $sandboxDir 'live_file_2.dat') `
         -DestinationAccount $livenessAccount `
         -DestinationPath 'live_dst' `
@@ -564,7 +569,7 @@ try {
         -MaxRetries 3
 
     $liveJob3 = Add-CloudTransferQueueItem `
-        -SourceAccount $livenessAccount `
+        -SourceAccount $localLivenessAccount `
         -SourcePath (Join-Path $sandboxDir 'live_file_3.dat') `
         -DestinationAccount $livenessAccount `
         -DestinationPath 'live_dst' `
@@ -572,7 +577,7 @@ try {
         -MaxRetries 3
 
     $liveJob4 = Add-CloudTransferQueueItem `
-        -SourceAccount $livenessAccount `
+        -SourceAccount $localLivenessAccount `
         -SourcePath (Join-Path $sandboxDir 'live_file_4.dat') `
         -DestinationAccount $livenessAccount `
         -DestinationPath 'live_dst' `
