@@ -17,6 +17,13 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 . (Join-Path $srcDir 'services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $srcDir 'services\CloudTransferManager.ps1')
 
+# Folder batching tests use an empty, available destination inventory. Recovery
+# cases below use their real isolated local filesystem destination instead.
+function Get-CloudDirectoryContents {
+    param([object]$Account, [string]$Path = '', [switch]$BypassLocalMount)
+    return @()
+}
+
 function Get-TestQueueItems {
     $result = Get-CloudTransferQueue
     if ($result -is [array] -and $result.Count -gt 0 -and $result[0] -is [array]) {
