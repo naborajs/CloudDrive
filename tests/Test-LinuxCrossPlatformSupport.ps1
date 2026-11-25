@@ -21,6 +21,13 @@ Write-Host "=== Testing Linux Cross-Platform & Resumable Progression ===" -Foreg
 . (Join-Path $PSScriptRoot '..\src\services\CloudDeduplicationService.ps1')
 . (Join-Path $PSScriptRoot '..\src\services\CloudTransferManager.ps1')
 
+function Set-TestLinuxPlatform {
+    param([Parameter(Mandatory = $true)][bool]$LinuxEnabled)
+    # PowerShell 7 exposes $IsLinux as a read-only automatic variable. Shadow it
+    # in the test script scope so cross-platform path behavior can be simulated.
+    New-Variable -Name 'IsLinux' -Value $LinuxEnabled -Scope Global -Force
+}
+
 # ------------------------------------------------------------------------------
 # Test 1: Cross-Platform Data & Config Directory Resolution
 # ------------------------------------------------------------------------------
@@ -35,7 +42,7 @@ try {
     $env:XDG_CONFIG_HOME = '/home/vpsuser/.config'
     $env:HOME = '/home/vpsuser'
 
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
 
     $dataRoot = Get-NSCloudDriveDataRoot
     if ($dataRoot -ne '/home/vpsuser/.local/share/nsclouddrive' -and $dataRoot -ne (Join-Path '/home/vpsuser/.local/share' 'nsclouddrive')) {
@@ -49,7 +56,7 @@ try {
     }
     Write-Host "  [PASS] Linux XDG config root resolved: $configRoot" -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     $env:XDG_DATA_HOME = $origXdgData
     $env:XDG_CONFIG_HOME = $origXdgConfig
     $env:HOME = $origHome
@@ -69,7 +76,7 @@ Write-Host "  [PASS] Windows mount point verified: $winMount" -ForegroundColor G
 
 # Linux Resolution
 try {
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
     $env:HOME = '/home/vpsuser'
     $linuxMount = Resolve-ProviderMountPoint -ProviderId 'gdrive' -AccountId 'acc_gdrive_vps'
     $expectedLinuxMount = Join-Path (Join-Path '/home/vpsuser' 'CloudDrives') 'acc_gdrive_vps'
@@ -78,7 +85,7 @@ try {
     }
     Write-Host "  [PASS] Linux directory mount target verified: $linuxMount" -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     $env:HOME = $origHome
 }
 
@@ -88,7 +95,7 @@ try {
 Write-Host "3. Testing Linux Mount Arguments Generation..." -ForegroundColor Yellow
 
 try {
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
     $env:HOME = $env:TEMP
     $testMountDir = Join-Path $env:TEMP 'TestLinuxMount_Gdrive'
     New-Item -ItemType Directory -Path $testMountDir -Force | Out-Null
@@ -113,7 +120,7 @@ try {
 
     Write-Host "  [PASS] Linux mount arguments correctly omit Windows WinFsp flags and target directory." -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
 }
 
 # ------------------------------------------------------------------------------
@@ -166,6 +173,21 @@ if ($summaryProgressing.OverallPercentage -ne 21.0) {
 }
 Write-Host "  [PASS] Progress updates smoothly from 20.0% -> 21.0% during upload." -ForegroundColor Green
 
+foreach ($batchJob in $script:CloudTransferQueue) {
+    $batchJob['Status'] = 'Completed and remotely confirmed'
+    $batchJob['BytesTransferred'] = [int64]$batchJob['FileSizeBytes']
+}
+$attentionJob = @($script:CloudTransferQueue | Where-Object { $_['JobId'] -eq 'job_prog_4' })[0]
+$attentionJob['Status'] = 'Needs attention: cloud source changed'
+$attentionJob['BytesTransferred'] = 0L
+$attentionJob['LastError'] = 'The cloud source file changed after it was queued.'
+$attentionSummary = Get-CloudTransferBatchSummary -BatchId $testBatchId
+if (-not $attentionSummary.IsComplete -or [int]$attentionSummary.AttentionCount -ne 1 -or
+    [string]$attentionSummary.AttentionItems[0].LastError -ne $attentionJob['LastError']) {
+    throw 'A terminal needs-attention transfer was not surfaced as complete with its actionable reason.'
+}
+Write-Host "  [PASS] Needs-attention batch states stop polling and expose the source-change reason." -ForegroundColor Green
+
 # ------------------------------------------------------------------------------
 # Test 5: Cross-Platform Credential Directory Resolution across All Providers
 # ------------------------------------------------------------------------------
@@ -177,7 +199,7 @@ try {
     # Test Linux credential directory
     $env:XDG_DATA_HOME = '/home/vpsuser/.local/share'
     $env:HOME = '/home/vpsuser'
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
 
     $linuxCredDir = Get-CloudCredentialDirectory
     $expectedLinuxCredDir = Join-Path (Join-Path '/home/vpsuser/.local/share' 'nsclouddrive') 'credentials'
@@ -202,7 +224,7 @@ try {
     if ((Get-VpsCredentialDirectory) -ne $expectedLinuxCredDir) { throw "VPS credential dir mismatch on Linux" }
     Write-Host "  [PASS] All 6 providers delegate correctly to Get-CloudCredentialDirectory on Linux." -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     $env:XDG_DATA_HOME = $origXdgData
     $env:HOME = $origHome
     $env:LOCALAPPDATA = $origLocalAppData
@@ -232,7 +254,7 @@ try {
     Write-Host "  [PASS] Windows rejects empty drive letter." -ForegroundColor Green
 
     # On Linux: empty drive letter is allowed
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
     $allowedOnLinux = Test-CloudAccountDriveLetterAvailable -DriveLetter ''
     if (-not $allowedOnLinux) {
         throw "Expected empty drive letter to be allowed on Linux."
@@ -256,7 +278,7 @@ try {
     }
     Write-Host "  [PASS] Add-CloudAccount successfully saves account without drive letter on Linux." -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     $env:NS_CLOUD_DRIVE_CONFIG_DIR = $origConfigDir
     Clear-AccountListCache
     try { Remove-Item -LiteralPath $testSettingsDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
@@ -275,7 +297,7 @@ try {
     $env:NS_CLOUD_DRIVE_DATA_DIR = (Join-Path $cliSandbox 'data')
     New-Item -ItemType Directory -Path $env:NS_CLOUD_DRIVE_CONFIG_DIR -Force | Out-Null
     New-Item -ItemType Directory -Path $env:NS_CLOUD_DRIVE_DATA_DIR -Force | Out-Null
-    $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
 
     # Load CLI module functions
     $cliScript = Join-Path $PSScriptRoot '..\src\cli\nsclouddrive.ps1'
@@ -391,7 +413,7 @@ try {
     Write-Host "  [PASS] Non-interactive CLI prompt returns clean error without unhandled exception." -ForegroundColor Green
 
     # Test Windows CLI onboarding drive letter auto-assignment
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     try {
         # 1) Auto-assignment on Windows when DriveLetter is omitted
         Invoke-CliLogin -ProviderId 'vps' -RemainingArgs @('--endpoint', '192.168.1.100', '--user', 'winvps', '--password', 'WinVpsPass1!', '--id', 'vps_win_auto')
@@ -412,7 +434,7 @@ try {
         }
         Write-Host "  [PASS] Windows CLI login respects explicit --drive-letter flag ('Y')." -ForegroundColor Green
     } finally {
-        $global:IsLinux = $true
+    Set-TestLinuxPlatform -LinuxEnabled $true
     }
 
     # Verify accounts view includes all newly onboarded accounts
@@ -422,7 +444,7 @@ try {
     }
     Write-Host "  [PASS] CLI accounts view successfully lists multi-provider accounts." -ForegroundColor Green
 } finally {
-    $global:IsLinux = $false
+    Set-TestLinuxPlatform -LinuxEnabled $false
     $env:NS_CLOUD_DRIVE_CONFIG_DIR = $origConfigRoot
     $env:NS_CLOUD_DRIVE_DATA_DIR = $origDataRoot
     try { Remove-Item -LiteralPath $cliSandbox -Recurse -Force -ErrorAction SilentlyContinue } catch { }
