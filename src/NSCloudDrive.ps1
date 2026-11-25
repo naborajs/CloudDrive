@@ -7684,11 +7684,19 @@ function Update-AllUIState {
 
                             $skipCount = [int]$dropResult.SkippedCount
                             $queuedCount = [int]$dropResult.QueuedCount
+                            $newQueuedCount = [int](Get-SafeProperty $dropResult 'NewlyQueuedCount' $queuedCount)
+                            $alreadyTrackedCount = [int](Get-SafeProperty $dropResult 'AlreadyTrackedCount' 0)
 
-                            $summaryMsg = if ($skipCount -gt 0 -and $queuedCount -gt 0) {
+                            $summaryMsg = if ($skipCount -gt 0 -and $queuedCount -gt 0 -and $alreadyTrackedCount -gt 0) {
+                                "Deduplication: $skipCount file(s) already in cloud. $newQueuedCount new file(s) queued; $alreadyTrackedCount remaining file(s) already in the queue."
+                            } elseif ($skipCount -gt 0 -and $queuedCount -gt 0) {
                                 "Deduplication: $skipCount file(s) already in cloud (skipped). $queuedCount remaining file(s) queued for transfer."
                             } elseif ($skipCount -gt 0 -and $queuedCount -eq 0) {
                                 "Deduplication: All $skipCount file(s) are already confirmed in the cloud. Zero transfers required."
+                            } elseif ($alreadyTrackedCount -gt 0 -and $newQueuedCount -gt 0) {
+                                "$newQueuedCount new file(s) queued; $alreadyTrackedCount matching file(s) were already queued."
+                            } elseif ($alreadyTrackedCount -gt 0) {
+                                "$alreadyTrackedCount matching file(s) are already queued. No duplicate jobs were created."
                             } else {
                                 "Queued $queuedCount file(s) for cloud transfer."
                             }
