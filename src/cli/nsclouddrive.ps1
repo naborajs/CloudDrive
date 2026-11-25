@@ -94,6 +94,7 @@ function Show-CliHelp {
     Write-Host "  mount [all | <account/prov>] Mount cloud storage to filesystem (e.g. ~/CloudDrives/gdrive)" -ForegroundColor Gray
     Write-Host "  unmount [all | <account/pr>] Safely unmount active cloud drives" -ForegroundColor Gray
     Write-Host "  transfer <source> <account> [destPath] Resumable deduplicated cloud transfer" -ForegroundColor Gray
+    Write-Host "  cloud-copy <sourceAccount> <sourcePath> <destinationAccount> [destinationPath] Resumable cloud-to-cloud copy" -ForegroundColor Gray
     Write-Host "  queue                       Display current durable transfer queue and progress" -ForegroundColor Gray
     Write-Host "  clear-queue                 Remove completed and settled jobs from transfer queue" -ForegroundColor Gray
     Write-Host "  recover                     Run silent startup recovery and restart reconciliation" -ForegroundColor Gray
@@ -1065,6 +1066,60 @@ function Invoke-CliTransfer([string]$SourcePath, [string]$TargetAccount, [string
     $null = Process-CloudTransferQueue
 }
 
+function Invoke-CliCloudCopy([string]$SourceAccountId, [string]$SourcePath, [string]$DestinationAccountId, [string]$DestinationPath = '') {
+    if ([string]::IsNullOrWhiteSpace($SourceAccountId) -or [string]::IsNullOrWhiteSpace($SourcePath) -or [string]::IsNullOrWhiteSpace($DestinationAccountId)) {
+        throw 'Usage: nsclouddrive cloud-copy <sourceAccount> <sourcePath> <destinationAccount> [destinationPath]'
+    }
+    if ($SourcePath.StartsWith('/') -or $SourcePath.Contains('\') -or $SourcePath.StartsWith('-') -or
+        @($SourcePath.Split('/') | Where-Object { $_ -eq '..' }).Count -gt 0) {
+        throw 'Source path must be a relative cloud path without parent-directory segments.'
+    }
+    if ($DestinationPath -and ($DestinationPath.StartsWith('/') -or $DestinationPath.Contains('\') -or $DestinationPath.StartsWith('-') -or
+        @($DestinationPath.Split('/') | Where-Object { $_ -eq '..' }).Count -gt 0)) {
+        throw 'Destination path must be a relative cloud folder path without parent-directory segments.'
+    }
+
+    $accounts = @(Get-CloudAccounts)
+    $sourceAccount = @($accounts | Where-Object { [string](Get-CloudProviderFieldValue $_ 'Id') -eq $SourceAccountId }) | Select-Object -First 1
+    $destinationAccount = @($accounts | Where-Object { [string](Get-CloudProviderFieldValue $_ 'Id') -eq $DestinationAccountId }) | Select-Object -First 1
+    if (-not $sourceAccount -or -not $destinationAccount) {
+        throw 'Source or destination account was not found in local settings.'
+    }
+    if ([string](Get-CloudProviderFieldValue $sourceAccount 'ProviderId') -eq 'local' -or
+        [string](Get-CloudProviderFieldValue $destinationAccount 'ProviderId') -eq 'local') {
+        throw 'Cloud copy requires cloud accounts at both endpoints.'
+    }
+
+    $normalizedSourcePath = Normalize-CloudPath -Path $SourcePath
+    $sourceParent = if ($normalizedSourcePath.Contains('/')) { $normalizedSourcePath.Substring(0, $normalizedSourcePath.LastIndexOf('/')) } else { '' }
+    $sourceName = if ($normalizedSourcePath.Contains('/')) { $normalizedSourcePath.Substring($normalizedSourcePath.LastIndexOf('/') + 1) } else { $normalizedSourcePath }
+    $sourceEntry = $null
+    foreach ($entry in @(Get-CloudDirectoryContents -Account $sourceAccount -Path $sourceParent -BypassLocalMount)) {
+        if ([string]::Equals([string](Get-CloudProviderFieldValue $entry 'Name'), $sourceName, [System.StringComparison]::Ordinal)) {
+            $sourceEntry = $entry
+            break
+        }
+    }
+    if ($null -eq $sourceEntry) { throw "Cloud source path '$normalizedSourcePath' was not found." }
+
+    $batch = Add-CloudTransferRemoteBatch `
+        -SourceAccount $sourceAccount `
+        -SourcePath $normalizedSourcePath `
+        -SourceIsDirectory:([bool](Get-CloudProviderFieldValue $sourceEntry 'IsDir')) `
+        -DestinationAccount $destinationAccount `
+        -DestinationFolderPath (Normalize-CloudPath -Path $DestinationPath) `
+        -ConflictAction 'Skip'
+
+    Write-Host "Cloud copy scanned $($batch.TotalFiles) file(s)." -ForegroundColor Cyan
+    Write-Host "  Already present or same location: $($batch.AlreadyPresentCount)" -ForegroundColor Green
+    Write-Host "  Already tracked in durable queue: $($batch.AlreadyQueuedCount)" -ForegroundColor Cyan
+    Write-Host "  Queued for resumable copy: $($batch.QueuedCount)" -ForegroundColor Yellow
+    if ($batch.QueuedCount -gt 0) {
+        $null = Process-CloudTransferQueue
+        Write-Host 'Transfer workers started; progress is available with `nsclouddrive queue`.' -ForegroundColor Cyan
+    }
+}
+
 function Show-CliQueue {
     $rawQ = @()
     try {
@@ -1247,6 +1302,12 @@ switch ($Command.ToLowerInvariant()) {
     'mount'        { Invoke-CliMount -TargetAccount $Target }
     'unmount'      { Invoke-CliUnmount -TargetAccount $Target }
     'transfer'     { Invoke-CliTransfer -SourcePath $Target -TargetAccount $Destination -DestSubPath '' }
+    'cloud-copy'   {
+        $destinationAccountId = if ($RemainingArgs.Count -gt 0) { [string]$RemainingArgs[0] } else { '' }
+        $destinationPath = if ($RemainingArgs.Count -gt 1) { [string]$RemainingArgs[1] } else { '' }
+        Invoke-CliCloudCopy -SourceAccountId $Target -SourcePath $Destination `
+            -DestinationAccountId $destinationAccountId -DestinationPath $destinationPath
+    }
     'queue'        { Show-CliQueue }
     'clear-queue'  { Clear-CloudTransferQueue; Write-Host "Transfer queue cleared." -ForegroundColor Green }
     'recover'      {
