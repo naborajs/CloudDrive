@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "=== Testing Post-Restart Drop Deduplication & Restart Recovery ===" -ForegroundColor Cyan
 
-$testDir = Join-Path $env:TEMP "NSCloudDrive_PostRestartDrop_Test_$([Guid]::NewGuid().ToString('N'))"
+$testDir = Join-Path ([System.IO.Path]::GetTempPath()) "NSCloudDrive_PostRestartDrop_Test_$([Guid]::NewGuid().ToString('N'))"
 $sourceDir = Join-Path $testDir "SourceDropFiles"
 $cacheDir = Join-Path $testDir "Cache"
 $fakeDriveRoot = Join-Path $testDir "FakeVirtualDrive"
