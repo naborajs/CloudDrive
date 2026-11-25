@@ -908,6 +908,7 @@ function Get-RemoteFileInventoryMap {
                         Extension = $extension
                         Source = 'LiveProviderInventory'
                         IsDirectory = $false
+                        ModTime = [string]$child['ModTime']
                     }
                 }
                 if ($folderComplete) {
