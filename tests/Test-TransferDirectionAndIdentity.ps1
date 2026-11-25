@@ -5,7 +5,7 @@
 # file names, extensions, UI labels, or working directories. Unresolvable state
 # fails closed to "Needs reconciliation" rather than guessing.
 #
-# Hermetic: every queue file, cache root and staged file lives in %TEMP%.
+# Hermetic: every queue file, cache root and staged file lives under the OS temp directory.
 # No real-account transfers are performed.
 # ==============================================================================
 
@@ -59,7 +59,7 @@ function Get-FlatQueue {
     return @()
 }
 
-$sandbox = Join-Path $env:TEMP ("NSCloudDrive_DirectionIdentity_" + [Guid]::NewGuid().ToString('N'))
+$sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("NSCloudDrive_DirectionIdentity_" + [Guid]::NewGuid().ToString('N'))
 $queueFile = Join-Path $sandbox 'state\transfer-jobs.json'
 $local   = New-LocalAccount -Id 'local_disk_001' -Label 'Local Disk Cache'
 $gdrive  = New-GDriveAccount -Id 'gdrive_acct_alpha' -Label 'Google Drive Alpha'
@@ -436,6 +436,45 @@ try {
     $resolvedMismatch = Get-CloudTransferJobOperation -Job $jobMismatch
     if ($resolvedMismatch.IsValid) { throw 'Case 14 failed: declared Upload vs persisted Download should not be valid.' }
     Write-Host "  [PASS] Case 14: job operation resolved from persisted fields, mismatch invalidates"
+
+    # --------------------------------------------------------------------------
+    # Case 15: Same provider and account still allows a distinct destination path
+    # --------------------------------------------------------------------------
+    $script:CloudTransferQueue.Clear()
+    $sameProviderJob = Add-CloudTransferQueueItem `
+        -SourceAccount $gdrive `
+        -SourcePath 'Source/clip.mp4' `
+        -DestinationAccount $gdrive `
+        -DestinationPath 'Archive' `
+        -ConflictAction 'Skip' `
+        -FileSizeBytes 128 `
+        -OperationType 'CloudCopy'
+    if ($null -eq $sameProviderJob -or [string]$sameProviderJob['OperationType'] -ne 'CloudCopy') {
+        throw 'Case 15 failed: same-provider copy to a distinct path should be queued as CloudCopy.'
+    }
+    Write-Host "  [PASS] Case 15: same-provider/different-path cloud copy remains allowed"
+
+    # --------------------------------------------------------------------------
+    # Case 16: Exact same provider/account/path is a no-op and is never queued
+    # --------------------------------------------------------------------------
+    $script:CloudTransferQueue.Clear()
+    $sameLocationRejected = $false
+    try {
+        Add-CloudTransferQueueItem `
+            -SourceAccount $gdrive `
+            -SourcePath 'Source/clip.mp4' `
+            -DestinationAccount $gdrive `
+            -DestinationPath 'Source' `
+            -ConflictAction 'Skip' `
+            -FileSizeBytes 128 `
+            -OperationType 'CloudCopy' | Out-Null
+    } catch {
+        $sameLocationRejected = $_.Exception.Message -match '(?i)same cloud object'
+    }
+    if (-not $sameLocationRejected -or @($script:CloudTransferQueue).Count -ne 0) {
+        throw 'Case 16 failed: exact same-location cloud copy should be rejected without creating a queue item.'
+    }
+    Write-Host "  [PASS] Case 16: exact same-location copy is a no-op and never queued"
 
     $summary = Get-CloudTransferPendingSummary -QueueItems @(Get-FlatQueue)
     Write-Host "  [INFO] Pending summary: $($summary.PendingCount) pending, $($summary.UploadCount) uploads, $($summary.DownloadCount) downloads, $($summary.CloudCopyCount) cloud copies"
