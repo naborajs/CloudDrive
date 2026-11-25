@@ -230,10 +230,11 @@ function Get-CloudTransferFieldValue {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]$Item,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $false)]$DefaultValue = $null
     )
 
-    return (Get-CloudProviderFieldValue $Item $Name $null)
+    return (Get-CloudProviderFieldValue $Item $Name $DefaultValue)
 }
 
 function Get-CloudTransferSettledStagedEntry {
@@ -451,6 +452,89 @@ function Resolve-CloudTransferOperation {
 
     $result.IsValid = $true
     return $result
+}
+
+function Test-CloudTransferSameRemoteObject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$SourceAccount,
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][object]$DestinationAccount,
+        [Parameter(Mandatory = $true)][string]$DestinationFilePath
+    )
+
+    $sourceProvider = Get-CloudTransferProviderId $SourceAccount
+    $destinationProvider = Get-CloudTransferProviderId $DestinationAccount
+    if (-not $sourceProvider -or $sourceProvider -eq 'local' -or $sourceProvider -ne $destinationProvider) { return $false }
+
+    $sourceAccountId = [string](Get-CloudTransferFieldValue $SourceAccount 'Id')
+    $destinationAccountId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
+    if (-not $sourceAccountId -or -not [string]::Equals($sourceAccountId, $destinationAccountId, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+
+    $sourceIdentity = Normalize-CloudPath -Path $SourcePath
+    $destinationIdentity = Normalize-CloudPath -Path $DestinationFilePath
+    return [string]::Equals($sourceIdentity, $destinationIdentity, [System.StringComparison]::Ordinal)
+}
+
+function Get-RemoteCloudCopyCandidateStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$SourceInventoryMap,
+        [Parameter(Mandatory = $true)][object]$DestinationInventoryMap,
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationFilePath,
+        [Parameter(Mandatory = $true)][int64]$ExpectedSizeBytes,
+        [AllowEmptyString()][string]$ExpectedSourceLastWriteUtc = ''
+    )
+
+    $sourceRelativePath = Normalize-CloudPath -Path $SourcePath
+    $destinationRelativePath = Normalize-CloudPath -Path $DestinationFilePath
+    $sourceParent = if ($sourceRelativePath.Contains('/')) { $sourceRelativePath.Substring(0, $sourceRelativePath.LastIndexOf('/')) } else { '' }
+    $destinationParent = if ($destinationRelativePath.Contains('/')) { $destinationRelativePath.Substring(0, $destinationRelativePath.LastIndexOf('/')) } else { '' }
+    $sourceScopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $sourceParent
+    $destinationScopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $destinationParent
+
+    if (-not $SourceInventoryMap.ContainsKey($sourceScopeKey) -or [string]$SourceInventoryMap[$sourceScopeKey]['Source'] -eq 'LiveProviderInventoryUnavailableScope') {
+        return [ordered]@{ Status = 'Unavailable'; Reason = 'Source provider inventory is not currently available.' }
+    }
+    if (-not $SourceInventoryMap.ContainsKey($sourceRelativePath)) {
+        return [ordered]@{ Status = 'SourceMissing'; Reason = 'The cloud source file is no longer present at its queued path.' }
+    }
+    $sourceItem = $SourceInventoryMap[$sourceRelativePath]
+    if ([bool]$sourceItem['IsDirectory']) {
+        return [ordered]@{ Status = 'SourceChanged'; Reason = 'The queued cloud source is now a directory.' }
+    }
+    if ([int64]$sourceItem['SizeBytes'] -ne $ExpectedSizeBytes) {
+        return [ordered]@{ Status = 'SourceChanged'; Reason = 'The cloud source file size changed after it was queued.' }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSourceLastWriteUtc)) {
+        $liveSourceLastWriteUtc = [string]$sourceItem['ModTime']
+        if ([string]::IsNullOrWhiteSpace($liveSourceLastWriteUtc)) {
+            return [ordered]@{ Status = 'Unavailable'; Reason = 'Live source revision metadata is unavailable; the queued cloud file was not copied.' }
+        }
+        $expectedSourceTime = [DateTimeOffset]::MinValue
+        $liveSourceTime = [DateTimeOffset]::MinValue
+        $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+        if (-not [DateTimeOffset]::TryParse($ExpectedSourceLastWriteUtc, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$expectedSourceTime) -or
+            -not [DateTimeOffset]::TryParse($liveSourceLastWriteUtc, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$liveSourceTime)) {
+            return [ordered]@{ Status = 'Unavailable'; Reason = 'Live source revision metadata could not be validated; the queued cloud file was not copied.' }
+        }
+        if ($expectedSourceTime.UtcTicks -ne $liveSourceTime.UtcTicks) {
+            return [ordered]@{ Status = 'SourceChanged'; Reason = 'The cloud source file changed after it was queued.' }
+        }
+    }
+
+    if (-not $DestinationInventoryMap.ContainsKey($destinationScopeKey) -or [string]$DestinationInventoryMap[$destinationScopeKey]['Source'] -eq 'LiveProviderInventoryUnavailableScope') {
+        return [ordered]@{ Status = 'Unavailable'; Reason = 'Destination provider inventory is not currently available.' }
+    }
+    if ($DestinationInventoryMap.ContainsKey($destinationRelativePath)) {
+        $destinationItem = $DestinationInventoryMap[$destinationRelativePath]
+        if (-not [bool]$destinationItem['IsDirectory'] -and [int64]$destinationItem['SizeBytes'] -eq $ExpectedSizeBytes) {
+            return [ordered]@{ Status = 'AlreadyInCloud'; Reason = 'The destination already contains the same name and exact byte size at this path.' }
+        }
+    }
+
+    return [ordered]@{ Status = 'New'; Reason = 'The destination does not contain an exact name, path, and size match.' }
 }
 
 function Get-CloudTransferJobOperation {
@@ -953,29 +1037,43 @@ function Get-CloudDirectoryContents {
         $psi.EnvironmentVariables[$k] = $envVars[$k]
     }
 
+    $listingCancellationSource = $null
+    $listingCancellationVariable = Get-Variable -Name 'CloudDirectoryListingCancellationSource' -Scope Global -ErrorAction SilentlyContinue
+    if ($listingCancellationVariable) { $listingCancellationSource = $listingCancellationVariable.Value }
+
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    try {
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
 
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $proc.WaitForExit(100)) {
-        if ($sw.ElapsedMilliseconds -gt 15000) {
-            try { $proc.Kill() } catch { }
-            throw "Timed out waiting for directory listing of '$cleanPath'."
-        }
-        try {
-            if ([System.Windows.Application]::Current) {
-                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $proc.WaitForExit(100)) {
+            if ($listingCancellationSource -and $listingCancellationSource.IsCancellationRequested) {
+                throw 'Cloud directory listing was cancelled.'
             }
-        } catch { }
-    }
-    $proc.WaitForExit()
-    $stdout = $stdoutTask.Result
-    $stderr = $stderrTask.Result
+            if ($sw.ElapsedMilliseconds -gt 15000) {
+                throw "Timed out waiting for directory listing of '$cleanPath'."
+            }
+            try {
+                if ([System.Windows.Application]::Current) {
+                    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Background)
+                }
+            } catch { }
+        }
+        $proc.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
 
-    if ($proc.ExitCode -ne 0) {
-        $sanitizedErr = Format-SanitizedDiagnosticMessage $stderr
-        throw "Failed to list cloud directory '$cleanPath': $sanitizedErr"
+        if ($proc.ExitCode -ne 0) {
+            $sanitizedErr = Format-SanitizedDiagnosticMessage $stderr
+            throw "Failed to list cloud directory '$cleanPath': $sanitizedErr"
+        }
+    } finally {
+        if ($proc -and -not $proc.HasExited) {
+            try { $proc.Kill() } catch { }
+            try { $proc.WaitForExit(2000) | Out-Null } catch { }
+        }
+        if ($proc) { try { $proc.Dispose() } catch { } }
     }
 
     $parsed = ConvertFrom-CloudDirectoryListingJson -Json $stdout -Path $cleanPath
@@ -1301,6 +1399,8 @@ function Start-CloudTransfer {
         [ValidateSet('Upload', 'Download', 'CloudCopy', '')]
         [string]$OperationType = '',
 
+        [int64]$FileSizeBytes = 0L,
+
         [string]$BandwidthLimit = ''
     )
 
@@ -1331,12 +1431,19 @@ function Start-CloudTransfer {
     # A local destination has no provider upload plan to check.
     if ($DestinationAccount -and (Get-CloudTransferProviderId $DestinationAccount) -ne 'local') {
         $srcSize = 0L
-        try {
-            $srcItems = @(Get-CloudDirectoryContents -Account $SourceAccount -Path $cleanSrcPath)
-            if ($srcItems.Count -eq 1 -and (-not $srcItems[0].IsDir)) {
-                $srcSize = [int64]$srcItems[0].Size
-            }
-        } catch { }
+        if ($OperationType -eq 'CloudCopy' -and $PSBoundParameters.ContainsKey('FileSizeBytes')) {
+            # The durable CloudCopy batch already captured a validated source size
+            # from its live parent listing and revalidates that revision immediately
+            # before launch. Avoid one provider listing per file here.
+            $srcSize = $FileSizeBytes
+        } else {
+            try {
+                $srcItems = @(Get-CloudDirectoryContents -Account $SourceAccount -Path $cleanSrcPath)
+                if ($srcItems.Count -eq 1 -and (-not $srcItems[0].IsDir)) {
+                    $srcSize = [int64]$srcItems[0].Size
+                }
+            } catch { }
+        }
 
         if ($srcSize -gt 0L) {
             $fName = if ($cleanSrcPath.Contains('/')) { $cleanSrcPath.Substring($cleanSrcPath.LastIndexOf('/') + 1) } else { $cleanSrcPath }
@@ -1401,7 +1508,10 @@ function Start-CloudTransfer {
     )
 
     if ($ConflictAction -eq 'Skip') {
-        $rawArgs += '--ignore-existing'
+        # A path-only ignore-existing rule silently preserves stale files. The
+        # product's duplicate identity is exact relative path plus byte size,
+        # so let rclone replace same-path files whose size differs.
+        $rawArgs += '--size-only'
     }
 
     # Add chunked resumable upload arguments for Google Drive
@@ -2383,6 +2493,248 @@ function Load-DurableTransferQueue {
 # DURABLE FOLDER BATCH INGESTION & PIPELINE
 # ==============================================================================
 
+function Add-CloudTransferRemoteBatch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$SourceAccount,
+        [Parameter(Mandatory = $false)][AllowEmptyString()][string]$SourcePath = '',
+        [Parameter(Mandatory = $true)][object]$DestinationAccount,
+        [Parameter(Mandatory = $false)][AllowEmptyString()][string]$DestinationFolderPath = '',
+        [Parameter(Mandatory = $false)][switch]$SourceIsDirectory,
+        [ValidateSet('Overwrite', 'Skip', 'Rename')][string]$ConflictAction = 'Skip',
+        [switch]$IsMove,
+        [string]$BandwidthLimit = '',
+        [hashtable]$ScanPlan,
+        [switch]$OnlyScan
+    )
+
+    if ((Get-CloudTransferProviderId $SourceAccount) -eq 'local' -or
+        (Get-CloudTransferProviderId $DestinationAccount) -eq 'local') {
+        throw 'Remote cloud copy requires cloud accounts at both endpoints.'
+    }
+
+    if ($ScanPlan) {
+        $cleanSourcePath = Normalize-CloudPath -Path $SourcePath
+        $cleanDestinationRoot = Normalize-CloudPath -Path $DestinationFolderPath
+        if ([string]$ScanPlan.SourceProvider -ne (Get-CloudTransferProviderId $SourceAccount) -or
+            [string]$ScanPlan.SourceAccountId -ne [string](Get-CloudTransferFieldValue $SourceAccount 'Id') -or
+            [string]$ScanPlan.DestinationProvider -ne (Get-CloudTransferProviderId $DestinationAccount) -or
+            [string]$ScanPlan.DestinationAccountId -ne [string](Get-CloudTransferFieldValue $DestinationAccount 'Id') -or
+            [string]$ScanPlan.SourcePath -ne $cleanSourcePath -or
+            [string]$ScanPlan.DestinationFolderPath -ne $cleanDestinationRoot) {
+            throw 'The remote scan plan does not match the selected cloud accounts and paths.'
+        }
+        $files = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($file in @($ScanPlan.Files)) { $files.Add([hashtable]$file) }
+        $destinationInventory = $ScanPlan.DestinationInventory
+    } else {
+        $cleanSourcePath = Normalize-CloudPath -Path $SourcePath
+        $cleanDestinationRoot = Normalize-CloudPath -Path $DestinationFolderPath
+        $files = [System.Collections.Generic.List[hashtable]]::new()
+
+    if ($SourceIsDirectory) {
+        $pendingDirectories = [System.Collections.Generic.Queue[hashtable]]::new()
+        $pendingDirectories.Enqueue(@{ Path = $cleanSourcePath; RelativePath = '' })
+        $visitedDirectories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+        while ($pendingDirectories.Count -gt 0) {
+            $directory = $pendingDirectories.Dequeue()
+            $directoryPath = [string]$directory['Path']
+            if (-not $visitedDirectories.Add($directoryPath)) { continue }
+            try {
+                $children = @(Get-CloudDirectoryContents -Account $SourceAccount -Path $directoryPath -BypassLocalMount)
+            } catch {
+                throw "Could not scan cloud source folder '$directoryPath': $($_.Exception.Message)"
+            }
+
+            foreach ($child in $children) {
+                $name = [string](Get-CloudTransferFieldValue $child 'Name')
+                if ([string]::IsNullOrWhiteSpace($name) -or $name -in @('.', '..') -or $name.Contains('/') -or $name.Contains('\')) {
+                    throw "Cloud source listing returned an unsafe item name in '$directoryPath'."
+                }
+                $isDirectory = [bool](Get-CloudTransferFieldValue $child 'IsDir')
+                $childPath = if ($directoryPath) { Normalize-CloudPath "$directoryPath/$name" } else { Normalize-CloudPath $name }
+                $relativePath = if ([string]$directory['RelativePath']) { Normalize-CloudPath "$($directory['RelativePath'])/$name" } else { $name }
+                if ($isDirectory) {
+                    $pendingDirectories.Enqueue(@{ Path = $childPath; RelativePath = $relativePath })
+                    continue
+                }
+
+                $size = 0L
+                if (-not [int64]::TryParse([string](Get-CloudTransferFieldValue $child 'Size'), [ref]$size) -or $size -lt 0L) {
+                    throw "Cloud source listing returned an invalid file size for '$childPath'."
+                }
+                $files.Add(@{
+                    SourcePath = $childPath
+                    RelativePath = $relativePath
+                    FileName = $name
+                    SizeBytes = $size
+                    LastWriteUtc = [string](Get-CloudTransferFieldValue $child 'ModTime')
+                })
+            }
+        }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($cleanSourcePath)) {
+            throw 'Select a cloud file or folder before starting a cloud copy.'
+        }
+        $sourceParent = if ($cleanSourcePath.Contains('/')) { $cleanSourcePath.Substring(0, $cleanSourcePath.LastIndexOf('/')) } else { '' }
+        $sourceName = if ($cleanSourcePath.Contains('/')) { $cleanSourcePath.Substring($cleanSourcePath.LastIndexOf('/') + 1) } else { $cleanSourcePath }
+        $sourceChildren = @(Get-CloudDirectoryContents -Account $SourceAccount -Path $sourceParent -BypassLocalMount)
+        $sourceFile = $null
+        foreach ($child in $sourceChildren) {
+            if ([string]::Equals([string](Get-CloudTransferFieldValue $child 'Name'), $sourceName, [System.StringComparison]::Ordinal)) {
+                $sourceFile = $child
+                break
+            }
+        }
+        if ($null -eq $sourceFile -or [bool](Get-CloudTransferFieldValue $sourceFile 'IsDir')) {
+            throw "Cloud source file '$cleanSourcePath' was not found."
+        }
+        $size = 0L
+        if (-not [int64]::TryParse([string](Get-CloudTransferFieldValue $sourceFile 'Size'), [ref]$size) -or $size -lt 0L) {
+            throw "Cloud source listing returned an invalid file size for '$cleanSourcePath'."
+        }
+        $files.Add(@{
+            SourcePath = $cleanSourcePath
+            RelativePath = $sourceName
+            FileName = $sourceName
+            SizeBytes = $size
+            LastWriteUtc = [string](Get-CloudTransferFieldValue $sourceFile 'ModTime')
+        })
+    }
+
+    $destinationFolders = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($file in $files) {
+        $destinationFilePath = if ($cleanDestinationRoot) {
+            Normalize-CloudPath "$cleanDestinationRoot/$($file['RelativePath'])"
+        } else {
+            Normalize-CloudPath ([string]$file['RelativePath'])
+        }
+        $destinationParent = if ($destinationFilePath.Contains('/')) { $destinationFilePath.Substring(0, $destinationFilePath.LastIndexOf('/')) } else { '' }
+        [void]$destinationFolders.Add($destinationParent)
+        $file['DestinationFilePath'] = $destinationFilePath
+        $file['DestinationFolderPath'] = $destinationParent
+    }
+
+    $destinationInventory = $null
+    if ($ConflictAction -eq 'Skip' -and $files.Count -gt 0 -and (Get-Command Get-RemoteFileInventoryMap -ErrorAction SilentlyContinue)) {
+        $destinationInventory = Get-RemoteFileInventoryMap `
+            -DestinationAccount $DestinationAccount `
+            -DestinationFolderPaths @($destinationFolders) `
+            -BypassLedger
+    }
+    }
+
+    $batchId = 'cloudcopy_' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+    $batchName = if ($cleanSourcePath) { "Cloud copy: $cleanSourcePath" } else { 'Cloud copy: account root' }
+    $scanResult = @{
+        SourceProvider = Get-CloudTransferProviderId $SourceAccount
+        SourceAccountId = [string](Get-CloudTransferFieldValue $SourceAccount 'Id')
+        SourcePath = $cleanSourcePath
+        DestinationProvider = Get-CloudTransferProviderId $DestinationAccount
+        DestinationAccountId = [string](Get-CloudTransferFieldValue $DestinationAccount 'Id')
+        DestinationFolderPath = $cleanDestinationRoot
+        Files = $files.ToArray()
+        DestinationInventory = $destinationInventory
+    }
+    if ($OnlyScan) { return $scanResult }
+
+    $queuedJobs = [System.Collections.Generic.List[object]]::new()
+    $alreadyQueuedJobs = [System.Collections.Generic.List[object]]::new()
+    $skippedPaths = [System.Collections.Generic.List[string]]::new()
+    $alreadyPresentCount = 0
+    $alreadyPresentBytes = 0L
+    $sameLocationCount = 0
+    foreach ($file in $files) {
+        $sourceFilePath = [string]$file['SourcePath']
+        $destinationFilePath = [string]$file['DestinationFilePath']
+        $isSameObject = Test-CloudTransferSameRemoteObject `
+            -SourceAccount $SourceAccount `
+            -SourcePath $sourceFilePath `
+            -DestinationAccount $DestinationAccount `
+            -DestinationFilePath $destinationFilePath
+        if ($isSameObject) {
+            $sameLocationCount++
+            $alreadyPresentCount++
+            $alreadyPresentBytes += [int64]$file['SizeBytes']
+            $skippedPaths.Add($sourceFilePath)
+            continue
+        }
+
+        if ($ConflictAction -eq 'Skip' -and $destinationInventory -and $destinationInventory.ContainsKey($destinationFilePath)) {
+            $candidate = $destinationInventory[$destinationFilePath]
+            if (-not [bool]$candidate['IsDirectory'] -and [int64]$candidate['SizeBytes'] -eq [int64]$file['SizeBytes']) {
+                $alreadyPresentCount++
+                $alreadyPresentBytes += [int64]$file['SizeBytes']
+                $skippedPaths.Add($sourceFilePath)
+                continue
+            }
+        }
+
+        $job = Add-CloudTransferQueueItem `
+            -SourceAccount $SourceAccount `
+            -SourcePath $sourceFilePath `
+            -DestinationAccount $DestinationAccount `
+            -DestinationPath ([string]$file['DestinationFolderPath']) `
+            -ConflictAction $ConflictAction `
+            -IsMove:$IsMove `
+            -FileSizeBytes ([int64]$file['SizeBytes']) `
+            -BandwidthLimit $BandwidthLimit `
+            -BatchId $batchId `
+            -BatchName $batchName `
+            -RelativePath ([string]$file['RelativePath']) `
+            -SourceLastWriteUtc ([string]$file['LastWriteUtc']) `
+            -OperationType 'CloudCopy' `
+            -Origin 'CloudCopyUI' `
+            -AllowNewAttempt `
+            -SkipPersist
+        if ($null -ne $job) { $queuedJobs.Add($job) }
+        else {
+            $transferKey = Get-CloudTransferLogicalKey `
+                -OperationType 'CloudCopy' `
+                -SourceProvider (Get-CloudTransferProviderId $SourceAccount) `
+                -SourceAccountId ([string](Get-CloudTransferFieldValue $SourceAccount 'Id')) `
+                -SourcePath $sourceFilePath `
+                -DestinationProvider (Get-CloudTransferProviderId $DestinationAccount) `
+                -DestinationAccountId ([string](Get-CloudTransferFieldValue $DestinationAccount 'Id')) `
+                -DestinationFilePath $destinationFilePath `
+                -FileSizeBytes ([int64]$file['SizeBytes']) `
+                -SourceLastWriteUtc ([string]$file['LastWriteUtc'])
+            $terminalDuplicate = $null
+            $foundActiveDuplicate = $false
+            foreach ($existingJob in @($script:CloudTransferQueue)) {
+                if ([string]::Equals([string](Get-CloudTransferFieldValue $existingJob 'TransferKey'), $transferKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $existingStatus = [string](Get-CloudTransferFieldValue $existingJob 'Status')
+                    $isTerminalDuplicate = $existingStatus -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded') -or $existingStatus -like 'Needs attention*'
+                    if ($isTerminalDuplicate) {
+                        if ($null -eq $terminalDuplicate) { $terminalDuplicate = $existingJob }
+                        continue
+                    }
+                    $alreadyQueuedJobs.Add($existingJob)
+                    $foundActiveDuplicate = $true
+                    break
+                }
+            }
+            if ($terminalDuplicate -and -not $foundActiveDuplicate) { $alreadyQueuedJobs.Add($terminalDuplicate) }
+        }
+    }
+
+    if ($queuedJobs.Count -gt 0) { Save-DurableTransferQueue | Out-Null }
+    return [ordered]@{
+        BatchId = if ($queuedJobs.Count -gt 0) { $batchId } else { '' }
+        BatchName = $batchName
+        TotalFiles = $files.Count
+        QueuedCount = $queuedJobs.Count
+        AlreadyQueuedCount = $alreadyQueuedJobs.Count
+        AlreadyPresentCount = $alreadyPresentCount
+        AlreadyPresentBytes = $alreadyPresentBytes
+        SameLocationCount = $sameLocationCount
+        SkippedPaths = $skippedPaths.ToArray()
+        Jobs = $queuedJobs.ToArray()
+        ExistingJobs = $alreadyQueuedJobs.ToArray()
+    }
+}
+
 function Add-CloudTransferFolderBatch {
     [CmdletBinding()]
     param(
@@ -2918,6 +3270,8 @@ function Get-CloudTransferBatchSummary {
     $completedCount = 0
     $failedCount = 0
     $cancelledCount = 0
+    $attentionCount = 0
+    $attentionItems = [System.Collections.Generic.List[object]]::new()
 
     foreach ($item in $batchItems) {
         $st = [string]$item['Status']
@@ -2935,9 +3289,32 @@ function Get-CloudTransferBatchSummary {
             'Awaiting remote confirmation' { $awaitingCount++; $bytesTransferred += [Math]::Max($bTrans, $fSize) }
             'Verifying remote file' { $awaitingCount++; $bytesTransferred += [Math]::Max($bTrans, $fSize) }
             'Completed and remotely confirmed' { $completedCount++; $bytesTransferred += $fSize }
-            'Failed' { $failedCount++; $bytesTransferred += $bTrans }
+            'Failed' {
+                $failedCount++
+                $bytesTransferred += $bTrans
+                $attentionItems.Add([ordered]@{
+                    FileName = [string]$item['FileName']
+                    RelativePath = [string]$item['RelativePath']
+                    Status = $st
+                    LastError = if ($item.ContainsKey('LastError')) { [string]$item['LastError'] } else { '' }
+                })
+            }
             'Cancelled' { $cancelledCount++; $bytesTransferred += $bTrans }
-            default { $queuedCount++; $bytesTransferred += $bTrans }
+            default {
+                if ($st -like 'Needs attention*' -or $st -eq 'Superseded') {
+                    $attentionCount++
+                    $bytesTransferred += $bTrans
+                    $attentionItems.Add([ordered]@{
+                        FileName = [string]$item['FileName']
+                        RelativePath = [string]$item['RelativePath']
+                        Status = $st
+                        LastError = if ($item.ContainsKey('LastError')) { [string]$item['LastError'] } else { '' }
+                    })
+                } else {
+                    $queuedCount++
+                    $bytesTransferred += $bTrans
+                }
+            }
         }
     }
 
@@ -2948,7 +3325,7 @@ function Get-CloudTransferBatchSummary {
         $pct = [Math]::Min(100.0, [Math]::Round(($completedCount / [double]$totalFiles) * 100.0, 1))
     }
 
-    $isComplete = ($totalFiles -gt 0 -and ($completedCount + $failedCount + $cancelledCount) -eq $totalFiles)
+    $isComplete = ($totalFiles -gt 0 -and ($completedCount + $failedCount + $cancelledCount + $attentionCount) -eq $totalFiles)
 
     return [ordered]@{
         BatchId = $BatchId
@@ -2961,6 +3338,8 @@ function Get-CloudTransferBatchSummary {
         CompletedCount = $completedCount
         FailedCount = $failedCount
         CancelledCount = $cancelledCount
+        AttentionCount = $attentionCount
+        AttentionItems = $attentionItems.ToArray()
         BytesTransferred = $bytesTransferred
         OverallPercentage = $pct
         IsComplete = $isComplete
@@ -2976,7 +3355,7 @@ function Stop-CloudTransferBatch {
 
     $cancelledAny = $false
     foreach ($item in @($script:CloudTransferQueue)) {
-        if ($item.ContainsKey('BatchId') -and $item['BatchId'] -eq $BatchId -and $item['Status'] -notin @('Completed and remotely confirmed', 'Failed', 'Cancelled')) {
+        if ($item.ContainsKey('BatchId') -and $item['BatchId'] -eq $BatchId -and $item['Status'] -notin @('Completed and remotely confirmed', 'Failed', 'Cancelled', 'Superseded') -and $item['Status'] -notlike 'Needs attention*') {
             if ($item.ContainsKey('JobId') -and $item['JobId']) {
                 try { Stop-CloudTransfer -JobId [string]$item['JobId'] | Out-Null } catch { }
             }
@@ -3121,10 +3500,38 @@ function Invoke-StartupTransferQueueRecovery {
             $fileSize = if ($item.ContainsKey('FileSizeBytes')) { [int64]$item['FileSizeBytes'] } else { 0L }
             $srcPath = if ($item.ContainsKey('SourcePath')) { [string]$item['SourcePath'] } else { '' }
             $groupKey = '{0}|{1}' -f $dstAccId, $dstProvId
+            $jobOperation = Get-CloudTransferJobOperation -Job $item
 
             if ($dstAccId -and $destFileRel -and $fileSize -ge 0L -and $recoveryInventoryMaps.ContainsKey($groupKey)) {
                 try {
-                    if (Test-Path -LiteralPath $srcPath -PathType Leaf) {
+                    if ($jobOperation.IsValid -and $jobOperation.OperationType -eq 'CloudCopy') {
+                        $recoveryMap = $recoveryInventoryMaps[$groupKey]
+                        if ($recoveryMap.ContainsKey($destFileRel)) {
+                            $remoteEntry = $recoveryMap[$destFileRel]
+                            if (-not [bool]$remoteEntry['IsDirectory'] -and [int64]$remoteEntry['SizeBytes'] -eq $fileSize) {
+                                $startupDedupCheck = [ordered]@{
+                                    Status = 'AlreadyInCloud'
+                                    IsPresent = $true
+                                    Reason = 'Restart recovery found the exact destination path and byte size.'
+                                }
+                            } else {
+                                $startupDedupCheck = [ordered]@{
+                                    Status = 'SizeMismatch'
+                                    IsPresent = $false
+                                    Reason = 'The destination path exists with a different type or byte size.'
+                                }
+                            }
+                        } else {
+                            $destParentRel = if ($destFileRel.Contains('/')) { $destFileRel.Substring(0, $destFileRel.LastIndexOf('/')) } else { '' }
+                            $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $destParentRel
+                            $scopeSource = if ($recoveryMap.ContainsKey($scopeKey)) { [string]$recoveryMap[$scopeKey]['Source'] } else { 'LiveProviderInventoryUnavailableScope' }
+                            $startupDedupCheck = [ordered]@{
+                                Status = if ($scopeSource -eq 'LiveProviderInventoryUnavailableScope') { 'Unavailable' } else { 'New' }
+                                IsPresent = $false
+                                Reason = if ($scopeSource -eq 'LiveProviderInventoryUnavailableScope') { 'Destination inventory is unavailable during restart recovery.' } else { 'No file exists at the exact destination path.' }
+                            }
+                        }
+                    } elseif ($jobOperation.IsValid -and $jobOperation.OperationType -eq 'Upload' -and (Test-Path -LiteralPath $srcPath -PathType Leaf)) {
                         $startupDedupCheck = Classify-TransferCandidate `
                             -LocalFilePath $srcPath `
                             -DestinationRelativePath $destFileRel `
@@ -3438,6 +3845,12 @@ function Add-CloudTransferQueueItem {
         $DestinationPath
     }
 
+    if ($operation.IsValid -and $resolvedOperation -eq 'CloudCopy' -and
+        (Test-CloudTransferSameRemoteObject -SourceAccount $SourceAccount -SourcePath $SourcePath `
+            -DestinationAccount $DestinationAccount -DestinationFilePath $resolvedDestinationFilePath)) {
+        throw 'Source and destination identify the same cloud object; no transfer is needed.'
+    }
+
     $effectiveSourceLastWriteUtc = $SourceLastWriteUtc
     if ([string]::IsNullOrWhiteSpace($effectiveSourceLastWriteUtc) -and $operation.IsValid -and [string]$operation.SourceProvider -eq 'local') {
         try {
@@ -3462,17 +3875,25 @@ function Add-CloudTransferQueueItem {
     # Repeated discovery of the same intended operation must never enqueue a second
     # worker, and a terminal job must not be revived implicitly.
     $existingJob = $null
+    $terminalExistingJob = $null
     foreach ($existing in @($script:CloudTransferQueue)) {
         if ($null -eq $existing) { continue }
         $existingKey = [string](Get-CloudTransferFieldValue $existing 'TransferKey')
         if ($existingKey -and [string]::Equals($existingKey, $transferKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $existingStatus = [string](Get-CloudTransferFieldValue $existing 'Status')
+            $terminal = $existingStatus -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded') -or $existingStatus -like 'Needs attention*'
+            if ($terminal) {
+                if ($null -eq $terminalExistingJob) { $terminalExistingJob = $existing }
+                continue
+            }
             $existingJob = $existing
             break
         }
     }
+    if ($null -eq $existingJob) { $existingJob = $terminalExistingJob }
     if ($null -ne $existingJob) {
         $existingStatus = [string](Get-CloudTransferFieldValue $existingJob 'Status')
-        $terminal = $existingStatus -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded')
+        $terminal = $existingStatus -in @('Completed and remotely confirmed', 'Completed', 'Failed', 'Cancelled', 'Superseded') -or $existingStatus -like 'Needs attention*'
         if (-not ($terminal -and $AllowNewAttempt)) {
             if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
                 try {
@@ -4557,6 +4978,89 @@ function Process-CloudTransferQueue {
                         continue
                     }
                 } catch { }
+            } elseif ($eligibleOperation.OperationType -eq 'CloudCopy' -and [string]$eligible['ConflictAction'] -eq 'Skip') {
+                $srcAcc = $eligible['SourceAccount']
+                $destAcc = $eligible['DestinationAccount']
+                $srcPath = Normalize-CloudPath -Path ([string]$eligible['SourcePath'])
+                $destFileRel = Get-CloudTransferJobDestinationPath -Job $eligible
+                $fileSize = [int64]$eligible['FileSizeBytes']
+                $srcParentRel = if ($srcPath.Contains('/')) { $srcPath.Substring(0, $srcPath.LastIndexOf('/')) } else { '' }
+                $destParentRel = if ($destFileRel.Contains('/')) { $destFileRel.Substring(0, $destFileRel.LastIndexOf('/')) } else { '' }
+                $srcAccId = [string](Get-CloudTransferFieldValue $eligible 'SourceAccountId')
+                $srcProvId = [string](Get-CloudTransferFieldValue $eligible 'SourceProvider')
+                $dstAccId = [string](Get-CloudTransferFieldValue $eligible 'DestinationAccountId')
+                $dstProvId = [string](Get-CloudTransferFieldValue $eligible 'DestinationProvider')
+                $sourceInventoryKey = '{0}|{1}|{2}' -f $srcAccId, $srcProvId, $srcParentRel
+                $destinationInventoryKey = '{0}|{1}|{2}' -f $dstAccId, $dstProvId, $destParentRel
+                $dedupCheck = $null
+
+                if (Get-Command Get-RemoteFileInventoryMap -ErrorAction SilentlyContinue) {
+                    foreach ($inventoryRequest in @(
+                        @{ Key = $sourceInventoryKey; Account = $srcAcc; Folder = $srcParentRel },
+                        @{ Key = $destinationInventoryKey; Account = $destAcc; Folder = $destParentRel }
+                    )) {
+                        if ($preflightInventoryCache.ContainsKey([string]$inventoryRequest['Key'])) { continue }
+                        try {
+                            $inventoryMap = Get-RemoteFileInventoryMap `
+                                -DestinationAccount $inventoryRequest['Account'] `
+                                -DestinationFolderPaths @([string]$inventoryRequest['Folder']) `
+                                -BypassLedger
+                        } catch {
+                            $inventoryMap = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
+                            $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", [string]$inventoryRequest['Folder']
+                            $inventoryMap[$scopeKey] = [ordered]@{ Name = ''; RelPath = [string]$inventoryRequest['Folder']; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryUnavailableScope' }
+                        }
+                        $preflightInventoryCache[[string]$inventoryRequest['Key']] = $inventoryMap
+                    }
+
+                    $candidateStatus = Get-RemoteCloudCopyCandidateStatus `
+                        -SourceInventoryMap $preflightInventoryCache[$sourceInventoryKey] `
+                        -DestinationInventoryMap $preflightInventoryCache[$destinationInventoryKey] `
+                        -SourcePath $srcPath `
+                        -DestinationFilePath $destFileRel `
+                        -ExpectedSizeBytes $fileSize `
+                        -ExpectedSourceLastWriteUtc ([string](Get-CloudTransferFieldValue $eligible 'SourceLastWriteUtc'))
+                    $dedupCheck = [ordered]@{
+                        Status = [string]$candidateStatus.Status
+                        IsPresent = ([string]$candidateStatus.Status -eq 'AlreadyInCloud')
+                        Reason = [string]$candidateStatus.Reason
+                    }
+                } else {
+                    $dedupCheck = [ordered]@{
+                        Status = 'Unavailable'
+                        IsPresent = $false
+                        Reason = 'Live provider inventory is unavailable; cloud copy is paused to prevent a duplicate transfer.'
+                    }
+                }
+
+                if ($dedupCheck.Status -eq 'AlreadyInCloud') {
+                    $eligible['Status'] = 'Completed and remotely confirmed'
+                    $eligible['Percentage'] = 100.0
+                    $eligible['BytesTransferred'] = $fileSize
+                    $eligible['CompletedUtc'] = [DateTime]::UtcNow
+                    $eligible['WorkerPid'] = 0
+                    $eligible['JobId'] = ''
+                    $eligible['VerificationType'] = 'PreTransferDeduplication'
+                    $eligible['DeduplicationStatus'] = 'AlreadyInCloud'
+                    $eligible['LastError'] = [string]$dedupCheck.Reason
+                    $stateChanged = $true
+                    continue
+                } elseif ($dedupCheck.Status -eq 'Unavailable') {
+                    $eligible['Status'] = 'Waiting for network/provider'
+                    $eligible['LastError'] = [string]$dedupCheck.Reason
+                    $eligible['NextRetryUtc'] = [DateTime]::UtcNow.AddSeconds(15)
+                    $eligible['WorkerPid'] = 0
+                    $eligible['JobId'] = ''
+                    $stateChanged = $true
+                    continue
+                } elseif ($dedupCheck.Status -in @('SourceMissing', 'SourceChanged')) {
+                    $eligible['Status'] = 'Needs attention: cloud source changed'
+                    $eligible['LastError'] = [string]$dedupCheck.Reason
+                    $eligible['WorkerPid'] = 0
+                    $eligible['JobId'] = ''
+                    $stateChanged = $true
+                    continue
+                }
             }
 
             # Launch transfer for eligible item
@@ -4589,6 +5093,7 @@ function Process-CloudTransferQueue {
                     -ConflictAction $eligible['ConflictAction'] `
                     -IsMove:$eligible['IsMove'] `
                     -OperationType $eligibleOperation.OperationType `
+                    -FileSizeBytes $(if ($eligibleOperation.OperationType -eq 'CloudCopy') { [int64]$eligible['FileSizeBytes'] } else { 0L }) `
                     -BandwidthLimit $eligibleBw
 
                 $eligible['JobId'] = $job.JobId
