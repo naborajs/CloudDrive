@@ -1120,6 +1120,32 @@ Users on Linux desktop environments (XFCE, GNOME, Ubuntu VNC) lacked an authenti
 - Live VNC screen capture on Linux `DISPLAY=:1`: Verified standalone NS Cloud Drive desktop app window with PureBlack theme, sidebar navigation, and 1-click TeraBox direct sign-in.
 - Windows Release Zip & Linux Tarball re-packaged cleanly.
 
+## 44. Restart-Safe Cloud Deduplication and Linux Dashboard Queue State (2026-11-25)
+
+**Observed symptoms:**
+1. After a restart during a multi-file transfer, previously uploaded files could still look pending or be sent again after the user re-dropped the original batch.
+2. A drop could show a large remaining count even when some destination files were already present.
+3. Linux dashboard refreshes depended on launching PowerShell for queue state and could be delayed by cold starts and overlapping requests.
+
+**Root causes:**
+1. Recovery and re-drop checks could rely on a durable local deduplication ledger or a mounted VFS view instead of fresh provider state. Those views can be stale after a restart.
+2. Provider listing failures could be collapsed to an empty result, and nested paths reported relative to the queried folder were not consistently reconstructed. A root-level scan could also walk folders unrelated to the current batch.
+3. The Linux dashboard read queue state through a subprocess on refresh and did not distinguish a missing/corrupt durable snapshot from a genuinely empty queue.
+
+**Fix:**
+1. Restart recovery and re-drops now use live provider checks for exact destination path/name and byte size. A provider outage remains `Unavailable`; it is not treated as proof that a file is absent.
+2. Batch inventory queries only the destination parent folders used by that batch, preserves case-sensitive paths, validates listing JSON and file sizes, and distinguishes files from same-name directories. Durable ledger entries remain a non-authoritative fast path for ordinary lookups.
+3. Matching remote jobs are reconciled as complete; interrupted jobs remain retryable. Re-dropping the original 100-file batch now skips 75 confirmed remote matches and keeps the existing 25 pending jobs without adding duplicates.
+4. The Linux dashboard reads the durable queue snapshot directly, falls back to valid queue backups, reports unavailable state instead of an empty queue after snapshot loss, renders real per-file statuses, serializes polling, and limits refresh work while the window is hidden.
+5. The local dashboard now rejects cross-origin requests and oversized or malformed input, serves contained assets only, keeps login credentials out of process arguments, and avoids returning child-process diagnostics that could echo secrets.
+
+**Verification:**
+- `powershell.exe -NoProfile -File tests/Test-PostRestartDropDeduplication.ps1` (Windows PowerShell 5.1) and `pwsh -NoProfile -File tests/Test-PostRestartDropDeduplication.ps1` (PowerShell 7): PASSED with exit code 0; confirmed 75 skipped, 25 retained, nested folder matching, unavailable-provider handling, directory-vs-file handling, and invalid-size rejection.
+- `tests/Test-TransferRecoveryAndProgression.ps1` and `tests/Test-CloudDeduplicationService.ps1`: PASSED with exit code 0 under Windows PowerShell 5.1 and PowerShell 7.
+- `python -m unittest discover -s tests -p "test_linux_web_dashboard.py" -v`: PASSED all 9 tests on Windows and WSL Ubuntu.
+- `python -m py_compile src/web/app.py` and the dashboard inline JavaScript syntax check: PASSED with exit code 0.
+- Linux PowerShell E2E execution remains unverified in this workstation because WSL Ubuntu does not have `pwsh` installed (`pwsh: command not found`).
+
 
 
 
