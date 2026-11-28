@@ -21,6 +21,14 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 
 Write-Host "  [PASS] Transfer modules loaded under Set-StrictMode -Version Latest"
 
+$upperPathIdentity = Get-CloudTransferStagedIdentity -AccountId 'testaccount123' -ProviderId 'gdrive' -RelativePath 'Docs/A.txt'
+$lowerPathIdentity = Get-CloudTransferStagedIdentity -AccountId 'testaccount123' -ProviderId 'gdrive' -RelativePath 'Docs/a.txt'
+if ([string]::Equals($upperPathIdentity, $lowerPathIdentity, [System.StringComparison]::Ordinal)) { throw 'Case-distinct cloud paths collapsed into one staged identity.' }
+$upperTransferPath = Get-CloudTransferPathIdentity -Path 'Docs/A.txt' -IsLocal $false
+$lowerTransferPath = Get-CloudTransferPathIdentity -Path 'Docs/a.txt' -IsLocal $false
+if ([string]::Equals($upperTransferPath, $lowerTransferPath, [System.StringComparison]::Ordinal)) { throw 'Case-distinct provider paths collapsed into one transfer identity.' }
+Write-Host '  [PASS] Case-distinct cloud paths retain separate identities'
+
 function New-StagedCacheFile {
     param(
         [Parameter(Mandatory = $true)][string]$VfsRoot,
@@ -29,8 +37,9 @@ function New-StagedCacheFile {
         [Parameter(Mandatory = $true)][string]$Content
     )
 
-    $dataPath = Join-Path $VfsRoot $RelativePath
-    $metaPath = Join-Path $MetaRoot $RelativePath
+    $nativeRelativePath = $RelativePath.Replace('\', [string][System.IO.Path]::DirectorySeparatorChar).Replace('/', [string][System.IO.Path]::DirectorySeparatorChar)
+    $dataPath = Join-Path $VfsRoot $nativeRelativePath
+    $metaPath = Join-Path $MetaRoot $nativeRelativePath
     foreach ($candidate in @($dataPath, $metaPath)) {
         $dir = [System.IO.Path]::GetDirectoryName($candidate)
         if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) {
@@ -59,21 +68,22 @@ function Get-FlatQueue {
     return @()
 }
 
-$sandbox = Join-Path $env:TEMP ("NSCloudDrive_StagedAdoption_" + [Guid]::NewGuid().ToString('N'))
+$sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("NSCloudDrive_StagedAdoption_" + [Guid]::NewGuid().ToString('N'))
 $accountKey = 'gdrive_testaccount123'
 $accountId = 'testaccount123'
 $cacheDir = Join-Path $sandbox 'cache'
 $accountRoot = Join-Path $cacheDir $accountKey
-$orphanRoot = Join-Path $accountRoot 'vfs\gdrive'
-$orphanMeta = Join-Path $accountRoot 'vfsMeta\gdrive'
-$activeRoot = Join-Path $accountRoot 'vfs\gdrive{z0wI1}'
-$activeMeta = Join-Path $accountRoot 'vfsMeta\gdrive{z0wI1}'
-$queueFile = Join-Path $sandbox 'state\transfer-jobs.json'
+$orphanRoot = Join-Path (Join-Path $accountRoot 'vfs') 'gdrive'
+$orphanMeta = Join-Path (Join-Path $accountRoot 'vfsMeta') 'gdrive'
+$activeRoot = Join-Path (Join-Path $accountRoot 'vfs') 'gdrive{z0wI1}'
+$activeMeta = Join-Path (Join-Path $accountRoot 'vfsMeta') 'gdrive{z0wI1}'
+$queueFile = Join-Path (Join-Path $sandbox 'state') 'transfer-jobs.json'
 $accounts = @([pscustomobject]@{
     Id          = $accountId
     ProviderId  = 'gdrive'
     Label       = 'Staged Adoption Test Account'
     DriveLetter = 'Q'
+    CacheDirectory = $cacheDir
 })
 
 try {
@@ -101,7 +111,7 @@ try {
     foreach ($item in $pending) { $byRelative[[string]$item.RelativePath] = $item }
 
     foreach ($rel in @('Media/Photo One.jpg', 'Media/Photo Two.jpg', 'Docs/Deep/note.txt')) {
-        if (-not $byRelative.ContainsKey($rel)) { throw "Staged file '$rel' was not discovered." }
+        if (-not $byRelative.ContainsKey($rel)) { throw "Staged file '$rel' was not discovered (found: $($byRelative.Keys -join ', '))." }
         if (-not $byRelative[$rel].IsOutsideActiveCache) { throw "'$rel' was not reported as outside the live cache root." }
     }
     if ($byRelative['Media/Active.jpg'].IsOutsideActiveCache) {
@@ -112,7 +122,28 @@ try {
     if (@($failClosed | Where-Object { $_.IsOutsideActiveCache }).Count -ne 0) {
         throw 'Staged files were treated as adoptable while the live cache root was unknown.'
     }
-    Write-Host "  [PASS] Live-root files are excluded and adoption fails closed without a known cache root"
+
+    $knownNoMount = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir -ActiveCacheOwnershipKnown)
+    if ($knownNoMount.Count -ne 4 -or @($knownNoMount | Where-Object { -not $_.IsOutsideActiveCache }).Count -ne 0) {
+        throw 'Dirty staged files were not marked adoptable after a successful empty live-mount inventory.'
+    }
+    Write-Host "  [PASS] Unknown mount inventory fails closed; a confirmed empty inventory enables staged recovery"
+
+    $providerHashCache = Join-Path $sandbox 'provider-hash-roots'
+    $megaAccount = Join-Path $providerHashCache 'mega_megatest'
+    $s3Account = Join-Path $providerHashCache 's3_s3test'
+    $megaVfs = Join-Path $megaAccount 'vfs'
+    $s3Vfs = Join-Path $s3Account 'vfs'
+    $megaMeta = Join-Path $megaAccount 'vfsMeta'
+    $s3Meta = Join-Path $s3Account 'vfsMeta'
+    $null = New-StagedCacheFile -VfsRoot $megaVfs -MetaRoot $megaMeta -RelativePath 'mega{cache-hash}/Docs/mega.txt' -Content 'mega data'
+    $null = New-StagedCacheFile -VfsRoot $s3Vfs -MetaRoot $s3Meta -RelativePath 's3{cache-hash}/Docs/object.bin' -Content 's3 data'
+    $providerHashFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $providerHashCache -ActiveCacheOwnershipKnown)
+    $providerHashPaths = @($providerHashFiles | ForEach-Object { [string]$_.RelativePath })
+    if ($providerHashFiles.Count -ne 2 -or $providerHashPaths -notcontains 'Docs/mega.txt' -or $providerHashPaths -notcontains 'Docs/object.bin') {
+        throw "Mega/S3 staged paths retained an internal rclone hash root or were not discovered: $($providerHashPaths -join ', ')"
+    }
+    Write-Host '  [PASS] Mega and S3 hash-root folders are stripped from recovered cloud paths'
 
     # --------------------------------------------------------------------------
     # Phase B: adoption creates durable jobs for orphan-root files only
@@ -248,7 +279,7 @@ try {
     # Remove the synthetic conflict fixture so later accounting phases see only the
     # three adopted orphan files.
     Remove-Item -LiteralPath $conflictPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $orphanMeta 'Media\Conflict.jpg') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Join-Path $orphanMeta 'Media') 'Conflict.jpg') -Force -ErrorAction SilentlyContinue
 
     # --------------------------------------------------------------------------
     # Phase F: confirmed revisions stop inflating pending counts
@@ -309,32 +340,168 @@ try {
     Clear-CloudTransferQueue -All:$false
     $queueAfterClear = @(Get-FlatQueue)
     if (@($queueAfterClear | Where-Object { [string]$_['Status'] -eq 'Completed and remotely confirmed' }).Count -ne 0) {
-        throw 'Clear-CloudTransferQueue did not remove the completed job.'
+        $cleanupStatuses = @(Get-FlatQueue | ForEach-Object { [string]$_['StagedCleanupStatus'] }) -join ', '
+        throw "Clear-CloudTransferQueue did not remove the completed job. Cleanup statuses: $cleanupStatuses"
     }
     if ($queueAfterClear.Count -ne ($queueBeforeClear - $completedBeforeClear)) {
         throw "Clearing completed jobs removed the wrong number of jobs ($queueBeforeClear - $completedBeforeClear -> $($queueAfterClear.Count))."
     }
-    if (-not (Test-Path -LiteralPath $settledPath -PathType Leaf)) {
-        throw 'Clearing completed jobs deleted the preserved staged source.'
+    if (Test-Path -LiteralPath $settledPath -PathType Leaf) {
+        throw 'A remotely confirmed exact staged source was not removed when its completed job was cleared.'
+    }
+    if (Test-Path -LiteralPath ($settledPath -replace '([\\/])vfs([\\/])', '$1vfsMeta$2') -PathType Leaf) {
+        throw 'The paired VFS metadata was not removed with the remotely confirmed staged source.'
     }
     $ledgerEntry = Get-CloudTransferSettledStagedEntry -Identity $settledIdentity
     if ($null -eq $ledgerEntry) {
         throw 'Settlement evidence was lost when the completed job was cleared.'
     }
 
-    $settledSummary = Get-CloudTransferPendingSummary -QueueItems @(Get-FlatQueue) -StagedFiles $settledScan
+    $settledRescan = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir -ActiveCachePaths @($activeRoot) |
+        Where-Object { $_.RelativePath -eq 'Docs/Settled.txt' })
+    if ($settledRescan.Count -ne 0) { throw 'A cleaned staged source remained discoverable after its completed job was cleared.' }
+    $settledSummary = Get-CloudTransferPendingSummary -QueueItems @(Get-FlatQueue) -StagedFiles $settledRescan
     if ([int]$settledSummary.StagedOnlyCount -ne 0) {
         throw "A settled staged revision reappeared as pending after clearing completed jobs (StagedOnlyCount=$($settledSummary.StagedOnlyCount))."
     }
-    $reAdopt = Import-StagedVfsFilesToTransferQueue -StagedFiles $settledScan -Accounts $accounts
-    if ([int]$reAdopt.AdoptedCount -ne 0 -or [int]$reAdopt.AlreadySettledCount -ne 1) {
-        throw "A settled staged revision was queued again after clearing completed jobs (adopted $($reAdopt.AdoptedCount), settled $($reAdopt.AlreadySettledCount))."
+    $reAdopt = Import-StagedVfsFilesToTransferQueue -StagedFiles $settledRescan -Accounts $accounts
+    if ([int]$reAdopt.AdoptedCount -ne 0) {
+        throw "A cleaned staged revision was queued again after clearing completed jobs (adopted $($reAdopt.AdoptedCount))."
     }
     if (@(Get-FlatQueue).Count -ne $queueAfterClear.Count) {
         throw 'Re-adoption changed the queue despite the settlement record.'
     }
 
+    # --------------------------------------------------------------------------
+    # Phase F3: exact cleanup retries safely and protects changed/active sources
+    # --------------------------------------------------------------------------
+    $lockedPath = New-StagedCacheFile -VfsRoot $orphanRoot -MetaRoot $orphanMeta -RelativePath 'Docs\Locked.txt' -Content 'locked staged payload'
+    $lockedInfo = Get-Item -LiteralPath $lockedPath
+    $lockedJob = @{
+        Status = 'Completed and remotely confirmed'
+        RecoveredFromVfsCache = $true
+        StagedSourcePath = $lockedPath
+        StagedSourceLastWriteUtc = $lockedInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+        StagedSourceSha256 = (Get-FileHash -LiteralPath $lockedPath -Algorithm SHA256).Hash
+        StagedCleanupStatus = 'Pending'
+        FileSizeBytes = [int64]$lockedInfo.Length
+        AccountId = $accountId
+        ProviderId = 'gdrive'
+        DestinationAccount = @{ Id = $accountId; ProviderId = 'gdrive'; CacheDirectory = $cacheDir }
+    }
+    $lockStream = [System.IO.File]::Open($lockedPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $lockedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $lockedJob
+        if ($lockedCleanup.Success -or -not (Test-Path -LiteralPath $lockedPath)) {
+            throw 'A locked staged source was deleted or marked clean.'
+        }
+    } finally { $lockStream.Dispose() }
+    $retryCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $lockedJob
+    if (-not $retryCleanup.Success -or (Test-Path -LiteralPath $lockedPath)) {
+        throw 'The exact staged source was not deleted after its lock cleared.'
+    }
+
+    $changedPath = New-StagedCacheFile -VfsRoot $orphanRoot -MetaRoot $orphanMeta -RelativePath 'Docs\Changed.txt' -Content 'old revision'
+    $changedInfo = Get-Item -LiteralPath $changedPath
+    $changedJob = @{
+        Status = 'Completed and remotely confirmed'
+        RecoveredFromVfsCache = $true
+        StagedSourcePath = $changedPath
+        StagedSourceLastWriteUtc = $changedInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+        StagedSourceSha256 = (Get-FileHash -LiteralPath $changedPath -Algorithm SHA256).Hash
+        StagedCleanupStatus = 'Pending'
+        FileSizeBytes = [int64]$changedInfo.Length
+        AccountId = $accountId
+        ProviderId = 'gdrive'
+        DestinationAccount = @{ Id = $accountId; ProviderId = 'gdrive'; CacheDirectory = $cacheDir }
+    }
+    (Get-Item -LiteralPath $changedPath).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(5)
+    $changedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $changedJob
+    if (-not $changedCleanup.Success -or [string]$changedJob['StagedCleanupStatus'] -ne 'Preserved: staged revision changed' -or -not (Test-Path -LiteralPath $changedPath)) {
+        throw 'Cleanup did not preserve a changed staged revision for a new transfer.'
+    }
+
+    $failedPath = New-StagedCacheFile -VfsRoot $orphanRoot -MetaRoot $orphanMeta -RelativePath 'Docs\Failed.txt' -Content 'unconfirmed payload'
+    $failedInfo = Get-Item -LiteralPath $failedPath
+    $failedJob = @{
+        Status = 'Failed'
+        RecoveredFromVfsCache = $true
+        StagedSourcePath = $failedPath
+        StagedSourceLastWriteUtc = $failedInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+        StagedSourceSha256 = (Get-FileHash -LiteralPath $failedPath -Algorithm SHA256).Hash
+        StagedCleanupStatus = 'Pending'
+        FileSizeBytes = [int64]$failedInfo.Length
+        AccountId = $accountId
+        ProviderId = 'gdrive'
+        DestinationAccount = @{ Id = $accountId; ProviderId = 'gdrive'; CacheDirectory = $cacheDir }
+    }
+    $failedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $failedJob
+    if ($failedCleanup.Success -or -not (Test-Path -LiteralPath $failedPath)) {
+        throw 'A failed, unverified staged source was removed.'
+    }
+
+    $activeFile = Join-Path (Join-Path $activeRoot 'Media') 'ActiveConfirmed.txt'
+    $activeMetaFile = Join-Path (Join-Path $activeMeta 'Media') 'ActiveConfirmed.txt'
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($activeFile))
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($activeMetaFile))
+    [System.IO.File]::WriteAllText($activeFile, 'active mounted payload')
+    [System.IO.File]::WriteAllText($activeMetaFile, '{"Dirty": false}')
+    $activeInfo = Get-Item -LiteralPath $activeFile
+    $activeJob = @{
+        Status = 'Completed and remotely confirmed'
+        RecoveredFromVfsCache = $true
+        StagedSourcePath = $activeFile
+        StagedSourceLastWriteUtc = $activeInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+        StagedSourceSha256 = (Get-FileHash -LiteralPath $activeFile -Algorithm SHA256).Hash
+        StagedCleanupStatus = 'Pending'
+        FileSizeBytes = [int64]$activeInfo.Length
+        AccountId = $accountId
+        ProviderId = 'gdrive'
+        DestinationAccount = @{ Id = $accountId; ProviderId = 'gdrive'; CacheDirectory = $cacheDir }
+    }
+    $originalVfsStatsScript = (Get-Command Get-VirtualDriveVfsStats).ScriptBlock
+    $global:TestActiveVfsCachePath = $activeRoot
+    try {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsActive = $true; DiskCachePath = [string]$global:TestActiveVfsCachePath } }
+        $activeCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $activeJob
+    } finally {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value $originalVfsStatsScript
+        Remove-Variable -Name TestActiveVfsCachePath -Scope Global -ErrorAction SilentlyContinue
+    }
+    if ($activeCleanup.Success -or -not (Test-Path -LiteralPath $activeFile)) {
+        throw 'A VFS file owned by an active mount was removed.'
+    }
+
+    if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $outsideDirectory = Join-Path $sandbox 'outside-cache'
+        [void][System.IO.Directory]::CreateDirectory($outsideDirectory)
+        $outsideFile = Join-Path $outsideDirectory 'Escaped.txt'
+        [System.IO.File]::WriteAllText($outsideFile, 'outside cache payload')
+        $linkedVfsRoot = Join-Path (Join-Path $accountRoot 'vfs') 'linked'
+        [System.IO.Directory]::CreateSymbolicLink($linkedVfsRoot, $outsideDirectory) | Out-Null
+        $linkedPath = Join-Path $linkedVfsRoot 'Escaped.txt'
+        $linkedInfo = Get-Item -LiteralPath $linkedPath
+        $linkedJob = @{
+            Status = 'Completed and remotely confirmed'
+            RecoveredFromVfsCache = $true
+            StagedSourcePath = $linkedPath
+            StagedSourceLastWriteUtc = $linkedInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+            StagedSourceSha256 = (Get-FileHash -LiteralPath $linkedPath -Algorithm SHA256).Hash
+            StagedCleanupStatus = 'Pending'
+            FileSizeBytes = [int64]$linkedInfo.Length
+            AccountId = $accountId
+            ProviderId = 'gdrive'
+            DestinationAccount = @{ Id = $accountId; ProviderId = 'gdrive'; CacheDirectory = $cacheDir }
+        }
+        $linkedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $linkedJob
+        if ($linkedCleanup.Success -or -not (Test-Path -LiteralPath $outsideFile -PathType Leaf)) {
+            throw 'Staged cleanup followed a Linux symlink outside the configured cache.'
+        }
+    }
+    Write-Host "  [PASS] Exact cleanup retries locked files and protects changed, failed, active, and symlinked sources"
+
     # A genuinely newer revision at the same path must still upload.
+    $settledPath = New-StagedCacheFile -VfsRoot $orphanRoot -MetaRoot $orphanMeta -RelativePath 'Docs\Settled.txt' -Content 'new settled payload'
     (Get-Item -LiteralPath $settledPath).LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(10)
     $newerSettledScan = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir -ActiveCachePaths @($activeRoot) |
         Where-Object { $_.RelativePath -eq 'Docs/Settled.txt' })
@@ -364,11 +531,11 @@ try {
     # --------------------------------------------------------------------------
     $cacheDir2 = Join-Path $sandbox 'cache2'
     $accountRoot2 = Join-Path $cacheDir2 $accountKey
-    $orphanRoot2 = Join-Path $accountRoot2 'vfs\gdrive'
-    $orphanMeta2 = Join-Path $accountRoot2 'vfsMeta\gdrive'
-    $activeRoot2 = Join-Path $accountRoot2 'vfs\gdrive{z0wI1}'
-    $activeMeta2 = Join-Path $accountRoot2 'vfsMeta\gdrive{z0wI1}'
-    $queueFile2 = Join-Path $sandbox 'state2\transfer-jobs.json'
+    $orphanRoot2 = Join-Path (Join-Path $accountRoot2 'vfs') 'gdrive'
+    $orphanMeta2 = Join-Path (Join-Path $accountRoot2 'vfsMeta') 'gdrive'
+    $activeRoot2 = Join-Path (Join-Path $accountRoot2 'vfs') 'gdrive{z0wI1}'
+    $activeMeta2 = Join-Path (Join-Path $accountRoot2 'vfsMeta') 'gdrive{z0wI1}'
+    $queueFile2 = Join-Path (Join-Path $sandbox 'state2') 'transfer-jobs.json'
     [void][System.IO.Directory]::CreateDirectory($activeRoot2)
     [void][System.IO.Directory]::CreateDirectory($activeMeta2)
 
@@ -380,17 +547,19 @@ try {
     $localSource = @{ Id = 'local'; ProviderId = 'local' }
     for ($i = 1; $i -le 32; $i++) {
         [void](Add-CloudTransferQueueItem -SourceAccount $localSource `
-            -SourcePath (Join-Path $sandbox "existing\$i.txt") `
+            -SourcePath (Join-Path (Join-Path $sandbox 'existing') "$i.txt") `
             -DestinationAccount $destination -DestinationPath 'bulk' `
             -ConflictAction 'Overwrite' -MaxRetries 5 -FileSizeBytes 16 `
             -BatchId 'existing' -BatchName 'Existing uploads' -RelativePath "bulk/Job $i.txt" -SkipPersist)
     }
     if (@(Get-FlatQueue).Count -ne 32) { throw 'Failed to stage the 32 pre-existing queue jobs.' }
 
+    Write-Host '  -> Building the 165-file staged VFS accounting fixture...'
     for ($i = 1; $i -le 165; $i++) {
         $name = "Image {0:D3}.jpg" -f $i
         [void](New-StagedCacheFile -VfsRoot $orphanRoot2 -MetaRoot $orphanMeta2 -RelativePath "bulk\$name" -Content ('E' * 16))
     }
+    Write-Host '  -> Scanning the staged VFS accounting fixture...'
     $staged165 = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir2 -ActiveCachePaths @($activeRoot2))
     if ($staged165.Count -ne 165) {
         throw "Expected 165 staged files in the accounting fixture, got $($staged165.Count)."
@@ -404,7 +573,16 @@ try {
         throw "Expected 165 staged-only transfers before adoption, got $($beforeAdoption.StagedOnlyCount)."
     }
 
-    $bulkAdoption = Import-StagedVfsFilesToTransferQueue -StagedFiles $staged165 -Accounts $accounts
+    Write-Host '  -> Adopting staged files into the 197-job durable queue...'
+    $script:DeferredPreflightCalls = 0
+    Set-Item -Path Function:\Test-RemoteCloudFileDeduplication -Value {
+        $script:DeferredPreflightCalls++
+        return @{ IsPresent = $false; Status = 'NotPresent'; Reason = 'Test preflight result' }
+    }
+    $bulkImportWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $bulkAdoption = Import-StagedVfsFilesToTransferQueue -StagedFiles $staged165 -Accounts $accounts -DeferRemotePreflight
+    $bulkImportWatch.Stop()
+    if ($script:DeferredPreflightCalls -ne 0) { throw 'Deferred production adoption made per-file provider calls.' }
     if ([int]$bulkAdoption.AdoptedCount -ne 165) {
         throw "Expected 165 adopted files, got $($bulkAdoption.AdoptedCount) (skipped $($bulkAdoption.SkippedCount), failed $($bulkAdoption.FailedCount))."
     }
@@ -419,10 +597,12 @@ try {
     if ([int]$afterAdoption.StagedOnlyCount -ne 0) {
         throw "Adopted staged files were double-counted (StagedOnlyCount=$($afterAdoption.StagedOnlyCount))."
     }
-    $bulkSecond = Import-StagedVfsFilesToTransferQueue -StagedFiles $staged165 -Accounts $accounts
+    Write-Host ('  -> Rechecking the adopted batch for duplicate jobs (initial import: ' + [Math]::Round($bulkImportWatch.Elapsed.TotalSeconds, 2) + ' seconds)...')
+    $bulkSecond = Import-StagedVfsFilesToTransferQueue -StagedFiles $staged165 -Accounts $accounts -DeferRemotePreflight
     if ([int]$bulkSecond.AdoptedCount -ne 0 -or [int]$bulkSecond.AlreadyQueuedCount -ne 165) {
         throw 'Bulk adoption was not idempotent on a second pass.'
     }
+    Remove-Item -Path Function:\Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue
     Write-Host "  [PASS] 197-transfer accounting stays exact before, after, and across repeated adoption"
 
     Write-Host "All Staged VFS Queue Adoption Tests Passed Successfully!"
