@@ -18,6 +18,7 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 . (Join-Path $srcDir 'models\ConnectionState.ps1')
 . (Join-Path $srcDir 'services\SettingsManager.ps1')
 . (Join-Path $srcDir 'services\VirtualDriveManager.ps1')
+. (Join-Path $srcDir 'services\BackgroundOperationManager.ps1')
 . (Join-Path $srcDir 'services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $srcDir 'services\CloudTransferManager.ps1')
 
@@ -475,6 +476,330 @@ try {
         throw 'Case 16 failed: exact same-location cloud copy should be rejected without creating a queue item.'
     }
     Write-Host "  [PASS] Case 16: exact same-location copy is a no-op and never queued"
+
+    # --------------------------------------------------------------------------
+    # Case 17: UI scheduling must not perform provider inventory synchronously
+    # --------------------------------------------------------------------------
+    $script:CloudTransferQueue.Clear()
+    $asyncSourcePath = Join-Path $sandbox 'async-preflight-source.txt'
+    [System.IO.File]::WriteAllText($asyncSourcePath, 'async source')
+    $script:AsyncInventoryCalled = $false
+    $script:AsyncTransferStarted = $false
+    function Get-RemoteFileInventoryMap {
+        [CmdletBinding()]
+        param([object]$DestinationAccount, [string[]]$DestinationFolderPaths = @(), [switch]$BypassLedger)
+        $script:AsyncInventoryCalled = $true
+        throw 'UI dispatcher attempted synchronous provider inventory.'
+    }
+    function Start-CloudTransfer {
+        [CmdletBinding()]
+        param([object]$SourceAccount, [string]$SourcePath, [object]$DestinationAccount, [string]$DestinationPath = '', [string]$ConflictAction = 'Skip', [switch]$IsMove, [string]$OperationType = '', [int64]$FileSizeBytes = 0L, [string]$BandwidthLimit = '')
+        $script:AsyncTransferStarted = $true
+        throw 'Transfer launcher should not run before inventory completes.'
+    }
+    Add-CloudTransferQueueItem `
+        -SourceAccount $local `
+        -SourcePath $asyncSourcePath `
+        -DestinationAccount $gdrive `
+        -DestinationPath 'AsyncChecks' `
+        -ConflictAction 'Skip' `
+        -FileSizeBytes 12 `
+        -OperationType 'Upload' | Out-Null
+    $null = Process-CloudTransferQueue -RequireCachedRemoteChecks
+    $asyncJob = @(Get-FlatQueue)[0]
+    if ($script:AsyncInventoryCalled -or $script:AsyncTransferStarted -or [string]$asyncJob['Status'] -ne 'Queued') {
+        throw 'UI-safe queue processing performed provider inventory or transfer launch without cached remote results.'
+    }
+    Write-Host '  [PASS] UI-safe queue processing defers provider inventory and leaves the job durable'
+
+    # --------------------------------------------------------------------------
+    # Case 18: Explicit UI selections are queued exactly and defer cloud scans
+    # --------------------------------------------------------------------------
+    $script:CloudTransferQueue.Clear()
+    $selectedDir = Join-Path $sandbox 'selected-files'
+    [void][System.IO.Directory]::CreateDirectory($selectedDir)
+    $selectedPath = Join-Path $selectedDir 'chosen.txt'
+    $notSelectedPath = Join-Path $selectedDir 'not-chosen.txt'
+    [System.IO.File]::WriteAllText($selectedPath, 'selected payload')
+    [System.IO.File]::WriteAllText($notSelectedPath, 'not selected payload')
+    $script:AsyncInventoryCalled = $false
+    $selectedDrop = Add-CloudTransferDroppedItems `
+        -DestinationAccount $gdrive `
+        -DroppedPaths @($selectedPath) `
+        -ConflictAction 'Skip' `
+        -DeferRemotePreflight
+    $selectedJobs = @(Get-FlatQueue)
+    if ($script:AsyncInventoryCalled -or [int]$selectedDrop.NewlyQueuedCount -ne 1 -or $selectedJobs.Count -ne 1) {
+        throw 'Case 18 failed: UI selection did not create exactly one durable job without a synchronous cloud listing.'
+    }
+    if ([string]$selectedJobs[0]['SourcePath'] -ne $selectedPath -or -not (Test-Path -LiteralPath $notSelectedPath -PathType Leaf) -or
+        [string]$selectedJobs[0]['DeduplicationStatus'] -ne 'PreflightPending') {
+        throw 'Case 18 failed: selection escaped its explicit path set or deferred preflight metadata was missing.'
+    }
+    Write-Host '  [PASS] Case 18: only explicitly selected files enter the durable queue; cloud matching is deferred'
+
+    # The user re-selects a matching file from an older VFS staging cache. Preserve
+    # its exact cache link until the queue confirms the destination, then remove only
+    # that staged cache revision while leaving the original source untouched.
+    $script:CloudTransferQueue.Clear()
+    $legacyCacheRoot = Join-Path $sandbox 'legacy-cloud-cache'
+    $legacyAccountRoot = Join-Path $legacyCacheRoot $gdrive.Id
+    $legacyVfsRoot = Join-Path $legacyAccountRoot 'vfs'
+    $legacyMetaRoot = Join-Path $legacyAccountRoot 'vfsMeta'
+    $legacyStagedPath = Join-Path (Join-Path $legacyVfsRoot 'gdrive{legacy-hash}') 'chosen.txt'
+    $legacyStagedMetaPath = Join-Path (Join-Path $legacyMetaRoot 'gdrive{legacy-hash}') 'chosen.txt'
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($legacyStagedPath))
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($legacyStagedMetaPath))
+    [System.IO.File]::WriteAllText($legacyStagedPath, 'selected payload')
+    [System.IO.File]::WriteAllText($legacyStagedMetaPath, '{"Dirty": true}')
+    $legacyStagedInfo = Get-Item -LiteralPath $legacyStagedPath
+    $legacyCandidate = [pscustomobject]@{
+        Path = $legacyStagedPath
+        RelativePath = 'chosen.txt'
+        AccountId = $gdrive.Id
+        ProviderId = 'gdrive'
+        Length = [int64]$legacyStagedInfo.Length
+        LastWriteTimeUtc = $legacyStagedInfo.LastWriteTimeUtc
+        IsOutsideActiveCache = $true
+        HasStagedPathConflict = $false
+        State = 'Needs review: staged file is outside the active rclone cache root'
+    }
+    $gdriveWithCache = @{
+        Id = $gdrive.Id
+        ProviderId = 'gdrive'
+        Label = $gdrive.Label
+        DriveLetter = 'G'
+        CacheDirectory = $legacyCacheRoot
+    }
+    $linkedDrop = Add-CloudTransferDroppedItems `
+        -DestinationAccount $gdriveWithCache `
+        -DroppedPaths @($selectedPath) `
+        -ConflictAction 'Skip' `
+        -DeferRemotePreflight
+    $linkedJob = @($script:CloudTransferQueue)[0]
+    $linkPlans = @(Get-CloudTransferStagedCacheLinkPlans -Jobs @($linkedJob) -Candidates @($legacyCandidate))
+    if ($linkPlans.Count -ne 1 -or [string]$linkPlans[0].CandidatePath -ne $legacyStagedPath) {
+        throw 'Case 19 failed: background matching did not verify the exact selected cache candidate.'
+    }
+    $linkWorkerArgs = [object[]]::new(3)
+    $linkWorkerArgs[0] = [string]$srcDir
+    $linkWorkerArgs[1] = [object[]]@($linkedJob)
+    $linkWorkerArgs[2] = [object[]]@($legacyCandidate)
+    $linkWorker = Start-NSBackgroundOperation -ArgumentList $linkWorkerArgs -ScriptBlock {
+        param([string]$sourceRoot, [object[]]$jobs, [object[]]$candidates)
+        $ErrorActionPreference = 'Stop'
+        . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+        . (Join-Path $sourceRoot 'services\CloudTransferManager.ps1')
+        return [pscustomobject]@{ Plans = @(Get-CloudTransferStagedCacheLinkPlans -Jobs $jobs -Candidates $candidates) }
+    }
+    if (-not $linkWorker.Handle.AsyncWaitHandle.WaitOne(30000)) {
+        Stop-NSBackgroundOperation $linkWorker
+        throw 'Case 19 failed: isolated staged-cache link worker timed out.'
+    }
+    $linkWorkerResult = Complete-NSBackgroundOperation -Operation $linkWorker
+    $linkWorkerOutput = @($linkWorkerResult.Output)
+    $isolatedLinkPlans = @()
+    if ($linkWorkerOutput.Count -gt 0) { $isolatedLinkPlans = @($linkWorkerOutput[-1].Plans) }
+    if ($linkWorkerResult.HadErrors -or $isolatedLinkPlans.Count -ne 1 -or
+        [string]$isolatedLinkPlans[0].CandidatePath -ne $legacyStagedPath) {
+        throw 'Case 19 failed: isolated worker did not load the mount path-safety dependency before planning the exact staged link.'
+    }
+    Write-Host '  [PASS] Case 19: isolated staging-link runspace loads path normalization and reparse safety'
+    if (-not (Set-CloudTransferStagedCacheCleanupLink `
+        -Job $linkedJob `
+        -Candidates @($legacyCandidate) `
+        -DestinationAccountId $gdriveWithCache.Id `
+        -DestinationProviderId $gdriveWithCache.ProviderId `
+        -DestinationRelativePath ([string]$linkedJob['DestinationFilePath']) `
+        -ExpectedSizeBytes ([int64]$linkedJob['FileSizeBytes']) `
+        -ExpectedSha256 ([string]$linkPlans[0].ExpectedSha256)) -or
+        -not [bool]$linkedJob['RecoveredFromVfsCache'] -or
+        [string]$linkedJob['StagedSourcePath'] -ne $legacyStagedPath -or
+        [string]$linkedJob['StagedSourceSha256'] -ne [string]$linkPlans[0].ExpectedSha256) {
+        throw 'Case 19 failed: the SHA-256 verified staged cleanup link was not attached to the explicit selection.'
+    }
+    $linkedJob['Status'] = 'Completed and remotely confirmed'
+    $originalVfsStats = (Get-Command Get-VirtualDriveVfsStats).ScriptBlock
+    $originalDriveStatus = (Get-Command Get-VirtualDriveStatus).ScriptBlock
+    try {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsActive = $false; State = 'Unmounted'; DiskCachePath = '' } }
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsMounted = $false; ProcessRunning = $false } }
+        $replacementJob = $linkedJob.Clone()
+        $expectedStagedWrite = (Get-Item -LiteralPath $legacyStagedPath).LastWriteTimeUtc
+        [System.IO.File]::WriteAllText($legacyStagedPath, ('X' * [int]$legacyStagedInfo.Length))
+        [System.IO.File]::SetLastWriteTimeUtc($legacyStagedPath, $expectedStagedWrite)
+        $replacementCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $replacementJob
+        if (-not $replacementCleanup.Success -or [string]$replacementJob['StagedCleanupStatus'] -ne 'Preserved: staged revision changed' -or
+            -not (Test-Path -LiteralPath $legacyStagedPath -PathType Leaf) -or -not (Test-Path -LiteralPath $legacyStagedMetaPath -PathType Leaf)) {
+            throw 'Case 19 failed: a same-size replacement with a restored timestamp was not preserved.'
+        }
+        [System.IO.File]::WriteAllText($legacyStagedPath, 'selected payload')
+        [System.IO.File]::SetLastWriteTimeUtc($legacyStagedPath, $expectedStagedWrite)
+        $linkedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $linkedJob
+    } finally {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value $originalVfsStats
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value $originalDriveStatus
+    }
+    if (-not $linkedCleanup.Success -or [string]$linkedCleanup.Status -ne 'Removed' -or
+        (Test-Path -LiteralPath $legacyStagedPath) -or (Test-Path -LiteralPath $legacyStagedMetaPath) -or
+        -not (Test-Path -LiteralPath $selectedPath -PathType Leaf)) {
+        throw 'Case 19 failed: confirmed cache staging was not removed exactly or the original local selection was touched.'
+    }
+    Write-Host '  [PASS] Case 19: remote confirmation removes the linked temporary cache source and preserves the original file'
+
+    $metadataRacePath = Join-Path (Split-Path -Parent $legacyStagedPath) 'metadata-race.txt'
+    $metadataRaceMetaPath = $metadataRacePath -replace '([\\/])vfs([\\/])', '$1vfsMeta$2'
+    [System.IO.File]::WriteAllText($metadataRacePath, 'confirmed staged payload')
+    [System.IO.File]::WriteAllText($metadataRaceMetaPath, '{"Dirty": false}')
+    $metadataRaceInfo = Get-Item -LiteralPath $metadataRacePath
+    $metadataRaceJob = @{
+        Status = 'Completed and remotely confirmed'
+        RecoveredFromVfsCache = $true
+        StagedSourcePath = $metadataRacePath
+        StagedSourceLastWriteUtc = $metadataRaceInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+        StagedSourceSha256 = (Get-FileHash -LiteralPath $metadataRacePath -Algorithm SHA256).Hash
+        StagedMetadataSha256 = (Get-FileHash -LiteralPath $metadataRaceMetaPath -Algorithm SHA256).Hash
+        StagedCleanupStatus = 'Pending'
+        FileSizeBytes = [int64]$metadataRaceInfo.Length
+        AccountId = $gdriveWithCache.Id
+        ProviderId = 'gdrive'
+        DestinationAccount = $gdriveWithCache
+    }
+    $originalVfsStats = (Get-Command Get-VirtualDriveVfsStats).ScriptBlock
+    $originalDriveStatus = (Get-Command Get-VirtualDriveStatus).ScriptBlock
+    [System.IO.File]::WriteAllText($metadataRaceMetaPath, '{"Dirty": true, "Revision": "new"}')
+    try {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsActive = $false; State = 'Unmounted'; DiskCachePath = '' } }
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsMounted = $false; ProcessRunning = $false } }
+        $metadataRaceResult = Invoke-ConfirmedStagedVfsSourceCleanup -Job $metadataRaceJob
+        if ($metadataRaceResult.Success -or
+            -not (Test-Path -LiteralPath $metadataRacePath) -or
+            -not (Test-Path -LiteralPath $metadataRaceMetaPath)) {
+            throw 'Case 20 failed: changed metadata was deleted or its paired staged data was removed.'
+        }
+        $metadataRetry = Invoke-ConfirmedStagedVfsSourceCleanup -Job $metadataRaceJob
+        if ($metadataRetry.Success -or -not (Test-Path -LiteralPath $metadataRacePath) -or
+            -not (Test-Path -LiteralPath $metadataRaceMetaPath)) {
+            throw 'Case 20 failed: a later cleanup retry deleted a metadata revision that no longer matched its checkpoint.'
+        }
+    } finally {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value $originalVfsStats
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value $originalDriveStatus
+    }
+    Write-Host '  [PASS] Case 20: a metadata revision changed after checkpointing is preserved across cleanup retries'
+
+    $metadataCheckpointPath = Join-Path (Split-Path -Parent $legacyStagedPath) 'metadata-checkpoint.txt'
+    $metadataCheckpointMetaPath = $metadataCheckpointPath -replace '([\\/])vfs([\\/])', '$1vfsMeta$2'
+    [System.IO.File]::WriteAllText($metadataCheckpointPath, 'durable metadata checkpoint payload')
+    [System.IO.File]::WriteAllText($metadataCheckpointMetaPath, '{"Dirty": false}')
+    $metadataCheckpointInfo = Get-Item -LiteralPath $metadataCheckpointPath
+    $metadataCheckpointJob = Add-CloudTransferQueueItem `
+        -SourceAccount $local `
+        -SourcePath $metadataCheckpointPath `
+        -DestinationAccount $gdriveWithCache `
+        -DestinationPath 'checkpoint' `
+        -ConflictAction 'Overwrite' `
+        -FileSizeBytes ([int64]$metadataCheckpointInfo.Length) `
+        -RelativePath 'metadata-checkpoint.txt' `
+        -SourceLastWriteUtc $metadataCheckpointInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o') `
+        -OperationType 'Upload' `
+        -Origin 'StagedVfsAdoption' `
+        -SkipPersist
+    if ($null -eq $metadataCheckpointJob) { throw 'Case 21 failed: test cleanup checkpoint could not be queued.' }
+    $metadataCheckpointJob['Status'] = 'Completed and remotely confirmed'
+    $metadataCheckpointJob['StagedCleanupStatus'] = 'Pending'
+    $metadataCheckpointJob['StagedSourcePath'] = $metadataCheckpointPath
+    $metadataCheckpointJob['StagedSourceLastWriteUtc'] = $metadataCheckpointInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+    $metadataCheckpointJob['StagedSourceSha256'] = (Get-FileHash -LiteralPath $metadataCheckpointPath -Algorithm SHA256).Hash
+    $metadataCheckpointJob['RecoveredFromVfsCache'] = $true
+    $expectedCheckpointMetadataSha256 = (Get-FileHash -LiteralPath $metadataCheckpointMetaPath -Algorithm SHA256).Hash
+    $originalCheckpointRemove = (Get-Command Remove-CacheFileByExclusiveHandle).ScriptBlock
+    $global:TestCheckpointQueueFile = $queueFile
+    $global:TestCheckpointQueueId = [string]$metadataCheckpointJob['QueueId']
+    $global:TestCheckpointMetadataSha256 = $expectedCheckpointMetadataSha256
+    $global:TestCheckpointPersistedBeforeUnlink = $false
+    try {
+        Set-Item -Path Function:\Remove-CacheFileByExclusiveHandle -Value {
+            param([string]$Path, [System.IO.FileStream]$Stream, [string]$ExpectedSha256 = '')
+            $storedState = [System.IO.File]::ReadAllText($global:TestCheckpointQueueFile) | ConvertFrom-Json
+            $storedJob = @($storedState.Jobs | Where-Object { [string]$_.QueueId -eq $global:TestCheckpointQueueId })
+            if ($storedJob.Count -eq 1 -and [string]$storedJob[0].StagedMetadataSha256 -eq $global:TestCheckpointMetadataSha256) {
+                $global:TestCheckpointPersistedBeforeUnlink = $true
+            }
+            throw 'Injected interruption after metadata checkpoint and before unlink.'
+        }
+        $interruptedCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $metadataCheckpointJob
+        $checkpointPersistedBeforeUnlink = [bool]$global:TestCheckpointPersistedBeforeUnlink
+    } finally {
+        Set-Item -Path Function:\Remove-CacheFileByExclusiveHandle -Value $originalCheckpointRemove
+        Remove-Variable -Name TestCheckpointQueueFile, TestCheckpointQueueId, TestCheckpointMetadataSha256, TestCheckpointPersistedBeforeUnlink -Scope Global -ErrorAction SilentlyContinue
+    }
+    if ($interruptedCleanup.Success -or -not $checkpointPersistedBeforeUnlink -or
+        -not (Test-Path -LiteralPath $metadataCheckpointPath) -or -not (Test-Path -LiteralPath $metadataCheckpointMetaPath)) {
+        throw 'Case 21 failed: metadata was not durably checkpointed before the injected pre-unlink interruption.'
+    }
+    $null = Load-DurableTransferQueue
+    $metadataCheckpointQueueId = [string]$metadataCheckpointJob['QueueId']
+    $reloadedCheckpointJobs = @($script:CloudTransferQueue | Where-Object { [string](Get-CloudTransferFieldValue $_ 'QueueId') -eq $metadataCheckpointQueueId } | Select-Object -First 1)
+    if ($reloadedCheckpointJobs.Count -ne 1) { throw 'Case 21 failed: the durable checkpoint job could not be reloaded.' }
+    $metadataCheckpointJob = $reloadedCheckpointJobs[0]
+    Remove-Item -LiteralPath $metadataCheckpointMetaPath -Force
+    $missingMetadataRetry = Invoke-ConfirmedStagedVfsSourceCleanup -Job $metadataCheckpointJob
+    if ($missingMetadataRetry.Success -or
+        [string]$metadataCheckpointJob['StagedCleanupStatus'] -ne 'Pending: staged metadata is missing' -or
+        -not (Test-Path -LiteralPath $metadataCheckpointPath -PathType Leaf)) {
+        throw 'Case 22 failed: a restarted cleanup retry deleted data after its checkpointed metadata sidecar disappeared.'
+    }
+    [System.IO.File]::WriteAllText($metadataCheckpointMetaPath, '{"Dirty": false}')
+    if ((Get-FileHash -LiteralPath $metadataCheckpointMetaPath -Algorithm SHA256).Hash -ne $expectedCheckpointMetadataSha256) {
+        throw 'Case 22 failed: the exact checkpointed metadata revision could not be restored for the subsequent cleanup check.'
+    }
+    Write-Host '  [PASS] Case 22: a restarted cleanup preserves staged data when checkpointed metadata is missing'
+    $metadataCheckpointCleanup = Invoke-ConfirmedStagedVfsSourceCleanup -Job $metadataCheckpointJob
+    $persistedCheckpointState = [System.IO.File]::ReadAllText($queueFile) | ConvertFrom-Json
+    $persistedCheckpointJob = @($persistedCheckpointState.Jobs | Where-Object { [string]$_.QueueId -eq [string]$metadataCheckpointJob['QueueId'] })
+    if (-not $metadataCheckpointCleanup.Success -or $persistedCheckpointJob.Count -ne 1 -or
+        [string]$persistedCheckpointJob[0].StagedMetadataSha256 -ne $expectedCheckpointMetadataSha256 -or
+        (Test-Path -LiteralPath $metadataCheckpointPath) -or (Test-Path -LiteralPath $metadataCheckpointMetaPath)) {
+        throw 'Case 21 failed: the paired metadata fingerprint was not durably checkpointed before exact cleanup.'
+    }
+    [void]$script:CloudTransferQueue.Remove($metadataCheckpointJob)
+    Save-DurableTransferQueue | Out-Null
+    Write-Host '  [PASS] Case 21: metadata fingerprint is durably saved before confirmed cache cleanup'
+
+    $legacyMetadataOnlyPath = Join-Path (Split-Path -Parent $metadataCheckpointPath) 'legacy-metadata-only.txt'
+    $legacyMetadataOnlyMetaPath = $legacyMetadataOnlyPath -replace '([\\/])vfs([\\/])', '$1vfsMeta$2'
+    [System.IO.File]::WriteAllText($legacyMetadataOnlyPath, 'legacy payload already uploaded')
+    [System.IO.File]::WriteAllText($legacyMetadataOnlyMetaPath, '{"Dirty": false, "Revision": "unlinked"}')
+    $legacyMetadataOnlyInfo = Get-Item -LiteralPath $legacyMetadataOnlyPath
+    $legacyMetadataOnlyHash = (Get-FileHash -LiteralPath $legacyMetadataOnlyMetaPath -Algorithm SHA256).Hash
+    $legacySourceHash = (Get-FileHash -LiteralPath $legacyMetadataOnlyPath -Algorithm SHA256).Hash
+    Remove-Item -LiteralPath $legacyMetadataOnlyPath -Force
+    $legacyMetadataOnlyJob = $metadataCheckpointJob.Clone()
+    $legacyMetadataOnlyJob['StagedSourcePath'] = $legacyMetadataOnlyPath
+    $legacyMetadataOnlyJob['StagedSourceLastWriteUtc'] = $legacyMetadataOnlyInfo.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+    $legacyMetadataOnlyJob['StagedSourceSha256'] = $legacySourceHash
+    $legacyMetadataOnlyJob['StagedMetadataSha256'] = ''
+    $legacyMetadataOnlyJob['StagedCleanupStatus'] = 'Pending'
+    $originalVfsStats = (Get-Command Get-VirtualDriveVfsStats).ScriptBlock
+    $originalDriveStatus = (Get-Command Get-VirtualDriveStatus).ScriptBlock
+    try {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsActive = $false; State = 'Unmounted'; DiskCachePath = '' } }
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value { param([string]$DriveLetter, [string]$AccountId, [string]$ProviderId) return @{ IsMounted = $false; ProcessRunning = $false } }
+        $legacyMetadataOnlyResult = Invoke-ConfirmedStagedVfsSourceCleanup -Job $legacyMetadataOnlyJob
+    } finally {
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value $originalVfsStats
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value $originalDriveStatus
+    }
+    if (-not $legacyMetadataOnlyResult.Success -or
+        [string]$legacyMetadataOnlyResult.Status -ne 'Preserved: unverified staged metadata' -or
+        [string]$legacyMetadataOnlyJob['StagedMetadataSha256'] -ne '' -or
+        (Test-Path -LiteralPath $legacyMetadataOnlyPath) -or
+        -not (Test-Path -LiteralPath $legacyMetadataOnlyMetaPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $legacyMetadataOnlyMetaPath -Algorithm SHA256).Hash -ne $legacyMetadataOnlyHash) {
+        throw 'Case 23 failed: a legacy confirmed job deleted or adopted a sidecar after its staged payload was already absent.'
+    }
+    Write-Host '  [PASS] Case 23: a missing legacy payload cannot authorize deletion or fingerprinting of an unlinked sidecar'
 
     $summary = Get-CloudTransferPendingSummary -QueueItems @(Get-FlatQueue)
     Write-Host "  [INFO] Pending summary: $($summary.PendingCount) pending, $($summary.UploadCount) uploads, $($summary.DownloadCount) downloads, $($summary.CloudCopyCount) cloud copies"
