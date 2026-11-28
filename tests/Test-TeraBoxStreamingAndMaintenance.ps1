@@ -6,12 +6,15 @@ Write-Output 'Testing TeraBox Streaming Optimization, Keep-Alive Heartbeat, and 
 . (Join-Path $PSScriptRoot '..\src\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\src\services\VirtualDriveManager.ps1')
 
+# This script validates generated options only; keep it independent of D:\CloudCache.
+$testCacheDirectory = Join-Path ([System.IO.Path]::GetTempPath()) 'NSCloudDriveMountArgumentTests'
+
 # ------------------------------------------------------------------------------
 # 1. Verify TeraBox & Cloud Streaming Mount Arguments
 # ------------------------------------------------------------------------------
 Write-Output '  -> Testing TeraBox and Google Drive streaming mount arguments...'
 
-$tbArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath ''
+$tbArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -CacheDirectory $testCacheDirectory -ConfigPath ''
 
 if ($tbArgs[0] -ne 'mount' -or $tbArgs[1] -ne 'terabox:' -or $tbArgs[2] -ne 'T:\') {
     throw "TeraBox mount positional arguments corrupted: $($tbArgs[0..2] -join ' ')"
@@ -57,7 +60,7 @@ if ($bufferSizeIdx -lt 0 -or $tbArgs[$bufferSizeIdx + 1] -ne '16M') {
 }
 
 # Verify Google Drive also has ThreadCount=64 and streaming read arguments
-$gdArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'G' -ConfigPath ''
+$gdArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'G' -CacheDirectory $testCacheDirectory -ConfigPath ''
 if ($gdArgs -notcontains '--fuse-flag' -or $gdArgs -notcontains '--ThreadCount=64') {
     throw 'Google Drive mount arguments missing WinFsp --ThreadCount=64 flag!'
 }
