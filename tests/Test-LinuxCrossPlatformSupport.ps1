@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Write-Host "=== Testing Linux Cross-Platform & Resumable Progression ===" -ForegroundColor Cyan
+$testTempRoot = [System.IO.Path]::GetTempPath()
 
 . (Join-Path $PSScriptRoot '..\src\models\ConnectionState.ps1')
 . (Join-Path $PSScriptRoot '..\src\services\SettingsManager.ps1')
@@ -96,8 +97,12 @@ Write-Host "3. Testing Linux Mount Arguments Generation..." -ForegroundColor Yel
 
 try {
     Set-TestLinuxPlatform -LinuxEnabled $true
-    $env:HOME = $env:TEMP
-    $testMountDir = Join-Path $env:TEMP 'TestLinuxMount_Gdrive'
+    $env:HOME = $testTempRoot
+    $originalAppData = $env:APPDATA
+    $originalXdgConfig = $env:XDG_CONFIG_HOME
+    $env:APPDATA = ''
+    $env:XDG_CONFIG_HOME = Join-Path $testTempRoot 'TestLinuxXdgConfig'
+    $testMountDir = Join-Path $testTempRoot 'TestLinuxMount_Gdrive'
     New-Item -ItemType Directory -Path $testMountDir -Force | Out-Null
 
     $linuxArgs = Build-RcloneMountArguments -RemoteName 'gdrive_remote' -MountPoint $testMountDir -CacheMaxGigabytes 10
@@ -117,10 +122,17 @@ try {
     if (-not $argString.Contains($testMountDir)) {
         throw "Linux mount arguments must target the directory path '$testMountDir'!"
     }
+    $configArgIndex = [Array]::IndexOf([string[]]$linuxArgs, '--config')
+    $expectedConfigPath = Join-Path (Join-Path $env:XDG_CONFIG_HOME 'rclone') 'rclone.conf'
+    if ($configArgIndex -lt 0 -or [string]$linuxArgs[$configArgIndex + 1] -ne $expectedConfigPath) {
+        throw "Linux rclone config must resolve through XDG_CONFIG_HOME when APPDATA is unavailable."
+    }
 
-    Write-Host "  [PASS] Linux mount arguments correctly omit Windows WinFsp flags and target directory." -ForegroundColor Green
+    Write-Host "  [PASS] Linux mount arguments omit WinFsp flags and use the XDG rclone config path." -ForegroundColor Green
 } finally {
     Set-TestLinuxPlatform -LinuxEnabled $false
+    $env:APPDATA = $originalAppData
+    $env:XDG_CONFIG_HOME = $originalXdgConfig
 }
 
 # ------------------------------------------------------------------------------
@@ -234,7 +246,7 @@ try {
 # Test 6: Linux Drive Letter Flexibility in SettingsManager
 # ------------------------------------------------------------------------------
 Write-Host "`n6. Testing Linux Drive Letter Flexibility in SettingsManager..." -ForegroundColor Yellow
-$testSettingsDir = Join-Path $env:TEMP ("ns_test_settings_" + [guid]::NewGuid().ToString('N'))
+$testSettingsDir = Join-Path $testTempRoot ("ns_test_settings_" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testSettingsDir -Force | Out-Null
 $origConfigDir = $env:NS_CLOUD_DRIVE_CONFIG_DIR
 try {
@@ -288,7 +300,7 @@ try {
 # Test 7: CLI Login Dispatcher & Accounts View
 # ------------------------------------------------------------------------------
 Write-Host "`n7. Testing CLI Login Dispatcher & Accounts View..." -ForegroundColor Yellow
-$cliSandbox = Join-Path $env:TEMP ("ns_cli_test_" + [guid]::NewGuid().ToString('N'))
+$cliSandbox = Join-Path $testTempRoot ("ns_cli_test_" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $cliSandbox -Force | Out-Null
 $origConfigRoot = $env:NS_CLOUD_DRIVE_CONFIG_DIR
 $origDataRoot = $env:NS_CLOUD_DRIVE_DATA_DIR
@@ -413,6 +425,8 @@ try {
     Write-Host "  [PASS] Non-interactive CLI prompt returns clean error without unhandled exception." -ForegroundColor Green
 
     # Test Windows CLI onboarding drive letter auto-assignment
+    $originalCredentialAclHelper = (Get-Command Set-CloudCredentialAcl).ScriptBlock
+    Set-Item -Path Function:\Set-CloudCredentialAcl -Value { param([string]$Path) }
     Set-TestLinuxPlatform -LinuxEnabled $false
     try {
         # 1) Auto-assignment on Windows when DriveLetter is omitted
@@ -434,7 +448,8 @@ try {
         }
         Write-Host "  [PASS] Windows CLI login respects explicit --drive-letter flag ('Y')." -ForegroundColor Green
     } finally {
-    Set-TestLinuxPlatform -LinuxEnabled $true
+        Set-TestLinuxPlatform -LinuxEnabled $true
+        Set-Item -Path Function:\Set-CloudCredentialAcl -Value $originalCredentialAclHelper
     }
 
     # Verify accounts view includes all newly onboarded accounts
