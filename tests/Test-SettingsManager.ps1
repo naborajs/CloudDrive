@@ -20,7 +20,12 @@ try {
     if ($settings.StartMinimized -ne $false) { throw 'Expected StartMinimized to default to false' }
     if ($settings.OpenExplorerOnMount -ne $true) { throw 'Expected OpenExplorerOnMount to default to true' }
     if ($settings.Theme -ne 'Light') { throw "Expected Theme to default to Light, got $($settings.Theme)" }
-    if ($settings.CacheDirectory -ne 'D:\CloudCache') { throw "Expected CacheDirectory to default to D:\CloudCache, got $($settings.CacheDirectory)" }
+    $expectedDefaultCache = if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+        $homeDir = if ($env:HOME) { $env:HOME } else { [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile) }
+        Join-Path $homeDir 'CloudCache'
+    } else { 'D:\CloudCache' }
+    if ($settings.CacheDirectory -ne $expectedDefaultCache) { throw "Expected CacheDirectory to default to $expectedDefaultCache, got $($settings.CacheDirectory)" }
+    if ($settings.PostTransferCachePolicy -ne 'RemoveAfterVerifiedUpload' -or $settings.PostTransferCachePolicyVersion -ne 1) { throw 'Expected verified-upload cache cleanup as the versioned default policy' }
     if ($settings.ProviderDriveLetters.gdrive -ne 'G') { throw "Expected gdrive to default to G, got $($settings.ProviderDriveLetters.gdrive)" }
     if ($settings.ProviderDriveLetters.terabox -ne 'T') { throw "Expected terabox to default to T, got $($settings.ProviderDriveLetters.terabox)" }
     Write-Output '  [PASS] Default settings verified'
@@ -53,6 +58,25 @@ try {
     Write-Output '  [PASS] Custom settings persistence verified'
 
     $settingsPath = Get-NSCloudDriveSettingsPath
+    $originalSettingsJson = [System.IO.File]::ReadAllText($settingsPath)
+    $legacyCacheSettings = '{"PostTransferCachePolicy":"KeepCache"}'
+    [System.IO.File]::WriteAllText($settingsPath, $legacyCacheSettings, [System.Text.UTF8Encoding]::new($false))
+    $legacyKeepSettings = Get-NSCloudDriveSettings
+    if ($legacyKeepSettings.PostTransferCachePolicy -ne 'KeepCache') {
+        throw 'An unversioned KeepCache preference was changed despite being indistinguishable from an older default'
+    }
+    $legacyKeepSettingsHash = @{}
+    foreach ($key in $legacyKeepSettings.Keys) { $legacyKeepSettingsHash[$key] = $legacyKeepSettings[$key] }
+    Set-NSCloudDriveSettings $legacyKeepSettingsHash
+    $versionedKeepSettings = $legacyKeepSettingsHash
+    $versionedKeepSettings.PostTransferCachePolicy = 'KeepCache'
+    $versionedKeepSettings.PostTransferCachePolicyVersion = 1
+    Set-NSCloudDriveSettings $versionedKeepSettings
+    if ((Get-NSCloudDriveSettings).PostTransferCachePolicy -ne 'KeepCache') {
+        throw 'An explicit versioned KeepCache preference was not preserved'
+    }
+    [System.IO.File]::WriteAllText($settingsPath, $originalSettingsJson, [System.Text.UTF8Encoding]::new($false))
+
     $validSettingsJson = [System.IO.File]::ReadAllText($settingsPath)
     $malformedSettingsJson = '{"Accounts": ['
     try {
@@ -93,30 +117,31 @@ try {
     if (-not $threwInvalid) { throw 'Expected invalid drive letter to throw' }
     Write-Output '  [PASS] Preferred drive letter get/set and validation verified'
 
-    # 4. Test Windows Startup registry configuration (enable and clean up)
-    $wasEnabled = Test-WindowsStartupEnabled
-    try {
-        Set-WindowsStartupEnabled -Enable $true -ScriptPath 'C:\Test\NSCloudDrive.ps1'
-        if (-not (Test-WindowsStartupEnabled)) {
-            throw 'Expected Test-WindowsStartupEnabled to return true after enabling'
-        }
-        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $val = (Get-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive').NSCloudDrive
-        if ($val -notmatch 'NSCloudDrive\.ps1' -or $val -notmatch '-Minimized') {
-            throw "Startup command string malformed: $val"
-        }
+    # 4. Test Windows Startup registry configuration only on Windows.
+    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Unix) {
+        $wasEnabled = Test-WindowsStartupEnabled
+        try {
+            Set-WindowsStartupEnabled -Enable $true -ScriptPath 'C:\Test\NSCloudDrive.ps1'
+            if (-not (Test-WindowsStartupEnabled)) {
+                throw 'Expected Test-WindowsStartupEnabled to return true after enabling'
+            }
+            $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+            $val = (Get-ItemProperty -LiteralPath $runKey -Name 'NSCloudDrive').NSCloudDrive
+            if ($val -notmatch 'NSCloudDrive\.ps1' -or $val -notmatch '-Minimized') {
+                throw "Startup command string malformed: $val"
+            }
 
-        Set-WindowsStartupEnabled -Enable $false
-        if (Test-WindowsStartupEnabled) {
-            throw 'Expected Test-WindowsStartupEnabled to return false after disabling'
-        }
-        Write-Output '  [PASS] Windows Startup registration and cleanup verified'
-    } finally {
-        # Restore original state if previously enabled
-        if ($wasEnabled) {
-            Set-WindowsStartupEnabled -Enable $true
-        } else {
             Set-WindowsStartupEnabled -Enable $false
+            if (Test-WindowsStartupEnabled) {
+                throw 'Expected Test-WindowsStartupEnabled to return false after disabling'
+            }
+            Write-Output '  [PASS] Windows Startup registration and cleanup verified'
+        } finally {
+            if ($wasEnabled) {
+                Set-WindowsStartupEnabled -Enable $true
+            } else {
+                Set-WindowsStartupEnabled -Enable $false
+            }
         }
     }
 
