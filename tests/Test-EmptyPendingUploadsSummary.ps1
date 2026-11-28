@@ -79,6 +79,22 @@ try {
     }
     Write-Host "  [PASS] Real staged items correctly counted." -ForegroundColor Green
 
+    $orphanStaged = @([pscustomobject]@{
+        Path = 'C:\fake\staged\older-session.txt'
+        RelativePath = 'older-session.txt'
+        AccountId = 'gdrive_123'
+        ProviderId = 'gdrive'
+        Length = 64L
+        LastWriteTimeUtc = [DateTime]::UtcNow
+        IsOutsideActiveCache = $true
+    })
+    $summaryOrphan = Get-CloudTransferPendingSummary -QueueItems @() -StagedFiles $orphanStaged -RequireSelectionForOrphanedStaging
+    if ($summaryOrphan.PendingCount -ne 0 -or $summaryOrphan.StagedOnlyCount -ne 0 -or
+        $summaryOrphan.NeedsReviewCount -ne 1 -or $summaryOrphan.UntrackedStagedCount -ne 1) {
+        throw "Orphan staged bytes should require user re-selection, not count as active uploads: $($summaryOrphan | ConvertTo-Json -Compress)"
+    }
+    Write-Host "  [PASS] Orphaned cache entries require re-selection and do not inflate active upload progress." -ForegroundColor Green
+
     Write-Host "`nAll Empty Pending Uploads Summary tests passed successfully!" -ForegroundColor Green
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
