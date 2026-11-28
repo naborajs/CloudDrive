@@ -38,13 +38,14 @@ if (Test-DriveLetterAvailable 'C:\' -ne $false -or Test-DriveLetterAvailable 'C:
 Write-Output "  [PASS] Drive letter checks verified (T: available=$tAvail, C: occupied)"
 
 # 4. Test Mount arguments builder (Read-Write default and Read-Only switch)
-$mountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory 'D:\CloudCache\Test' -ConfigPath ''
+$mountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory $env:TEMP -ConfigPath ''
 if ($mountArgs[0] -ne 'mount' -or
     $mountArgs[1] -ne 'gdrive:' -or
     $mountArgs[2] -ne 'T:\' -or
     $mountArgs -contains '--read-only' -or
     $mountArgs -notcontains '--vfs-cache-mode' -or
-    $mountArgs -notcontains 'full' -or
+    $mountArgs -notcontains 'writes' -or
+    $mountArgs -notcontains '5m' -or
     $mountArgs -notcontains '--network-mode' -or
     $mountArgs -notcontains '--ask-password=false' -or
     $mountArgs -notcontains '--dir-cache-time' -or
@@ -53,7 +54,7 @@ if ($mountArgs[0] -ne 'mount' -or
     throw "Mount arguments failed verification (should be read-write by default): $($mountArgs -join ' ')"
 }
 
-$roMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory 'D:\CloudCache\Test' -ConfigPath '' -ReadOnly
+$roMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'T' -CacheDirectory $env:TEMP -ConfigPath '' -ReadOnly
 if ($roMountArgs -notcontains '--read-only') {
     throw "Read-only mount arguments should contain --read-only flag: $($roMountArgs -join ' ')"
 }
@@ -102,25 +103,46 @@ if (-not (Test-DriveLetterAvailable $fallbackFromC)) {
 Write-Output '  [PASS] Next available drive letter allocation and conflict resolution verified'
 
 # 8. Test Volume labels in Build-RcloneMountArguments
-$gdMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'G' -ConfigPath ''
+$gdMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'G' -CacheDirectory $env:TEMP -ConfigPath ''
 if ($gdMountArgs -notcontains '--volname' -or $gdMountArgs[$gdMountArgs.IndexOf('--volname') + 1] -ne 'Google Drive') {
     throw "Google Drive volume name missing or incorrect: $($gdMountArgs -join ' ')"
 }
-$tbMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath ''
+$tbMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -CacheDirectory $env:TEMP -ConfigPath ''
 if ($tbMountArgs -notcontains '--volname' -or $tbMountArgs[$tbMountArgs.IndexOf('--volname') + 1] -ne 'TeraBox') {
     throw "TeraBox volume name missing or incorrect: $($tbMountArgs -join ' ')"
 }
 Write-Output '  [PASS] Distinct provider volume labels verified'
 
 # 9. Test Cache usage statistics calculation
-$cacheStats = Get-CacheUsageStatistics -CacheDirectory 'D:\CloudCache'
+$statsCacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('cache_quota_test_' + [Guid]::NewGuid().ToString('N'))
+[void][System.IO.Directory]::CreateDirectory($statsCacheRoot)
+$oldSettingsLoader = (Get-Command Get-NSCloudDriveSettings).ScriptBlock
+$global:TestCacheQuotaBase = $statsCacheRoot
+try {
+    Set-Item -Path Function:\Get-NSCloudDriveSettings -Value {
+        return @{
+            CacheDirectory = [string]$global:TestCacheQuotaBase
+            CacheMaxGigabytes = 10
+            Accounts = @(
+                @{ CacheDirectory = [string]$global:TestCacheQuotaBase; CacheMaxGigabytes = 10 },
+                @{ CacheDirectory = [string]$global:TestCacheQuotaBase; CacheMaxGigabytes = 20 },
+                @{ CacheDirectory = 'X:\SeparateCache'; CacheMaxGigabytes = 50 }
+            )
+        }
+    }
+    $cacheStats = Get-CacheUsageStatistics -CacheDirectory $statsCacheRoot
+} finally {
+    Set-Item -Path Function:\Get-NSCloudDriveSettings -Value $oldSettingsLoader
+    Remove-Variable -Name TestCacheQuotaBase -Scope Global -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $statsCacheRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 if ($null -eq $cacheStats.UsedBytes -or $null -eq $cacheStats.TargetMaxBytes) {
     throw 'Cache stats missing required numeric properties'
 }
-if ($cacheStats.TargetMaxFormatted -ne '20.00 GiB') {
+if ($cacheStats.TargetMaxFormatted -ne '30.00 GiB') {
     throw "TargetMaxFormatted mismatch: $($cacheStats.TargetMaxFormatted)"
 }
-Write-Output '  [PASS] Cache usage statistics calculation verified'
+Write-Output '  [PASS] Cache usage statistics sum only per-drive quotas on this cache base'
 
 # 10. Test Multi-provider Get-VirtualDriveStatus
 $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
