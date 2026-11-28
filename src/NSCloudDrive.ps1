@@ -172,6 +172,8 @@ function Invoke-MemoryTrim {
 . (Join-Path $PSScriptRoot 'services\CacheManager.ps1')
 . (Join-Path $PSScriptRoot 'services\AdaptiveBandwidthManager.ps1')
 . (Join-Path $PSScriptRoot 'services\BackgroundOperationManager.ps1')
+. (Join-Path $PSScriptRoot 'services\CacheUiOperationManager.ps1')
+. (Join-Path $PSScriptRoot 'services\StagedCacheCleanupWorker.ps1')
 . (Join-Path $PSScriptRoot 'services\ExplorerIntegration.ps1')
 . (Join-Path $PSScriptRoot 'services\AgentTransferBridge.ps1')
 . (Join-Path $PSScriptRoot 'services\AgentWebhookServer.ps1')
@@ -475,6 +477,14 @@ $script:ProviderStatusWorker = $null
 $script:ProviderStatusSnapshot = $null
 $script:LastProviderStatusCheck = [DateTime]::MinValue
 $script:StartupCacheRecoveryWorker = $null
+$script:InactivityCacheEvictionWorker = $null
+$script:SelectedStagedCacheLinkWorker = $null
+$script:LastSelectedStagedCacheLinkAttemptUtc = [DateTime]::MinValue
+$script:OptionsCacheCleanupWorker = $null
+$script:OptionsCacheCleanupButton = $null
+$script:CacheStatisticsWorker = $null
+$script:CacheStatisticsSnapshot = $null
+$script:CacheStatisticsLastCompletedUtc = [DateTime]::MinValue
 $script:StartupAutoMountWorker = $null
 $script:StartupAutoMountTimer = $null
 $script:StartupAutoMountError = $null
@@ -2066,7 +2076,7 @@ $cacheQuotaRow.Orientation = 'Horizontal'
 $cacheQuotaRow.Margin = [System.Windows.Thickness]::new(0, 4, 0, 8)
 $cacheStack.Children.Add($cacheQuotaRow) | Out-Null
 
-$cacheQuotaLabel = New-Label 'Maximum Cache Quota: ' 12 $script:Palette.TextPrimary
+$cacheQuotaLabel = New-Label 'Default Per-Drive Cache Limit: ' 12 $script:Palette.TextPrimary
 $cacheQuotaLabel.VerticalAlignment = 'Center'
 $cacheQuotaRow.Children.Add($cacheQuotaLabel) | Out-Null
 
@@ -2098,11 +2108,11 @@ $cacheStack.Children.Add($cachePolicyTitle) | Out-Null
 
 $rbCacheKeep = [System.Windows.Controls.RadioButton]::new()
 $rbCacheKeep.GroupName = 'PostTransferCache'
-$rbCacheKeep.Content = 'Keep in cache (Standard auto-expiration TTL: 5m <1GB, 20m 1-3GB, 45m >3GB)'
+$rbCacheKeep.Content = 'Keep verified write cache for up to 45 minutes'
 $rbCacheKeep.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $rbCacheKeep.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
 $rbCacheKeep.Cursor = [System.Windows.Input.Cursors]::Hand
-$rbCacheKeep.IsChecked = (-not $script:Settings.PostTransferCachePolicy -or $script:Settings.PostTransferCachePolicy -eq 'KeepCache')
+$rbCacheKeep.IsChecked = ($script:Settings.PostTransferCachePolicy -eq 'KeepCache')
 $rbCacheKeep.Add_Checked({
     $script:Settings.PostTransferCachePolicy = 'KeepCache'
     Set-NSCloudDriveSettings $script:Settings
@@ -2111,7 +2121,7 @@ $cacheStack.Children.Add($rbCacheKeep) | Out-Null
 
 $rbCacheImmediate = [System.Windows.Controls.RadioButton]::new()
 $rbCacheImmediate.GroupName = 'PostTransferCache'
-$rbCacheImmediate.Content = 'Remove from cache immediately after verified cloud upload'
+$rbCacheImmediate.Content = 'Remove staged files after the cloud confirms the upload (active mounts may take up to 5 minutes)'
 $rbCacheImmediate.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextPrimary)
 $rbCacheImmediate.Margin = [System.Windows.Thickness]::new(0, 2, 0, 4)
 $rbCacheImmediate.Cursor = [System.Windows.Input.Cursors]::Hand
@@ -2192,19 +2202,20 @@ $cleanCacheBtn.Add_Click({
     if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) {
         return
     }
+    if ($script:OptionsCacheCleanupWorker) {
+        $cacheUsageLabel.Text = 'Cache cleanup is already running in the background.'
+        return
+    }
     try {
-        $res = Invoke-SafeCacheCleanup -CacheDirectory $script:CacheDirectory -Force
-        $mbCleaned = [Math]::Round($res.CleanedBytes / 1MB, 1)
-        if ($res.SkippedInUseCount -gt 0) {
-            $cacheUsageLabel.Text = "Cleaned $mbCleaned MB ($($res.CleanedFiles) files). $($res.SkippedInUseCount) files protected in-use by active mounts."
-            $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#60A5FA')
-        } else {
-            $cacheUsageLabel.Text = "Cache cleared successfully ($mbCleaned MB reclaimed, $($res.CleanedFiles) files)."
-            $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4ADE80')
-        }
-        Update-CacheUsageDisplay
+        $script:OptionsCacheCleanupWorker = Start-CacheUiOperation `
+            -SourceRoot $PSScriptRoot -CacheDirectory ([string]$script:CacheDirectory) -Action Clean
+        $script:OptionsCacheCleanupButton = $cleanCacheBtn
+        $cleanCacheBtn.IsEnabled = $false
+        $cacheUsageLabel.Text = 'Cleaning eligible cache files in the background...'
     } catch {
-        $cacheUsageLabel.Text = "Could not clear all cache files: $($_.Exception.Message)"
+        $script:OptionsCacheCleanupWorker = $null
+        $script:OptionsCacheCleanupButton = $null
+        $cacheUsageLabel.Text = 'Background cache cleanup could not start; no files were changed.'
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F87171')
     }
 })
@@ -3298,6 +3309,10 @@ $analyticsTransferCard.Stack.Children.Add($atNoteBorder) | Out-Null
 $script:AnalyticsCpuBaseline = @{}
 $script:AnalyticsStorageWorker = $null
 $script:AnalyticsStorageLastStarted = [DateTime]::MinValue
+$script:AnalyticsPendingUploadWorker = $null
+$script:AnalyticsPendingUploadSnapshot = $null
+$script:AnalyticsPendingUploadLastStarted = [DateTime]::MinValue
+$script:AnalyticsPendingUploadLastCompleted = [DateTime]::MinValue
 $script:AnalyticsCollectionInProgress = $false
 $script:AnalyticsSnapshotCollected = $false
 $script:AnalyticsLastCollectionTime = $null
@@ -3449,6 +3464,113 @@ function Stop-AnalyticsStorageWorker {
         Stop-NSBackgroundOperation $script:AnalyticsStorageWorker
         $script:AnalyticsStorageWorker = $null
     }
+}
+
+function Update-AnalyticsPendingUploadsDisplay {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Snapshot = $script:AnalyticsPendingUploadSnapshot)
+
+    if (-not $Snapshot) {
+        $analyticsCachePendingRow.Text = if ($script:AnalyticsPendingUploadWorker) {
+            'Pending Staged Uploads: scanning local staged state in the background...'
+        } else {
+            'Pending Staged Uploads: unavailable; refresh Analytics to retry the local scan.'
+        }
+        $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+        return
+    }
+    if (-not [bool](Get-SafeProperty $Snapshot 'Success' $false)) {
+        $analyticsCachePendingRow.Text = 'Pending Staged Uploads: unavailable; refresh Analytics to retry the local scan.'
+        $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+        return
+    }
+
+    $count = [int](Get-SafeProperty $Snapshot 'Count' 0)
+    $bytes = [int64](Get-SafeProperty $Snapshot 'Bytes' 0L)
+    if ($count -gt 0) {
+        $analyticsCachePendingRow.Text = "Pending Staged Uploads: $count file(s) ($(Format-AnalyticsBytes $bytes)) staged for cloud upload"
+        $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
+    } else {
+        $analyticsCachePendingRow.Text = "Pending Staged Uploads: 0 pending files (0 B) " + [char]0x2022 + ' Local SSD staging clean'
+        $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+    }
+}
+
+function Start-AnalyticsPendingUploadWorker {
+    if ($script:AnalyticsPendingUploadWorker -or
+        -not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
+    $cacheDir = if ($script:Settings.CacheDirectory) { [string]$script:Settings.CacheDirectory } else { 'D:\CloudCache' }
+    try {
+        $script:AnalyticsPendingUploadWorker = Start-NSBackgroundOperation `
+            -ArgumentList @($PSScriptRoot, $cacheDir) `
+            -ScriptBlock {
+                param([string]$sourceRoot, [string]$cacheDirectory)
+                $ErrorActionPreference = 'Stop'
+                try {
+                    . (Join-Path $sourceRoot 'models\ConnectionState.ps1')
+                    . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
+                    . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+                    . (Join-Path $sourceRoot 'services\CloudTransferManager.ps1')
+                    $items = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDirectory)
+                    $bytes = 0L
+                    foreach ($item in $items) {
+                        if ($item.Length) { $bytes += [int64]$item.Length }
+                    }
+                    return [pscustomobject]@{ Success = $true; Count = [int]$items.Count; Bytes = $bytes }
+                } catch {
+                    return [pscustomobject]@{ Success = $false; Count = 0; Bytes = 0L }
+                }
+            }
+        $script:AnalyticsPendingUploadLastStarted = [DateTime]::UtcNow
+        return $true
+    } catch {
+        $script:AnalyticsPendingUploadWorker = $null
+        $script:AnalyticsPendingUploadSnapshot = [pscustomobject]@{ Success = $false; Count = 0; Bytes = 0L }
+        $script:AnalyticsPendingUploadLastCompleted = [DateTime]::UtcNow
+        return $false
+    }
+}
+
+function Complete-AnalyticsPendingUploadWorker {
+    if (-not $script:AnalyticsPendingUploadWorker -or
+        -not (Test-NSBackgroundOperationCompleted $script:AnalyticsPendingUploadWorker)) { return $false }
+    $worker = $script:AnalyticsPendingUploadWorker
+    $script:AnalyticsPendingUploadWorker = $null
+    try {
+        $completed = Complete-NSBackgroundOperation $worker
+        if ($completed.HadErrors -or $completed.Output.Count -eq 0) {
+            $script:AnalyticsPendingUploadSnapshot = [pscustomobject]@{ Success = $false; Count = 0; Bytes = 0L }
+        } else {
+            $script:AnalyticsPendingUploadSnapshot = $completed.Output[-1]
+        }
+        $script:AnalyticsPendingUploadLastCompleted = [DateTime]::UtcNow
+        if ($script:CurrentView -eq 'Analytics') { Update-AnalyticsPendingUploadsDisplay }
+        return [bool](Get-SafeProperty $script:AnalyticsPendingUploadSnapshot 'Success' $false)
+    } catch {
+        $script:AnalyticsPendingUploadSnapshot = [pscustomobject]@{ Success = $false; Count = 0; Bytes = 0L }
+        $script:AnalyticsPendingUploadLastCompleted = [DateTime]::UtcNow
+        if ($script:CurrentView -eq 'Analytics') { Update-AnalyticsPendingUploadsDisplay }
+        return $false
+    }
+}
+
+function Stop-AnalyticsPendingUploadWorker {
+    if (-not $script:AnalyticsPendingUploadWorker) { return }
+    if (Test-NSBackgroundOperationCompleted $script:AnalyticsPendingUploadWorker) {
+        [void](Complete-AnalyticsPendingUploadWorker)
+    } else {
+        try { Stop-NSBackgroundOperation $script:AnalyticsPendingUploadWorker } catch { }
+        $script:AnalyticsPendingUploadWorker = $null
+    }
+}
+
+function Get-AnalyticsPendingUploadSnapshot {
+    $ageSeconds = ([DateTime]::UtcNow - $script:AnalyticsPendingUploadLastCompleted).TotalSeconds
+    if ((-not $script:AnalyticsPendingUploadSnapshot -or $ageSeconds -ge 60) -and
+        -not $script:AnalyticsPendingUploadWorker) {
+        [void](Start-AnalyticsPendingUploadWorker)
+    }
+    return $script:AnalyticsPendingUploadSnapshot
 }
 
 function Update-AnalyticsMetrics {
@@ -3657,18 +3779,8 @@ function Update-AnalyticsMetrics {
         $statCache.BadgeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($cacheBadgeColor)
 
         # Check pending staged uploads
-        $pendingItems = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDir)
-        $pendingBytes = [int64]0
-        if ($pendingItems.Count -gt 0) {
-            foreach ($pi in $pendingItems) {
-                if ($pi.Length) { $pendingBytes += [int64]$pi.Length }
-            }
-            $analyticsCachePendingRow.Text = "Pending Staged Uploads: $($pendingItems.Count) file(s) ($(Format-AnalyticsBytes $pendingBytes)) staged for cloud upload"
-            $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D97706')
-        } else {
-            $analyticsCachePendingRow.Text = "Pending Staged Uploads: 0 pending files (0 B) " + [char]0x2022 + " Local SSD staging clean"
-            $analyticsCachePendingRow.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
-        }
+        $pendingSnapshot = Get-AnalyticsPendingUploadSnapshot
+        Update-AnalyticsPendingUploadsDisplay -Snapshot $pendingSnapshot
     } catch {
         $analyticsCacheUsageRow.Text = 'Cache Footprint: Unavailable.'
     }
@@ -3780,6 +3892,7 @@ function Show-AnalyticsView {
 
 function Stop-AnalyticsCollection {
     Stop-AnalyticsStorageWorker
+    Stop-AnalyticsPendingUploadWorker
     $script:AnalyticsCollectionInProgress = $false
     if ($script:AnalyticsCollectionWatchdogTimer) {
         try { $script:AnalyticsCollectionWatchdogTimer.Stop() } catch { }
@@ -3831,6 +3944,19 @@ function Start-AnalyticsCollection {
             }
 
             $done = $false
+            $pendingUploadScanDone = $true
+            if ($script:AnalyticsPendingUploadWorker) {
+                if (Test-NSBackgroundOperationCompleted $script:AnalyticsPendingUploadWorker) {
+                    [void](Complete-AnalyticsPendingUploadWorker)
+                } elseif (([DateTime]::UtcNow - $script:AnalyticsPendingUploadLastStarted).TotalSeconds -gt 30) {
+                    Stop-AnalyticsPendingUploadWorker
+                    $script:AnalyticsPendingUploadSnapshot = [pscustomobject]@{ Success = $false; Count = 0; Bytes = 0L }
+                    $script:AnalyticsPendingUploadLastCompleted = [DateTime]::UtcNow
+                    Update-AnalyticsPendingUploadsDisplay
+                } else {
+                    $pendingUploadScanDone = $false
+                }
+            }
             if ($script:AnalyticsStorageWorker) {
                 if (Test-NSBackgroundOperationCompleted $script:AnalyticsStorageWorker) {
                     try {
@@ -3887,7 +4013,7 @@ function Start-AnalyticsCollection {
                 $done = $true
             }
 
-            if ($done) {
+            if ($done -and $pendingUploadScanDone) {
                 $collectStopwatch.Stop()
                 $script:AnalyticsSnapshotCollected = $true
                 $script:AnalyticsLastCollectionTime = [DateTime]::UtcNow
@@ -4425,18 +4551,23 @@ function Show-SystemDiagnosticsModal([System.Windows.Window]$Owner = $null) {
         })
 
         try {
-            $cacheStats = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
-            $cacheMb = [Math]::Round($cacheStats.TotalSizeBytes / 1MB, 1)
-            $lockedMb = [Math]::Round($cacheStats.InUseBytes / 1MB, 1)
-            $freeGb = [Math]::Round($cacheStats.DriveFreeBytes / 1GB, 1)
-            $osNotice = if ($cacheStats.IsSystemDrive) { '[WARN] Cache on Windows OS Drive' } else { '[OK] Cache on Dedicated Volume' }
-
-            Add-DiagMetric 'Cache & Storage Health' ([ordered]@{
-                'Cache Volume' = "$($cacheStats.DriveLetter): ($freeGb GB Free Space)"
-                'Cache Volume Placement' = $osNotice
-                'Total Cached Data' = "$cacheMb MB ($($cacheStats.TotalFileCount) files)"
-                'In-Use Locked Files' = "$lockedMb MB ($($cacheStats.InUseCount) files protected)"
-            })
+            $cacheStats = Get-CacheStatisticsSnapshot
+            if ($cacheStats) {
+                $cacheMb = [Math]::Round($cacheStats.TotalSizeBytes / 1MB, 1)
+                $lockedMb = [Math]::Round($cacheStats.InUseBytes / 1MB, 1)
+                $freeGb = [Math]::Round($cacheStats.DriveFreeBytes / 1GB, 1)
+                $osNotice = if ($cacheStats.IsSystemDrive) { '[WARN] Cache on Windows OS Drive' } else { '[OK] Cache on Dedicated Volume' }
+                Add-DiagMetric 'Cache & Storage Health' ([ordered]@{
+                    'Cache Volume' = "$($cacheStats.DriveLetter): ($freeGb GB Free Space)"
+                    'Cache Volume Placement' = $osNotice
+                    'Total Cached Data' = "$cacheMb MB ($($cacheStats.TotalFileCount) files)"
+                    'In-Use Locked Files' = "$lockedMb MB ($($cacheStats.InUseCount) files protected)"
+                })
+            } else {
+                Add-DiagMetric 'Cache & Storage Health' ([ordered]@{
+                    'Cache Usage' = '[INFO] A background scan is running; reopen diagnostics to refresh this section.'
+                })
+            }
         } catch { }
 
         $gdStatus = Get-VirtualDriveStatus -ProviderId 'gdrive'
@@ -4712,6 +4843,7 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
 
     # Internal state
     $script:CacheInspectorFileList = @()
+    $maxVisibleCacheRows = 250
 
     $renderRows = {
         param([string]$FilterText = '')
@@ -4744,7 +4876,14 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
             return
         }
 
-        foreach ($item in $filtered) {
+        $visibleFiles = @($filtered | Select-Object -First $maxVisibleCacheRows)
+        if ($filtered.Count -gt $visibleFiles.Count) {
+            $limitLabel = New-Label "Showing the first $($visibleFiles.Count) of $($filtered.Count) matches. Filter by file name, account, or path to narrow the list." 10 $p.TextSecondary $false
+            $limitLabel.Margin = [System.Windows.Thickness]::new(4, 2, 4, 10)
+            $fileStack.Children.Add($limitLabel) | Out-Null
+        }
+
+        foreach ($item in $visibleFiles) {
             $rowBorder = [System.Windows.Controls.Border]::new()
             $rowBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.WindowBg)
             $rowBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString($p.ButtonBorder)
@@ -4852,31 +4991,47 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
             $evictFile = $item.FullPath
             $evictName = $item.FileName
             $evictSize = $item.SizeFormatted
-            $evictAcc = $item.Account
             $isEvictable = $item.IsEvictable
+            $isVfsEntry = [bool](Get-SafeProperty $item 'IsVfsEntry' $false)
+            $evictStatus = [string](Get-SafeProperty $item 'Status' 'Cache state unknown')
 
             if (-not $isEvictable) {
                 $evictBtn.IsEnabled = $false
                 $evictBtn.Opacity = 0.5
-                $evictBtn.ToolTip = 'This file is currently in use or being uploaded to cloud storage.'
+                $evictBtn.ToolTip = "This file is protected: $evictStatus. Only idle local cache or clean, remotely confirmed VFS entries can be evicted."
             } else {
                 $evictBtn.Add_Click({
+                    $cloudStatusMessage = if ($isVfsEntry) {
+                        'The provider metadata confirms the cloud copy is clean. Only this idle local cache file and its matching metadata will be removed.'
+                    } else {
+                        'Only this local cache file will be removed. Its original source remains where it was stored.'
+                    }
                     $confirm = [System.Windows.MessageBox]::Show(
                         "Evict `"$evictName`" ($evictSize) from local cache?`n`n" +
                         "$([char]0x2022) The file will be removed from your local SSD to free up space.`n" +
-                        "$([char]0x2022) The file remains 100% safe and intact on your cloud drive ($evictAcc).`n" +
-                        "$([char]0x2022) Next time you open it, it will stream on demand.",
+                        "$([char]0x2022) $cloudStatusMessage`n" +
+                        "$([char]0x2022) Next time you open a cloud-backed file, it may need to download again.",
                         'Confirm Cache Eviction',
                         [System.Windows.MessageBoxButton]::YesNo,
                         [System.Windows.MessageBoxImage]::Question
                     )
                     if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
-                        $res = Remove-SingleCacheFile -FilePath $evictFile -CacheDirectory $script:CacheDirectory
-                        if ($res.Success) {
-                            & $loadData
-                            Update-CacheUsageDisplay
-                        } else {
-                            [System.Windows.MessageBox]::Show("Could not evict file: $($res.Error)", 'Eviction Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                        if ($cacheInspectorScanState.EvictionWorker -or $cacheInspectorScanState.ClearWorker) {
+                            $statusLabel.Text = 'Another cache operation is already running.'
+                            return
+                        }
+                        $evictBtn.IsEnabled = $false
+                        $cacheInspectorScanState.EvictionButton = $evictBtn
+                        $statusLabel.Text = 'Removing the selected cache file in the background...'
+                        try {
+                            $cacheInspectorScanState.EvictionWorker = Start-CacheUiOperation `
+                                -SourceRoot $PSScriptRoot -CacheDirectory ([string]$script:CacheDirectory) `
+                                -Action Evict -FilePath ([string]$evictFile)
+                        } catch {
+                            $cacheInspectorScanState.EvictionWorker = $null
+                            $cacheInspectorScanState.EvictionButton = $null
+                            $evictBtn.IsEnabled = $true
+                            $statusLabel.Text = 'The background cache removal could not be started.'
                         }
                     }
                 })
@@ -4891,11 +5046,19 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
         }
     }
 
-    $loadData = {
+    $cacheInspectorScanState = @{
+        Worker = $null
+        Timer = $null
+        Closed = $false
+        EvictionWorker = $null
+        EvictionButton = $null
+        ClearWorker = $null
+        ClearButton = $null
+        RefreshPending = $false
+    }
+    $applyCacheInspectorData = {
+        param([object[]]$files)
         try {
-            $files = @(Get-DetailedCacheFileList -CacheDirectory $script:CacheDirectory)
-            $script:CacheInspectorFileList = $files
-
             $totalBytes = 0L
             $inUseBytes = 0L
             $inUseCount = 0
@@ -4938,9 +5101,136 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
 
             & $renderRows $filterBox.Text
         } catch {
-            $statusLabel.Text = "Error scanning cache: $($_.Exception.Message)"
+            $statusLabel.Text = 'The cache scan completed, but its results could not be displayed.'
         }
-    }
+    }.GetNewClosure()
+
+    $loadData = {
+        if ($cacheInspectorScanState.Worker -or $cacheInspectorScanState.Closed) { return }
+        if (-not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) {
+            $statusLabel.Text = 'Background cache scanning is unavailable; no scan was started.'
+            return
+        }
+        $refreshBtn.IsEnabled = $false
+        $statusLabel.Text = 'Scanning cache in the background...'
+        try {
+            $cacheInspectorScanState.Worker = Start-NSBackgroundOperation `
+                -ArgumentList @($PSScriptRoot, [string]$script:CacheDirectory) `
+                -ScriptBlock {
+                    param([string]$sourceRoot, [string]$cacheDirectory)
+                    $ErrorActionPreference = 'Stop'
+                    try {
+                        . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+                        . (Join-Path $sourceRoot 'services\CacheManager.ps1')
+                        $files = @(Get-DetailedCacheFileList -CacheDirectory $cacheDirectory)
+                        return [pscustomobject]@{ Success = $true; Files = @($files); Error = '' }
+                    } catch {
+                        return [pscustomobject]@{ Success = $false; Files = @(); Error = 'The cache scan could not be completed safely.' }
+                    }
+                }
+        } catch {
+            $refreshBtn.IsEnabled = $true
+            $statusLabel.Text = 'The background cache scan could not be started.'
+        }
+    }.GetNewClosure()
+
+    $cacheInspectorScanTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $cacheInspectorScanTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $cacheInspectorScanTimer.Add_Tick({
+        if ($cacheInspectorScanState.Worker -and
+            (Test-NSBackgroundOperationCompleted $cacheInspectorScanState.Worker)) {
+        $worker = $cacheInspectorScanState.Worker
+        $cacheInspectorScanState.Worker = $null
+        try {
+            $completed = Complete-NSBackgroundOperation $worker
+            if ($completed.HadErrors -or $completed.Output.Count -eq 0) {
+                $statusLabel.Text = 'The cache scan could not be completed. Refresh to try again.'
+            } else {
+                $scanResult = $completed.Output[-1]
+                if ([bool](Get-SafeProperty $scanResult 'Success' $false)) {
+                    $files = @(Get-SafeProperty $scanResult 'Files' @())
+                    $script:CacheInspectorFileList = $files
+                    & $applyCacheInspectorData $files
+                } else {
+                    $statusLabel.Text = [string](Get-SafeProperty $scanResult 'Error' 'The cache scan could not be completed. Refresh to try again.')
+                }
+            }
+        } catch {
+            $statusLabel.Text = 'The cache scan could not be applied. Refresh to try again.'
+        } finally {
+            if (-not $cacheInspectorScanState.Closed) { $refreshBtn.IsEnabled = $true }
+        }
+        }
+
+        if ($cacheInspectorScanState.EvictionWorker -and
+            (Test-NSBackgroundOperationCompleted $cacheInspectorScanState.EvictionWorker)) {
+            $worker = $cacheInspectorScanState.EvictionWorker
+            $cacheInspectorScanState.EvictionWorker = $null
+            if (-not $cacheInspectorScanState.Closed -and $cacheInspectorScanState.EvictionButton) {
+                $cacheInspectorScanState.EvictionButton.IsEnabled = $true
+            }
+            $cacheInspectorScanState.EvictionButton = $null
+            $result = Complete-CacheUiOperation -Worker $worker
+            if (-not $cacheInspectorScanState.Closed) {
+                if ([bool](Get-SafeProperty $result 'Success' $false)) {
+                    $statusLabel.Text = 'The selected cache file was safely removed.'
+                    $cacheInspectorScanState.RefreshPending = $true
+                    Update-CacheUsageDisplay -Refresh
+                } else {
+                    $statusLabel.Text = 'The selected cache file was preserved because it could not be removed safely.'
+                }
+            }
+        }
+
+        if ($cacheInspectorScanState.ClearWorker -and
+            (Test-NSBackgroundOperationCompleted $cacheInspectorScanState.ClearWorker)) {
+            $worker = $cacheInspectorScanState.ClearWorker
+            $cacheInspectorScanState.ClearWorker = $null
+            if (-not $cacheInspectorScanState.Closed -and $cacheInspectorScanState.ClearButton) {
+                $cacheInspectorScanState.ClearButton.IsEnabled = $true
+            }
+            $cacheInspectorScanState.ClearButton = $null
+            $result = Complete-CacheUiOperation -Worker $worker
+            if (-not $cacheInspectorScanState.Closed) {
+                if ([bool](Get-SafeProperty $result 'Success' $false)) {
+                    $cleanedBytes = [int64](Get-SafeProperty $result 'CleanedBytes' 0L)
+                    $cleanedFiles = [int](Get-SafeProperty $result 'CleanedFiles' 0)
+                    $skippedInUse = [int](Get-SafeProperty $result 'SkippedInUseCount' 0)
+                    $skippedStaged = [int](Get-SafeProperty $result 'SkippedStagedCount' 0)
+                    $statusLabel.Text = "Cleaned $([Math]::Round(($cleanedBytes / 1MB), 1)) MB ($cleanedFiles files). $skippedInUse in-use and $skippedStaged active, dirty, or unverified VFS files were preserved."
+                    $cacheInspectorScanState.RefreshPending = $true
+                    Update-CacheUsageDisplay -Refresh
+                } else {
+                    $statusLabel.Text = 'Cache cleanup could not finish safely. Refresh to inspect the current cache.'
+                }
+            }
+        }
+
+        if ($cacheInspectorScanState.RefreshPending -and -not $cacheInspectorScanState.Closed -and
+            -not $cacheInspectorScanState.Worker -and -not $cacheInspectorScanState.EvictionWorker -and
+            -not $cacheInspectorScanState.ClearWorker) {
+            $cacheInspectorScanState.RefreshPending = $false
+            & $loadData
+        }
+        if ($cacheInspectorScanState.Closed -and -not $cacheInspectorScanState.EvictionWorker -and
+            -not $cacheInspectorScanState.ClearWorker) { $cacheInspectorScanState.Timer.Stop() }
+    }.GetNewClosure())
+    $cacheInspectorScanState.Timer = $cacheInspectorScanTimer
+    $inspWin.Add_Closed({
+        $cacheInspectorScanState.Closed = $true
+        if ($cacheInspectorScanState.Timer -and -not $cacheInspectorScanState.EvictionWorker -and
+            -not $cacheInspectorScanState.ClearWorker) { $cacheInspectorScanState.Timer.Stop() }
+        if ($cacheInspectorScanState.Worker) {
+            if (Test-NSBackgroundOperationCompleted $cacheInspectorScanState.Worker) {
+                try { Complete-NSBackgroundOperation $cacheInspectorScanState.Worker | Out-Null } catch { }
+            } else {
+                try { Stop-NSBackgroundOperation $cacheInspectorScanState.Worker } catch { }
+            }
+            $cacheInspectorScanState.Worker = $null
+        }
+        # Mutating cache workers finish their verified operations; the timer disposes
+        # their runspaces without updating controls after this window has closed.
+    }.GetNewClosure())
 
     $filterBox.Add_TextChanged({
         & $renderRows $filterBox.Text
@@ -4970,22 +5260,30 @@ function Show-CacheInspectorModal([System.Windows.Window]$Owner = $null) {
             [System.Windows.MessageBoxImage]::Question
         )
         if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+            if ($cacheInspectorScanState.EvictionWorker -or $cacheInspectorScanState.ClearWorker) {
+                $statusLabel.Text = 'Another cache operation is already running.'
+                return
+            }
+            $cleanAllBtn.IsEnabled = $false
+            $cacheInspectorScanState.ClearButton = $cleanAllBtn
+            $statusLabel.Text = 'Cleaning eligible cache files in the background...'
             try {
-                $res = Invoke-SafeCacheCleanup -CacheDirectory $script:CacheDirectory -Force
-                & $loadData
-                Update-CacheUsageDisplay
-                $mb = [Math]::Round(($res.CleanedBytes / 1MB), 1)
-                [System.Windows.MessageBox]::Show("Cleaned $mb MB ($($res.CleanedFiles) files). $($res.SkippedInUseCount) files in-use preserved.", 'Cache Cleaned', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                $cacheInspectorScanState.ClearWorker = Start-CacheUiOperation `
+                    -SourceRoot $PSScriptRoot -CacheDirectory ([string]$script:CacheDirectory) -Action Clean
             } catch {
-                [System.Windows.MessageBox]::Show("Cleanup error: $($_.Exception.Message)", 'Cleanup Error', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                $cacheInspectorScanState.ClearWorker = $null
+                $cacheInspectorScanState.ClearButton = $null
+                $cleanAllBtn.IsEnabled = $true
+                $statusLabel.Text = 'The background cache cleanup could not be started.'
             }
         }
-    })
+    }.GetNewClosure())
 
     $closeBtn.Add_Click({
         $inspWin.Close()
     })
 
+    $cacheInspectorScanTimer.Start()
     & $loadData
     [void](Enable-ModalGlassBackdrop $inspWin)
     $inspWin.ShowDialog() | Out-Null
@@ -5399,8 +5697,8 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
                 $targetId = if ($iJobId) { $iJobId } else { $iFileName }
                 $retryBtn.Add_Click({
                     Resume-CloudTransferQueueItem $targetId | Out-Null
-                    if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
-                        try { Process-CloudTransferQueue | Out-Null } catch { }
+                    if (Get-Command Request-CloudTransferQueueProcessing -ErrorAction SilentlyContinue) {
+                        try { Request-CloudTransferQueueProcessing | Out-Null } catch { }
                     }
                     & $loadData
                 })
@@ -5565,7 +5863,7 @@ function Show-TransferCenterModal([System.Windows.Window]$Owner = $null) {
 
     $clearCompletedBtn.Add_Click({
         if (Get-Command Clear-CloudTransferQueue -ErrorAction SilentlyContinue) {
-            try { Clear-CloudTransferQueue -All:$false } catch { }
+            try { Clear-CloudTransferQueue -All:$false -DeferStagedCleanup } catch { }
         }
         $toKeep = [System.Collections.Generic.List[hashtable]]::new()
         foreach ($evt in @($script:TransferEventHistory)) {
@@ -6173,14 +6471,81 @@ function Show-DisksView {
     Update-NavActiveState
 }
 
-function Update-CacheUsageDisplay {
+function Start-CacheStatisticsWorker {
+    if ($script:CacheStatisticsWorker -or
+        -not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
     try {
-        $st = Get-DetailedCacheStatistics -CacheDirectory $script:CacheDirectory
-        $mbTotal = [Math]::Round($st.TotalSizeBytes / 1MB, 1)
-        $mbInUse = [Math]::Round($st.InUseBytes / 1MB, 1)
-        $gbFree = [Math]::Round($st.DriveFreeBytes / 1GB, 1)
-        $osNotice = if ($st.IsSystemDrive) { " (OS Drive Warning)" } else { "" }
-        $cacheUsageLabel.Text = "Total: $mbTotal MB ($($st.TotalFileCount) files) | In use: $mbInUse MB ($($st.InUseCount) locked) | Free on $($st.DriveLetter): $gbFree GB$osNotice"
+        $script:CacheStatisticsWorker = Start-NSBackgroundOperation `
+            -ArgumentList @($PSScriptRoot, [string]$script:CacheDirectory) `
+            -ScriptBlock {
+                param([string]$sourceRoot, [string]$cacheDirectory)
+                $ErrorActionPreference = 'Stop'
+                try {
+                    . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
+                    . (Join-Path $sourceRoot 'services\CacheManager.ps1')
+                    $stats = Get-DetailedCacheStatistics -CacheDirectory $cacheDirectory
+                    return [pscustomobject]@{ Success = $true; Stats = $stats }
+                } catch {
+                    return [pscustomobject]@{ Success = $false; Stats = $null }
+                }
+            }
+        return $true
+    } catch {
+        $script:CacheStatisticsWorker = $null
+        return $false
+    }
+}
+
+function Get-CacheStatisticsSnapshot {
+    $snapshotAge = ([DateTime]::UtcNow - $script:CacheStatisticsLastCompletedUtc).TotalSeconds
+    if ((-not $script:CacheStatisticsSnapshot -or $snapshotAge -ge 30) -and -not $script:CacheStatisticsWorker) {
+        [void](Start-CacheStatisticsWorker)
+    }
+    return $script:CacheStatisticsSnapshot
+}
+
+function Complete-CacheStatisticsWorker {
+    if (-not $script:CacheStatisticsWorker -or
+        -not (Test-NSBackgroundOperationCompleted $script:CacheStatisticsWorker)) { return $false }
+
+    $worker = $script:CacheStatisticsWorker
+    $script:CacheStatisticsWorker = $null
+    try {
+        $completed = Complete-NSBackgroundOperation $worker
+        if ($completed.HadErrors -or $completed.Output.Count -eq 0) { return $false }
+        $result = $completed.Output[-1]
+        if (-not [bool](Get-SafeProperty $result 'Success' $false)) { return $false }
+        $stats = Get-SafeProperty $result 'Stats' $null
+        if ($null -eq $stats) { return $false }
+        $script:CacheStatisticsSnapshot = $stats
+        $script:CacheStatisticsLastCompletedUtc = [DateTime]::UtcNow
+        if ($script:CurrentView -eq 'Options') { Update-CacheUsageDisplay }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Update-CacheUsageDisplay {
+    [CmdletBinding()]
+    param([switch]$Refresh)
+
+    if ($Refresh) {
+        $script:CacheStatisticsSnapshot = $null
+        $script:CacheStatisticsLastCompletedUtc = [DateTime]::MinValue
+    }
+    try {
+        $stats = Get-CacheStatisticsSnapshot
+        if (-not $stats) {
+            $cacheUsageLabel.Text = if ($script:CacheStatisticsWorker) { 'Reading cache statistics in the background...' } else { 'Cache statistics will be read in the background.' }
+            $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
+            return
+        }
+        $mbTotal = [Math]::Round($stats.TotalSizeBytes / 1MB, 1)
+        $mbInUse = [Math]::Round($stats.InUseBytes / 1MB, 1)
+        $gbFree = [Math]::Round($stats.DriveFreeBytes / 1GB, 1)
+        $osNotice = if ($stats.IsSystemDrive) { ' (OS Drive Warning)' } else { '' }
+        $cacheUsageLabel.Text = "Total: $mbTotal MB ($($stats.TotalFileCount) files) | In use: $mbInUse MB ($($stats.InUseCount) locked) | Free on $($stats.DriveLetter): $gbFree GB$osNotice"
         $cacheUsageLabel.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($script:Palette.TextSecondary)
     } catch { }
 }
@@ -6723,8 +7088,446 @@ function Start-StartupCacheRecoveryWorker {
     }
 }
 
+function Start-InactivityCacheEvictionWorker {
+    if ($script:InactivityCacheEvictionWorker -or
+        -not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $script:InactivityCacheEvictionWorker = Start-NSBackgroundOperation -ArgumentList @($PSScriptRoot, [string]$script:CacheDirectory) -ScriptBlock {
+            param([string]$sourceRoot, [string]$cacheDirectory)
+            $ErrorActionPreference = 'Stop'
+            . (Join-Path $sourceRoot 'services\SettingsManager.ps1')
+            . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+            . (Join-Path $sourceRoot 'services\CacheManager.ps1')
+            Invoke-InactivityCacheEviction -CacheDirectory $cacheDirectory
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Start-PendingVfsRecoveryScanWorker {
+    param(
+        [string[]]$ActiveCachePaths = @(),
+        [bool]$ActiveCacheOwnershipKnown = $false
+    )
+
+    if ($script:PendingVfsRecoveryScanWorker -or $script:StartupAutoMountPending -or $script:StartupAutoMountWorker -or $script:ReconnectWorker) { return $false }
+    if (($script:LegacyMountWorkers -and $script:LegacyMountWorkers.Count -gt 0) -or
+        ($script:DriveDisconnectWorkers -and $script:DriveDisconnectWorkers.Count -gt 0) -or
+        ($script:PendingManualMountAccountIds -and $script:PendingManualMountAccountIds.Count -gt 0)) { return $false }
+    if (-not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
+    try {
+        $arguments = [object[]]::new(4)
+        $arguments[0] = $PSScriptRoot
+        $arguments[1] = [string]$script:CacheDirectory
+        $arguments[2] = [string[]]@($ActiveCachePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $arguments[3] = [bool]$ActiveCacheOwnershipKnown
+        $script:PendingVfsRecoveryScanWorker = Start-NSBackgroundOperation -ArgumentList $arguments -ScriptBlock {
+            param([string]$sourceRoot, [string]$cacheDirectory, [string[]]$activeCachePaths, [bool]$activeCacheOwnershipKnown)
+            $ErrorActionPreference = 'Stop'
+            try {
+                . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+                $stagedFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $cacheDirectory -ActiveCachePaths $activeCachePaths -ActiveCacheOwnershipKnown:$activeCacheOwnershipKnown)
+                return [pscustomobject]@{ Success = $true; Files = @($stagedFiles); Error = ''; CompletedUtc = [DateTime]::UtcNow }
+            } catch {
+                return [pscustomobject]@{ Success = $false; Files = @(); Error = 'The staged cache scan could not be completed.'; CompletedUtc = [DateTime]::UtcNow }
+            }
+        }
+        $script:LastPendingVfsScanUtc = [DateTime]::UtcNow
+        return $true
+    } catch {
+        $script:PendingVfsRecoveryScanFailed = $true
+        $script:LastPendingVfsScanUtc = [DateTime]::UtcNow
+        return $false
+    }
+}
+
+function Start-SelectedStagedCacheLinkWorker {
+    [CmdletBinding()]
+    param([object[]]$Candidates = @())
+
+    if ($script:SelectedStagedCacheLinkWorker -or $script:TransferQueueStateUnavailable -or
+        -not $script:CloudTransferQueue -or $Candidates.Count -eq 0 -or
+        -not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
+    if (([DateTime]::UtcNow - $script:LastSelectedStagedCacheLinkAttemptUtc).TotalSeconds -lt 30) { return $false }
+
+    $jobs = [System.Collections.Generic.List[object]]::new()
+    foreach ($job in @($script:CloudTransferQueue)) {
+        if ([bool](Get-CloudTransferFieldValue $job 'RecoveredFromVfsCache') -or
+            [string](Get-CloudTransferFieldValue $job 'Origin') -ne 'UserDrop' -or
+            [string](Get-CloudTransferFieldValue $job 'OperationType') -ne 'Upload') { continue }
+        $jobs.Add([ordered]@{
+            QueueId = [string](Get-CloudTransferFieldValue $job 'QueueId')
+            Origin = [string](Get-CloudTransferFieldValue $job 'Origin')
+            OperationType = [string](Get-CloudTransferFieldValue $job 'OperationType')
+            Status = [string](Get-CloudTransferFieldValue $job 'Status')
+            SourcePath = [string](Get-CloudTransferFieldValue $job 'SourcePath')
+            SourceLastWriteUtc = [string](Get-CloudTransferFieldValue $job 'SourceLastWriteUtc')
+            FileSizeBytes = [int64](Get-CloudTransferFieldValue $job 'FileSizeBytes' -1L)
+            DestinationAccountId = [string](Get-CloudTransferFieldValue $job 'DestinationAccountId')
+            DestinationProvider = [string](Get-CloudTransferFieldValue $job 'DestinationProvider')
+            DestinationFilePath = [string](Get-CloudTransferFieldValue $job 'DestinationFilePath')
+            RecoveredFromVfsCache = $false
+        })
+    }
+    if ($jobs.Count -eq 0) { return $false }
+
+    $candidateSnapshots = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in @($Candidates)) {
+        $candidateSnapshots.Add([pscustomobject]@{
+            Path = [string](Get-CloudTransferFieldValue $candidate 'Path')
+            RelativePath = [string](Get-CloudTransferFieldValue $candidate 'RelativePath')
+            AccountId = [string](Get-CloudTransferFieldValue $candidate 'AccountId')
+            ProviderId = [string](Get-CloudTransferFieldValue $candidate 'ProviderId')
+            Length = [int64](Get-CloudTransferFieldValue $candidate 'Length' -1L)
+            LastWriteTimeUtc = Get-CloudTransferFieldValue $candidate 'LastWriteTimeUtc' $null
+            IsOutsideActiveCache = [bool](Get-CloudTransferFieldValue $candidate 'IsOutsideActiveCache')
+            HasStagedPathConflict = [bool](Get-CloudTransferFieldValue $candidate 'HasStagedPathConflict')
+            State = [string](Get-CloudTransferFieldValue $candidate 'State')
+        })
+    }
+
+    try {
+        $script:SelectedStagedCacheLinkWorker = Start-NSBackgroundOperation `
+            -ArgumentList @($PSScriptRoot, [object[]]$jobs.ToArray(), [object[]]$candidateSnapshots.ToArray()) `
+            -ScriptBlock {
+                param([string]$sourceRoot, [object[]]$jobs, [object[]]$candidates)
+                $ErrorActionPreference = 'Stop'
+                try {
+                    # The link planner uses normalized paths and reparse-point checks
+                    # supplied by VirtualDriveManager in this isolated runspace.
+                    . (Join-Path $sourceRoot 'services\VirtualDriveManager.ps1')
+                    . (Join-Path $sourceRoot 'services\CloudTransferManager.ps1')
+                    $plans = @(Get-CloudTransferStagedCacheLinkPlans -Jobs $jobs -Candidates $candidates)
+                    return [pscustomobject]@{ Success = $true; Plans = @($plans); Error = '' }
+                } catch {
+                    return [pscustomobject]@{ Success = $false; Plans = @(); Error = 'The selected staging revisions could not be verified.' }
+                }
+            }
+        $script:LastSelectedStagedCacheLinkAttemptUtc = [DateTime]::UtcNow
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Complete-SelectedStagedCacheLinkWorker {
+    if (-not $script:SelectedStagedCacheLinkWorker -or
+        -not (Test-NSBackgroundOperationCompleted $script:SelectedStagedCacheLinkWorker)) { return 0 }
+
+    $worker = $script:SelectedStagedCacheLinkWorker
+    $script:SelectedStagedCacheLinkWorker = $null
+    $linkedCount = 0
+    try {
+        $completed = Complete-NSBackgroundOperation $worker
+        if ($completed.HadErrors -or $completed.Output.Count -eq 0) { return 0 }
+        $result = $completed.Output[-1]
+        if (-not [bool](Get-SafeProperty $result 'Success' $false)) {
+            $message = [string](Get-SafeProperty $result 'Error' '')
+            if ($message) { try { Write-NSCloudLog -Severity 'Warning' -Operation 'staged-cache-link' -Message $message } catch { } }
+            return 0
+        }
+
+        foreach ($plan in @(Get-SafeProperty $result 'Plans' @())) {
+            $queueId = [string](Get-SafeProperty $plan 'QueueId' '')
+            $job = @($script:CloudTransferQueue | Where-Object { [string](Get-CloudTransferFieldValue $_ 'QueueId') -eq $queueId } | Select-Object -First 1)
+            if ($job.Count -eq 0) { continue }
+            $candidatePath = [string](Get-SafeProperty $plan 'CandidatePath' '')
+            $candidate = @($script:CachedPendingVfsFiles | Where-Object { [string](Get-CloudTransferFieldValue $_ 'Path') -eq $candidatePath } | Select-Object -First 1)
+            if ($candidate.Count -eq 0) { continue }
+            $linked = Set-CloudTransferStagedCacheCleanupLink `
+                -Job $job[0] `
+                -Candidates $candidate `
+                -DestinationAccountId ([string](Get-SafeProperty $plan 'DestinationAccountId' '')) `
+                -DestinationProviderId ([string](Get-SafeProperty $plan 'DestinationProvider' '')) `
+                -DestinationRelativePath ([string](Get-SafeProperty $plan 'DestinationRelativePath' '')) `
+                -ExpectedSizeBytes ([int64](Get-SafeProperty $plan 'ExpectedSizeBytes' -1L)) `
+                -ExpectedSha256 ([string](Get-SafeProperty $plan 'ExpectedSha256' ''))
+            if ($linked) { $linkedCount++ }
+        }
+        if ($linkedCount -gt 0) {
+            Save-DurableTransferQueue | Out-Null
+            try { Write-NSCloudLog -Severity 'Info' -Operation 'staged-vfs-cleanup-link' -Message "Linked $linkedCount explicitly selected upload job(s) to SHA-256 verified staged cache revisions." } catch { }
+        }
+        return $linkedCount
+    } catch {
+        try { Write-NSCloudLog -Severity 'Warning' -Operation 'staged-cache-link' -Message 'Selected staging cleanup linkage could not be applied safely.' } catch { }
+        return 0
+    }
+}
+
+function Complete-PendingVfsRecoveryScanWorker {
+    if (-not $script:PendingVfsRecoveryScanWorker -or
+        -not (Test-NSBackgroundOperationCompleted $script:PendingVfsRecoveryScanWorker)) { return $false }
+
+    $worker = $script:PendingVfsRecoveryScanWorker
+    $script:PendingVfsRecoveryScanWorker = $null
+    try {
+        $completed = Complete-NSBackgroundOperation $worker
+        if ($completed.HadErrors -or $completed.Output.Count -eq 0) {
+            $script:PendingVfsRecoveryScanFailed = $true
+            return $false
+        }
+        $scan = $completed.Output[-1]
+        if (-not [bool](Get-SafeProperty $scan 'Success' $false)) {
+            $script:PendingVfsRecoveryScanFailed = $true
+            $scanError = [string](Get-SafeProperty $scan 'Error' '')
+            if ($scanError) {
+                try { Write-NSCloudLog -Severity 'Warning' -Operation 'staged-vfs-scan' -Message $scanError } catch { }
+            }
+            return $false
+        }
+        $scanFiles = Get-SafeProperty $scan 'Files' $null
+        $script:CachedPendingVfsFiles = @($scanFiles)
+        # An orphan cache scan is not proof of the user's current file selection.
+        # Keep candidates visible for review; explicit selections now create durable
+        # queue entries at the moment they are made.
+        $script:PendingVfsRecoveryCandidates = @()
+        $script:PendingVfsRecoveryBatchName = ''
+        [void](Start-SelectedStagedCacheLinkWorker -Candidates $script:CachedPendingVfsFiles)
+        $script:PendingVfsRecoveryScanFailed = $false
+        $script:PendingVfsScanHasSnapshot = $true
+        return $true
+    } catch {
+        $script:PendingVfsRecoveryScanFailed = $true
+        try { Write-NSCloudLog -Severity 'Warning' -Operation 'staged-vfs-scan' -Message 'The staged cache scan could not be completed.' } catch { }
+        return $false
+    }
+}
+
+function Start-TransferRemoteCheckWorker {
+    if ($script:TransferRemoteCheckWorker -or $script:TransferQueueStateUnavailable -or
+        -not (Get-Command Start-NSBackgroundOperation -ErrorAction SilentlyContinue)) { return $false }
+    if ([DateTime]::UtcNow -lt $script:TransferRemoteCheckRetryAfterUtc) { return $false }
+
+    $rawQueue = $null
+    try { $rawQueue = Get-CloudTransferQueue } catch { return $false }
+    $queueItems = if ($rawQueue -is [array] -and $rawQueue.Count -gt 0 -and $rawQueue[0] -is [array]) { @($rawQueue[0]) } elseif ($null -ne $rawQueue) { @($rawQueue) } else { @() }
+    $workItems = [System.Collections.Generic.List[object]]::new()
+    $nowUtc = [DateTime]::UtcNow
+
+    foreach ($item in $queueItems) {
+        if ($null -eq $item) { continue }
+        $status = [string](Get-SafeProperty $item 'Status' '')
+        $nextRetry = Get-SafeProperty $item 'NextRetryUtc' $null
+        if ($nextRetry -is [string]) {
+            $parsedRetry = [DateTime]::MinValue
+            if ([DateTime]::TryParse([string]$nextRetry, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedRetry)) { $nextRetry = $parsedRetry }
+        }
+
+        if ($status -in @('Queued', 'Waiting for network/provider')) {
+            if ($status -eq 'Waiting for network/provider' -and $nextRetry -is [DateTime] -and $nextRetry -gt $nowUtc) { continue }
+            $operation = Get-CloudTransferJobOperation -Job $item
+            if (-not $operation.IsValid) { continue }
+            if ($operation.OperationType -notin @('Upload', 'CloudCopy')) { continue }
+            if ($operation.OperationType -eq 'CloudCopy' -and [string](Get-SafeProperty $item 'ConflictAction' 'Skip') -ne 'Skip') { continue }
+
+            $jobSnapshot = @{
+                QueueId = [string](Get-SafeProperty $item 'QueueId' '')
+                OperationType = [string]$operation.OperationType
+                Direction = [string]$operation.Direction
+                SourceProvider = [string]$operation.SourceProvider
+                DestinationProvider = [string]$operation.DestinationProvider
+                SourceAccountId = [string]$operation.SourceAccountId
+                DestinationAccountId = [string]$operation.DestinationAccountId
+                SourceAccount = Get-SafeProperty $item 'SourceAccount' @{}
+                DestinationAccount = Get-SafeProperty $item 'DestinationAccount' @{}
+                SourcePath = [string](Get-SafeProperty $item 'SourcePath' '')
+                DestinationPath = [string](Get-SafeProperty $item 'DestinationPath' '')
+                DestinationFilePath = [string](Get-SafeProperty $item 'DestinationFilePath' '')
+                DestinationDirectory = [string](Get-SafeProperty $item 'DestinationDirectory' '')
+                RelativePath = [string](Get-SafeProperty $item 'RelativePath' '')
+                FileName = [string](Get-SafeProperty $item 'FileName' '')
+                FileSizeBytes = [int64](Get-SafeProperty $item 'FileSizeBytes' 0L)
+                SourceLastWriteUtc = [string](Get-SafeProperty $item 'SourceLastWriteUtc' '')
+                ConflictAction = [string](Get-SafeProperty $item 'ConflictAction' 'Skip')
+                IsMove = [bool](Get-SafeProperty $item 'IsMove' $false)
+                Status = $status
+                ReconciliationStatus = [string](Get-SafeProperty $item 'ReconciliationStatus' 'None')
+            }
+            $workItems.Add([pscustomobject]@{ Kind = 'Inventory'; Job = $jobSnapshot })
+        } elseif ($status -in @('Awaiting remote confirmation', 'Upload pending remote confirmation', 'Verifying remote file')) {
+            if ($nextRetry -is [DateTime] -and $nextRetry -gt $nowUtc) { continue }
+            $revisionFields = @{}
+            foreach ($fieldName in @('QueueId', 'OperationType', 'Direction', 'SourceProvider', 'DestinationProvider', 'SourceAccountId', 'DestinationAccountId', 'SourcePath', 'DestinationFilePath', 'DestinationPath', 'FileName', 'FileSizeBytes', 'SourceLastWriteUtc', 'SourceAccount', 'DestinationAccount', 'ReconciliationStatus')) {
+                $revisionFields[$fieldName] = Get-SafeProperty $item $fieldName $null
+            }
+            $revisionFields['OperationType'] = [string]$revisionFields['OperationType']
+            $revisionKey = Get-CloudTransferQueueItemRevisionKey -Job $revisionFields
+            $workItems.Add([pscustomobject]@{ Kind = 'Verify'; QueueId = [string]$revisionFields['QueueId']; RevisionKey = $revisionKey; Job = $revisionFields })
+        }
+        if ($workItems.Count -ge 100) { break }
+    }
+
+    if ($workItems.Count -eq 0) { return $false }
+    try {
+        $args = [object[]]::new(2)
+        $args[0] = $PSScriptRoot
+        $args[1] = [object[]]$workItems.ToArray()
+        $script:TransferRemoteCheckWorker = Start-NSBackgroundOperation -ArgumentList $args -ScriptBlock {
+            param([string]$sourceRoot, [object[]]$remoteCheckItems)
+            $ErrorActionPreference = 'Stop'
+            $inventoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+            $verificationResults = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+            try {
+                . (Join-Path $sourceRoot 'services\CloudTransferManager.ps1')
+                foreach ($request in $remoteCheckItems) {
+                    if ($request.Kind -eq 'Verify') {
+                        try {
+                            $result = Test-CloudTransferJobDestination -Job $request.Job
+                        } catch {
+                            $result = @{ Verified = $false; Status = 'Unavailable'; Reason = 'Remote verification is temporarily unavailable.' }
+                        }
+                        $verificationResults[[string]$request.QueueId] = [pscustomobject]@{ RevisionKey = [string]$request.RevisionKey; Result = $result }
+                        continue
+                    }
+
+                    $job = $request.Job
+                    $operationType = [string]$job.OperationType
+                    if ($operationType -eq 'Upload') {
+                        $destinationFile = if ($job.DestinationFilePath) { [string]$job.DestinationFilePath } else { [string]$job.FileName }
+                        $destinationFolder = if ($destinationFile.Contains('/')) { $destinationFile.Substring(0, $destinationFile.LastIndexOf('/')) } else { '' }
+                        $cacheKey = Get-CloudTransferInventoryCacheKey -AccountId ([string]$job.DestinationAccountId) -ProviderId ([string]$job.DestinationProvider) -FolderPath $destinationFolder
+                        if (-not $inventoryCache.ContainsKey($cacheKey)) {
+                            try {
+                                $inventoryCache[$cacheKey] = Get-RemoteFileInventoryMap -DestinationAccount $job.DestinationAccount -DestinationFolderPaths @($destinationFolder) -BypassLedger
+                            } catch {
+                                $unavailable = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
+                                $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", $destinationFolder
+                                $unavailable[$scopeKey] = [ordered]@{ Name = ''; RelPath = $destinationFolder; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryUnavailableScope' }
+                                $inventoryCache[$cacheKey] = $unavailable
+                            }
+                        }
+                    } elseif ($operationType -eq 'CloudCopy') {
+                        $sourcePath = Normalize-CloudPath -Path ([string]$job.SourcePath)
+                        $destinationFile = if ($job.DestinationFilePath) { [string]$job.DestinationFilePath } else { Get-CloudTransferJobDestinationPath -Job $job }
+                        $sourceFolder = if ($sourcePath.Contains('/')) { $sourcePath.Substring(0, $sourcePath.LastIndexOf('/')) } else { '' }
+                        $destinationFolder = if ($destinationFile.Contains('/')) { $destinationFile.Substring(0, $destinationFile.LastIndexOf('/')) } else { '' }
+                        foreach ($inventoryRequest in @(
+                            @{ Account = $job.SourceAccount; AccountId = [string]$job.SourceAccountId; Provider = [string]$job.SourceProvider; Folder = $sourceFolder },
+                            @{ Account = $job.DestinationAccount; AccountId = [string]$job.DestinationAccountId; Provider = [string]$job.DestinationProvider; Folder = $destinationFolder }
+                        )) {
+                            $cacheKey = Get-CloudTransferInventoryCacheKey -AccountId ([string]$inventoryRequest.AccountId) -ProviderId ([string]$inventoryRequest.Provider) -FolderPath ([string]$inventoryRequest.Folder)
+                            if ($inventoryCache.ContainsKey($cacheKey)) { continue }
+                            try {
+                                $inventoryCache[$cacheKey] = Get-RemoteFileInventoryMap -DestinationAccount $inventoryRequest.Account -DestinationFolderPaths @([string]$inventoryRequest.Folder) -BypassLedger
+                            } catch {
+                                $unavailable = [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
+                                $scopeKey = '{0}:{1}' -f "`0nscd_live_inventory_scope", [string]$inventoryRequest.Folder
+                                $unavailable[$scopeKey] = [ordered]@{ Name = ''; RelPath = [string]$inventoryRequest.Folder; SizeBytes = 0L; Format = ''; Extension = ''; Source = 'LiveProviderInventoryUnavailableScope' }
+                                $inventoryCache[$cacheKey] = $unavailable
+                            }
+                        }
+                    }
+                }
+                return [pscustomobject]@{ Success = $true; InventoryCache = $inventoryCache; VerificationResults = $verificationResults; Error = ''; CompletedUtc = [DateTime]::UtcNow }
+            } catch {
+                return [pscustomobject]@{
+                    Success = $false
+                    InventoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+                    VerificationResults = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+                    Error = 'Remote provider checks could not be completed.'
+                    CompletedUtc = [DateTime]::UtcNow
+                }
+            }
+        }
+        return $true
+    } catch {
+        $script:TransferRemoteCheckFailed = $true
+        $script:TransferRemoteCheckRetryAfterUtc = [DateTime]::UtcNow.AddSeconds(15)
+        return $false
+    }
+}
+
+function Complete-TransferRemoteCheckWorker {
+    if (-not $script:TransferRemoteCheckWorker -or -not (Test-NSBackgroundOperationCompleted $script:TransferRemoteCheckWorker)) { return $false }
+    $worker = $script:TransferRemoteCheckWorker
+    $script:TransferRemoteCheckWorker = $null
+    try {
+        $completed = Complete-NSBackgroundOperation $worker
+        if ($completed.HadErrors -or $completed.Output.Count -eq 0) { throw 'The remote check worker returned no valid result.' }
+        $result = $completed.Output[-1]
+        if (-not [bool](Get-SafeProperty $result 'Success' $false)) {
+            $script:TransferRemoteCheckFailed = $true
+            $script:TransferRemoteCheckRetryAfterUtc = [DateTime]::UtcNow.AddSeconds(15)
+            try { Write-NSCloudLog -Severity 'Warning' -Operation 'transfer-preflight' -Message 'Remote provider checks are temporarily unavailable; queue work remains durable.' } catch { }
+            return $false
+        }
+        $inventory = Get-SafeProperty $result 'InventoryCache' $null
+        $verification = Get-SafeProperty $result 'VerificationResults' $null
+        $script:TransferPreflightInventoryCache = if ($inventory) { $inventory } else { [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal) }
+        $script:TransferRemoteVerificationResults = if ($verification) { $verification } else { [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal) }
+        $script:TransferRemoteCheckSnapshotReady = $true
+        $script:TransferRemoteCheckFailed = $false
+        $script:TransferRemoteCheckRetryAfterUtc = [DateTime]::MinValue
+        return $true
+    } catch {
+        $script:TransferRemoteCheckFailed = $true
+        $script:TransferRemoteCheckRetryAfterUtc = [DateTime]::UtcNow.AddSeconds(15)
+        try { Write-NSCloudLog -Severity 'Warning' -Operation 'transfer-preflight' -Message 'Remote provider checks are temporarily unavailable; queue work remains durable.' } catch { }
+        return $false
+    }
+}
+
+function Request-CloudTransferQueueProcessing {
+    if (-not (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) -or $script:TransferQueueStateUnavailable) { return $false }
+
+    if ($script:StagedCacheCleanupWorker) {
+        if (-not (Test-NSBackgroundOperationCompleted $script:StagedCacheCleanupWorker)) { return $false }
+        [void](Complete-StagedCacheCleanupWorker)
+    }
+
+    [void](Complete-TransferRemoteCheckWorker)
+    if (-not $script:TransferRemoteCheckWorker -and -not $script:TransferRemoteCheckSnapshotReady) {
+        [void](Start-TransferRemoteCheckWorker)
+    }
+
+    $inventory = if ($script:TransferRemoteCheckSnapshotReady) { $script:TransferPreflightInventoryCache } else { $null }
+    $verification = if ($script:TransferRemoteCheckSnapshotReady) { $script:TransferRemoteVerificationResults } else { $null }
+    try {
+        Process-CloudTransferQueue -PreflightInventoryCache $inventory -RemoteVerificationResults $verification -RequireCachedRemoteChecks -DeferStagedCleanup | Out-Null
+    } catch { }
+
+    if ($script:TransferRemoteCheckSnapshotReady) {
+        $script:TransferRemoteCheckSnapshotReady = $false
+        $script:TransferPreflightInventoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        $script:TransferRemoteVerificationResults = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    }
+    [void](Start-StagedCacheCleanupWorker -SourceRoot $PSScriptRoot)
+    return $true
+}
+
 function Complete-AvailableStartupWorkers {
     Complete-AvailableDriveDisconnectWorkers
+
+    if ($script:InactivityCacheEvictionWorker -and (Test-NSBackgroundOperationCompleted $script:InactivityCacheEvictionWorker)) {
+        try {
+            $completed = Complete-NSBackgroundOperation $script:InactivityCacheEvictionWorker
+            if (-not $completed.HadErrors -and $completed.Output.Count -gt 0) {
+                $eviction = $completed.Output[-1]
+                $evictedFiles = [int](Get-SafeProperty $eviction 'EvictedFiles' 0)
+                if ($evictedFiles -gt 0) {
+                    $evictedBytes = [int64](Get-SafeProperty $eviction 'EvictedBytes' 0L)
+                    try {
+                        Write-NSCloudLog -Severity 'Info' -Operation 'cache-inactivity-eviction' `
+                            -Message "Removed $evictedFiles expired, clean cache file(s) ($(Format-LocalByteSize $evictedBytes)); dirty or untracked staged data was preserved."
+                    } catch { }
+                }
+            } elseif ($completed.HadErrors) {
+                $message = if ($completed.Errors.Count -gt 0 -and $completed.Errors[0].Exception) {
+                    Format-SanitizedDiagnosticMessage ([string]$completed.Errors[0].Exception.Message)
+                } else {
+                    'The inactivity cache cleanup could not be completed.'
+                }
+                try { Write-NSCloudLog -Severity 'Warning' -Operation 'cache-inactivity-eviction' -Message $message } catch { }
+            }
+        } catch {
+            try { Write-NSCloudLog -Severity 'Warning' -Operation 'cache-inactivity-eviction' -Message 'The inactivity cache cleanup could not be completed.' } catch { }
+        } finally {
+            $script:InactivityCacheEvictionWorker = $null
+        }
+    }
 
     if ($script:ProviderStatusWorker -and (Test-NSBackgroundOperationCompleted $script:ProviderStatusWorker)) {
         try {
@@ -6827,26 +7630,6 @@ function Complete-AvailableStartupWorkers {
         } catch { }
         $script:StartupAutoMountWorker = $null
         $script:LastProviderStatusCheck = [DateTime]::MinValue
-        try {
-            $pending = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory)
-            if ($pending.Count -gt 0) {
-                # Deduplication fingerprint: only notify once per session for the same set of staged files
-                $pendingFingerprint = ($pending | ForEach-Object { "$($_.Path):$($_.Length)" } | Sort-Object) -join ';'
-                if ($pendingFingerprint -and $pendingFingerprint -ne $script:LastNotifiedPendingFingerprint) {
-                    $script:LastNotifiedPendingFingerprint = $pendingFingerprint
-                    $pendingSize = ($pending | Measure-Object -Property Length -Sum).Sum
-                    $sizeFormatted = Format-LocalByteSize $pendingSize
-                    $notifySync = if ($script:Settings.Contains('NotifyOnBackgroundSync')) { [bool]$script:Settings.NotifyOnBackgroundSync } else { $true }
-                    if ($script:Settings.EnableNotifications -and $notifySync -and -not (Test-NotificationsSnoozed $script:Settings)) {
-                        # Only notify if total pending size > 0 to eliminate false 0 B alerts
-                        if ($pendingSize -gt 0L) {
-                            $msg = "Found $($pending.Count) pending staged file(s) ($sizeFormatted) from previous session. Resuming background upload to cloud."
-                            $notifyIcon.ShowBalloonTip(4000, "NS Cloud Drive - Resuming Background Sync", $msg, [System.Windows.Forms.ToolTipIcon]::None)
-                        }
-                    }
-                }
-            }
-        } catch { }
     }
 
     if ($script:ReconnectWorker -and (Test-NSBackgroundOperationCompleted $script:ReconnectWorker)) {
@@ -7680,14 +8463,18 @@ function Update-AllUIState {
                             $dropResult = Add-CloudTransferDroppedItems `
                                 -DestinationAccount $cardAccountRef `
                                 -DroppedPaths $droppedFiles `
-                                -ConflictAction 'Skip'
+                                -ConflictAction 'Skip' `
+                                -DeferRemotePreflight
 
                             $skipCount = [int]$dropResult.SkippedCount
                             $queuedCount = [int]$dropResult.QueuedCount
+                            [void](Start-SelectedStagedCacheLinkWorker -Candidates $script:CachedPendingVfsFiles)
                             $newQueuedCount = [int](Get-SafeProperty $dropResult 'NewlyQueuedCount' $queuedCount)
                             $alreadyTrackedCount = [int](Get-SafeProperty $dropResult 'AlreadyTrackedCount' 0)
 
-                            $summaryMsg = if ($skipCount -gt 0 -and $queuedCount -gt 0 -and $alreadyTrackedCount -gt 0) {
+                            $summaryMsg = if ($newQueuedCount -gt 0 -and $alreadyTrackedCount -gt 0) {
+                                "$newQueuedCount selected file(s) queued; $alreadyTrackedCount matching file(s) were already tracked. Cloud destination checks run in the background before transfer."
+                            } elseif ($skipCount -gt 0 -and $queuedCount -gt 0 -and $alreadyTrackedCount -gt 0) {
                                 "Deduplication: $skipCount file(s) already in cloud. $newQueuedCount new file(s) queued; $alreadyTrackedCount remaining file(s) already in the queue."
                             } elseif ($skipCount -gt 0 -and $queuedCount -gt 0) {
                                 "Deduplication: $skipCount file(s) already in cloud (skipped). $queuedCount remaining file(s) queued for transfer."
@@ -7697,6 +8484,8 @@ function Update-AllUIState {
                                 "$newQueuedCount new file(s) queued; $alreadyTrackedCount matching file(s) were already queued."
                             } elseif ($alreadyTrackedCount -gt 0) {
                                 "$alreadyTrackedCount matching file(s) are already queued. No duplicate jobs were created."
+                            } elseif ($newQueuedCount -gt 0) {
+                                "Queued $newQueuedCount selected file(s) for cloud transfer. The destination will be checked in the background before bytes are sent."
                             } else {
                                 "Queued $queuedCount file(s) for cloud transfer."
                             }
@@ -8343,7 +9132,7 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
 
     $res = $dlg.ShowDialog($ParentWindow)
     if ($res -eq $true -and $dlg.FileNames.Length -gt 0) {
-        $uploaded = 0
+        $selectedPaths = [System.Collections.Generic.List[string]]::new()
         $failed = 0
         $errMsgs = @()
 
@@ -8369,39 +9158,47 @@ function Show-UploadDialog([string]$DriveLetter, [System.Windows.Window]$ParentW
         foreach ($srcFile in $dlg.FileNames) {
             try {
                 $fi = [System.IO.FileInfo]::new($srcFile)
-                $fName = $fi.Name
-                $fSize = $fi.Length
-
-                if ($matchingAccount) {
-                    $preflight = Test-ProviderUploadPreflight -Account $matchingAccount -FileSizeBytes $fSize -FileName $fName
-                    if (-not $preflight.Allowed) {
-                        $failed++
-                        $errMsgs += "$fName`: $($preflight.Reason)"
-                        continue
-                    }
-                }
-
-                $destPath = Join-Path $driveRoot $fName
-                [System.IO.File]::Copy($srcFile, $destPath, $true)
-                $uploaded++
+                $selectedPaths.Add($fi.FullName)
             } catch {
                 $failed++
-                $errMsgs += "$([System.IO.Path]::GetFileName($srcFile)): $($_.Exception.Message)"
+                $errMsgs += "$([System.IO.Path]::GetFileName($srcFile)): $(Format-SanitizedDiagnosticMessage $_.Exception.Message)"
             }
         }
 
-        if ($failed -eq 0 -and $uploaded -gt 0) {
-            $msg = "Staged $uploaded file(s) into local drive cache ($driveRoot).`n`n" +
-                   "The file(s) are cached locally and are being uploaded to the cloud in the background.`n`n" +
-                   "Status: Locally cached -> Uploading to provider.`n" +
-                   "You can monitor live progress on the Analytics and Disks pages."
-            [System.Windows.MessageBox]::Show($msg, 'Files Staged for Cloud Upload', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } elseif ($uploaded -gt 0 -and $failed -gt 0) {
-            $msg = "Staged: $uploaded file(s) to cache`nRejected / Failed: $failed file(s)`n`nDetails:`n" + ($errMsgs -join "`n")
+        $queued = 0
+        $alreadyTracked = 0
+        if ($selectedPaths.Count -gt 0) {
+            try {
+                $dropResult = Add-CloudTransferDroppedItems `
+                    -DestinationAccount $matchingAccount `
+                    -DroppedPaths ([string[]]$selectedPaths.ToArray()) `
+                    -ConflictAction 'Skip' `
+                    -BatchName ('Selected upload ' + [DateTime]::Now.ToString('yyyy-MM-dd HH:mm')) `
+                    -DeferRemotePreflight
+                $queued = [int](Get-SafeProperty $dropResult 'NewlyQueuedCount' (Get-SafeProperty $dropResult 'QueuedCount' 0))
+                $alreadyTracked = [int](Get-SafeProperty $dropResult 'AlreadyTrackedCount' 0)
+                [void](Start-SelectedStagedCacheLinkWorker -Candidates $script:CachedPendingVfsFiles)
+                if (Get-Command Request-CloudTransferQueueProcessing -ErrorAction SilentlyContinue) {
+                    [void](Request-CloudTransferQueueProcessing)
+                }
+                Update-AllUIState
+            } catch {
+                $failed += $selectedPaths.Count
+                $errMsgs += Format-SanitizedDiagnosticMessage $_.Exception.Message
+            }
+        }
+
+        if ($queued -gt 0 -or $alreadyTracked -gt 0) {
+            $providerName = [string](Get-SafeProperty $matchingAccount 'DisplayName' (Get-SafeProperty $matchingAccount 'ProviderId' 'cloud provider'))
+            $msg = "Queued $queued selected file(s) for $providerName; $alreadyTracked matching file(s) were already tracked.`n`n" +
+                   "The transfer checks provider limits and the cloud destination before sending, then skips exact matches. Only files from this selection are queued. The original local files are left in place."
+            if ($failed -gt 0) { $msg += "`n`nRejected / Failed: $failed file(s)`n`nDetails:`n" + ($errMsgs -join "`n") }
+            [System.Windows.MessageBox]::Show($msg, 'Files Queued for Cloud Upload', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } elseif ($failed -gt 0) {
+            $msg = "Upload could not be queued for $failed file(s):`n`n" + ($errMsgs -join "`n`n")
             [System.Windows.MessageBox]::Show($msg, 'Upload Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
         } else {
-            $msg = "Upload rejected for $failed file(s):`n`n" + ($errMsgs -join "`n`n")
-            [System.Windows.MessageBox]::Show($msg, 'Upload Prohibited by Plan Limits', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            [System.Windows.MessageBox]::Show('No eligible files were selected for upload.', 'Upload Notice', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         }
     }
 }
@@ -9466,8 +10263,8 @@ function Start-ApplicationStartupSequence {
         # Automatically resume background transfer processing after restart silently without balloon popups
         if ($recoverySummary -and ([int]$recoverySummary.ResetCount -gt 0 -or [int]$recoverySummary.RecoveredCount -gt 0)) {
             try {
-                if (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue) {
-                    [void](Process-CloudTransferQueue)
+                if (Get-Command Request-CloudTransferQueueProcessing -ErrorAction SilentlyContinue) {
+                    [void](Request-CloudTransferQueueProcessing)
                 }
             } catch { }
         }
@@ -9519,6 +10316,17 @@ $script:LastQueueStallRecovery = [DateTime]::MinValue
 $script:LastStagedQueueAdoptionUtc = [DateTime]::MinValue
 $script:LastPendingVfsScanUtc = [DateTime]::MinValue
 $script:CachedPendingVfsFiles = @()
+$script:PendingVfsRecoveryScanWorker = $null
+$script:PendingVfsRecoveryScanFailed = $false
+$script:PendingVfsScanHasSnapshot = $false
+$script:PendingVfsRecoveryCandidates = @()
+$script:PendingVfsRecoveryBatchName = ''
+$script:TransferRemoteCheckWorker = $null
+$script:TransferPreflightInventoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$script:TransferRemoteVerificationResults = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+$script:TransferRemoteCheckSnapshotReady = $false
+$script:TransferRemoteCheckFailed = $false
+$script:TransferRemoteCheckRetryAfterUtc = [DateTime]::MinValue
 
 function Resolve-PendingTransferAccount {
     [CmdletBinding()]
@@ -9602,18 +10410,23 @@ function Update-LiveTransferActivity {
     $activeDrive = $null
     $allActiveTransfers = [System.Collections.Generic.List[PSObject]]::new()
     $mountedCachePaths = [System.Collections.Generic.List[string]]::new()
+    $mountCacheOwnershipKnown = $true
     $accounts = @()
 
     try {
         $accounts = @(Get-CloudAccounts)
         foreach ($acc in $accounts) {
             $letter = [string]$acc.DriveLetter
-            if (-not $letter) { continue }
-            $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter
+            $vfs = Get-VirtualDriveVfsStats -DriveLetter $letter -AccountId ([string]$acc.Id) -ProviderId ([string]$acc.ProviderId)
             # The live cache root is defined per mount, not per active upload. It must be
             # known even while idle so staged files in superseded roots are identified.
             if ($vfs.IsActive -and $vfs.DiskCachePath) {
                 $mountedCachePaths.Add([string]$vfs.DiskCachePath)
+            } elseif ($vfs.IsActive) {
+                $mountCacheOwnershipKnown = $false
+            } elseif ([string]$vfs.State -eq 'Remote state unknown') {
+                $mountStatus = Get-VirtualDriveStatus -DriveLetter $letter -AccountId ([string]$acc.Id) -ProviderId ([string]$acc.ProviderId)
+                if ($mountStatus.IsMounted -or $mountStatus.ProcessRunning) { $mountCacheOwnershipKnown = $false }
             }
             if ($vfs.IsActive -and ($vfs.UploadsInProgress -gt 0 -or $vfs.UploadsQueued -gt 0 -or ($vfs.Transferring -and $vfs.Transferring.Count -gt 0))) {
                 $allActiveTransfers.Add([PSCustomObject]@{
@@ -9623,7 +10436,25 @@ function Update-LiveTransferActivity {
                 })
             }
         }
-    } catch { }
+    } catch { $mountCacheOwnershipKnown = $false }
+
+    # Legacy single-provider mounts are not represented in Get-CloudAccounts.
+    # Include their live roots too, and fail closed if an active root is unknown.
+    $accountProviders = @($accounts | ForEach-Object { ([string]$_.ProviderId).ToLowerInvariant() })
+    foreach ($legacyProvider in @('gdrive', 'terabox')) {
+        if ($accountProviders -contains $legacyProvider) { continue }
+        try {
+            $legacyVfs = Get-VirtualDriveVfsStats -ProviderId $legacyProvider
+            if ($legacyVfs.IsActive -and $legacyVfs.DiskCachePath) {
+                if (-not $mountedCachePaths.Contains([string]$legacyVfs.DiskCachePath)) { $mountedCachePaths.Add([string]$legacyVfs.DiskCachePath) }
+            } elseif ($legacyVfs.IsActive) {
+                $mountCacheOwnershipKnown = $false
+            } elseif ([string]$legacyVfs.State -eq 'Remote state unknown') {
+                $legacyStatus = Get-VirtualDriveStatus -ProviderId $legacyProvider
+                if ($legacyStatus.IsMounted -or $legacyStatus.ProcessRunning) { $mountCacheOwnershipKnown = $false }
+            }
+        } catch { $mountCacheOwnershipKnown = $false }
+    }
 
     $pendingVfsFiles = @()
     $pendingQueueItems = @()
@@ -9650,23 +10481,81 @@ function Update-LiveTransferActivity {
         $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
     })
 
-    # Throttle cache directory scan to 30s to keep the UI thread completely fluid
-    if (-not $script:LastPendingVfsScanUtc -or ([DateTime]::UtcNow - $script:LastPendingVfsScanUtc).TotalSeconds -ge 30.0) {
-        $script:LastPendingVfsScanUtc = [DateTime]::UtcNow
+    # Complete background scans and apply queue mutations in this queue-owning
+    # runspace. Recursive disk I/O stays off the UI thread; remote inventory is
+    # deferred to the transfer scheduler, which batches by destination folder.
+    $scanCompleted = Complete-PendingVfsRecoveryScanWorker
+    if ($scanCompleted) {
         try {
-            if (Get-Command Get-VirtualDrivePendingUploads -ErrorAction SilentlyContinue) {
-                $activeCachePaths = @($mountedCachePaths | Where-Object { $_ })
-                $script:CachedPendingVfsFiles = @(Get-VirtualDrivePendingUploads -CacheDirectory $script:CacheDirectory -ActiveCachePaths $activeCachePaths)
+            $refreshedQueue = Get-CloudTransferQueue
+            $rawQueue = if ($refreshedQueue -is [array] -and $refreshedQueue.Count -gt 0 -and $refreshedQueue[0] -is [array]) {
+                @($refreshedQueue[0])
+            } elseif ($null -ne $refreshedQueue) {
+                @($refreshedQueue)
+            } else {
+                @()
             }
-        } catch { $vfsScanUnavailable = $true }
+            $pendingQueueItems = @($rawQueue | Where-Object {
+                $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
+                $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
+            })
+        } catch { $queueScanUnavailable = $true }
     }
-    $pendingVfsFiles = if ($script:CachedPendingVfsFiles) { $script:CachedPendingVfsFiles } else { @() }
+    $linkedCacheJobs = Complete-SelectedStagedCacheLinkWorker
+    if ($linkedCacheJobs -gt 0) {
+        try {
+            $linkedQueue = Get-CloudTransferQueue
+            $rawQueue = if ($linkedQueue -is [array] -and $linkedQueue.Count -gt 0 -and $linkedQueue[0] -is [array]) { @($linkedQueue[0]) } elseif ($null -ne $linkedQueue) { @($linkedQueue) } else { @() }
+            $pendingQueueItems = @($rawQueue | Where-Object {
+                $null -ne $_ -and ($_ -is [System.Collections.IDictionary]) -and $_.ContainsKey('Status') -and
+                $_['Status'] -in @('Queued', 'Uploading', 'Staging', 'Waiting for network/provider', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')
+            })
+        } catch { $queueScanUnavailable = $true }
+    }
+    [void](Start-SelectedStagedCacheLinkWorker -Candidates $script:CachedPendingVfsFiles)
+    $untrackedStagedFiles = @($script:CachedPendingVfsFiles | Where-Object { [bool](Get-SafeProperty $_ 'IsOutsideActiveCache' $false) })
 
-    # Uncompleted staged files are automatically reconciled and transferred in background without spamming balloon tips
+    # Orphaned dirty cache files are not an upload manifest. The scanner is
+    # informational only; the user must re-drop original files to create durable
+    # jobs. Those jobs can resume after restart and perform exact remote checks.
+    $script:PendingVfsRecoveryCandidates = @()
+
+    # Scan after startup mount ownership is resolved. Active-root entries remain
+    # owned by rclone; orphan entries are review-only and never auto-adopted.
+    if (-not $script:PendingVfsRecoveryScanWorker -and $script:PendingVfsRecoveryCandidates.Count -eq 0 -and
+        ([DateTime]::UtcNow - $script:LastPendingVfsScanUtc).TotalSeconds -ge 30.0) {
+        $activeCachePaths = @($mountedCachePaths | Where-Object { $_ })
+        [void](Start-PendingVfsRecoveryScanWorker -ActiveCachePaths $activeCachePaths -ActiveCacheOwnershipKnown:$mountCacheOwnershipKnown)
+    }
+    # Keep empty and single-item snapshots as arrays. Under strict mode an empty
+    # conditional result becomes $null, while a one-item result becomes scalar;
+    # both break the collection count/index operations below during dispatcher ticks.
+    $pendingVfsFiles = @($script:CachedPendingVfsFiles)
+    $vfsScanUnavailable = ($script:PendingVfsRecoveryScanFailed -or -not $script:PendingVfsScanHasSnapshot)
+
+    # Active dirty files belong to rclone. Orphaned entries are review-only because
+    # the cache does not retain the user's original file selection.
     $pendingSummary = if (Get-Command Get-CloudTransferPendingSummary -ErrorAction SilentlyContinue) {
-        Get-CloudTransferPendingSummary -QueueItems $rawQueue -StagedFiles $pendingVfsFiles
+        Get-CloudTransferPendingSummary -QueueItems $rawQueue -StagedFiles $pendingVfsFiles -RequireSelectionForOrphanedStaging
     } else {
-        [ordered]@{ PendingCount = $pendingQueueItems.Count + $pendingVfsFiles.Count; FailedCount = 0; ConflictCount = 0; NeedsReviewCount = 0 }
+        [ordered]@{ PendingCount = $pendingQueueItems.Count + $pendingVfsFiles.Count; FailedCount = 0; ConflictCount = 0; NeedsReviewCount = 0; UntrackedStagedCount = 0 }
+    }
+    $untrackedStagedCount = [int](Get-SafeProperty $pendingSummary 'UntrackedStagedCount' 0)
+    if ($scanCompleted -and $untrackedStagedCount -gt 0) {
+        $pendingFingerprint = ($untrackedStagedFiles | ForEach-Object { "$($_.Path):$($_.Length):$($_.LastWriteTimeUtc)" } | Sort-Object) -join ';'
+        if ($pendingFingerprint -and $pendingFingerprint -ne $script:LastNotifiedPendingFingerprint) {
+            $script:LastNotifiedPendingFingerprint = $pendingFingerprint
+            $notifySync = if ($script:Settings.Contains('NotifyOnBackgroundSync')) { [bool]$script:Settings.NotifyOnBackgroundSync } else { $true }
+            if ($script:Settings.EnableNotifications -and $notifySync -and
+                -not (Test-NotificationsSnoozed $script:Settings) -and $notifyIcon) {
+                $msg = "Found $untrackedStagedCount untracked staged cache file(s) from an older session. Re-drop the original files to resume; these entries were kept for review."
+                $notifyIcon.ShowBalloonTip(6000, 'NS Cloud Drive - Files Need Review', $msg, [System.Windows.Forms.ToolTipIcon]::Warning)
+            }
+            try {
+                Write-NSCloudLog -Severity 'Warning' -Operation 'staged-vfs-recovery' `
+                    -Message "Found $untrackedStagedCount orphaned staged cache file(s); automatic upload was withheld because the original selection is unknown. Re-drop the source files to create durable jobs."
+            } catch { }
+        }
     }
     $stateUnavailable = ([bool]$script:TransferQueueStateUnavailable -or $queueScanUnavailable -or $vfsScanUnavailable)
     $pendingCount = if ($stateUnavailable) { -1 } else { [int]$pendingSummary.PendingCount }
@@ -9691,8 +10580,8 @@ function Update-LiveTransferActivity {
     }
 
     # rclone can only act on staged files that sit inside a live cache root. Files left in
-    # a superseded root are owned by the durable queue after adoption, so a mount refresh
-    # can never clear them and must not be retried forever.
+    # a superseded root are review-only until an explicit selection matches them; never
+    # refresh the mount as though rclone could upload an unlinked orphan.
     $rcloneActionableStaged = @($pendingVfsFiles | Where-Object { -not [bool](Get-SafeProperty $_ 'IsOutsideActiveCache' $false) })
 
     # Queue stall detection & recovery: if pending staged files exist, but rclone is idle across multiple cycles
@@ -10234,6 +11123,8 @@ function Update-LiveTransferActivity {
                 } else {
                     'Staged-file state could not be scanned; total pending count is unknown while recoverable data is checked.'
                 }
+            } elseif ($pendingCount -eq 0 -and $untrackedStagedCount -gt 0) {
+                "Found $untrackedStagedCount untracked cache file(s). Re-drop the original selection to resume; no upload was started."
             } elseif ($pendingCount -eq 0) {
                 'Transfers need attention before completion can be confirmed.'
             } else {
@@ -10242,8 +11133,12 @@ function Update-LiveTransferActivity {
             if ([int]$pendingSummary.FailedCount -gt 0) {
                 $statusPending += " ($($pendingSummary.FailedCount) need attention)"
             }
-            if ([int]$pendingSummary.NeedsReviewCount -gt 0) {
-                $statusPending += " ($($pendingSummary.NeedsReviewCount) staged item(s) need review)"
+            if ($untrackedStagedCount -gt 0 -and $pendingCount -gt 0) {
+                $statusPending += " ($untrackedStagedCount untracked cache item(s) held for review)"
+            }
+            $otherReviewCount = [Math]::Max(0, [int]$pendingSummary.NeedsReviewCount - $untrackedStagedCount)
+            if ($otherReviewCount -gt 0) {
+                $statusPending += " ($otherReviewCount staged item(s) need review)"
             }
 
             $providerName = 'Cloud Storage'
@@ -10293,9 +11188,9 @@ function Update-LiveTransferActivity {
                 $analyticsTransferRoute.Text = $analyticsRouteText
                 $analyticsTransferFileName.Text = $statusPending
                 $analyticsTransferProgressBar.Value = 0.0
-                $analyticsTransferProgressBar.IsIndeterminate = $true
+                $analyticsTransferProgressBar.IsIndeterminate = ($pendingCount -gt 0 -or $stateUnavailable)
                 $analyticsTransferDetails.Text = $statusPending
-                $analyticsTransferEta.Text = "Syncing..."
+                $analyticsTransferEta.Text = if ($pendingCount -gt 0 -or $stateUnavailable) { 'Syncing...' } else { 'No transfer started; re-drop the selected source files to create durable jobs.' }
                 $analyticsTransferPauseBtn.IsEnabled = $false
                 $analyticsTransferCancelBtn.IsEnabled = $false
                 $analyticsTransferQueueStack.Children.Clear()
@@ -10304,9 +11199,9 @@ function Update-LiveTransferActivity {
             $liveTransferFileName.Text = $statusPending
             $liveTransferRoute.Text = $routeText
             $liveTransferProgressBar.Value = 0.0
-            $liveTransferProgressBar.IsIndeterminate = $true
+            $liveTransferProgressBar.IsIndeterminate = ($pendingCount -gt 0 -or $stateUnavailable)
             $liveTransferDetails.Text = $statusPending
-            $liveTransferEta.Text = "Syncing..."
+            $liveTransferEta.Text = if ($pendingCount -gt 0 -or $stateUnavailable) { 'Syncing...' } else { 'No transfer started; re-drop the selected source files to create durable jobs.' }
             # Coordinate the pause/resume button with actual state in the pending-but-idle
             # branch. Without this, the button retains a stale "Resume" label from a prior
             # active-transfer cycle while the card says "Syncing...", which misleads the user
@@ -10415,6 +11310,31 @@ $timer.Add_Tick({
         } catch { }
     }
 
+    [void](Complete-CacheStatisticsWorker)
+    [void](Complete-AnalyticsPendingUploadWorker)
+    if ($script:OptionsCacheCleanupWorker -and
+        (Test-NSBackgroundOperationCompleted $script:OptionsCacheCleanupWorker)) {
+        $cleanupWorker = $script:OptionsCacheCleanupWorker
+        $script:OptionsCacheCleanupWorker = $null
+        if ($script:OptionsCacheCleanupButton) { $script:OptionsCacheCleanupButton.IsEnabled = $true }
+        $script:OptionsCacheCleanupButton = $null
+        try {
+            $cleanupResult = Complete-CacheUiOperation -Worker $cleanupWorker
+            if ([bool](Get-SafeProperty $cleanupResult 'Success' $false)) {
+                $cleanedBytes = [int64](Get-SafeProperty $cleanupResult 'CleanedBytes' 0L)
+                $cleanedFiles = [int](Get-SafeProperty $cleanupResult 'CleanedFiles' 0)
+                $skippedInUse = [int](Get-SafeProperty $cleanupResult 'SkippedInUseCount' 0)
+                $skippedStaged = [int](Get-SafeProperty $cleanupResult 'SkippedStagedCount' 0)
+                Update-CacheUsageDisplay -Refresh
+                $cacheUsageLabel.Text = "Cleaned $([Math]::Round(($cleanedBytes / 1MB), 1)) MB ($cleanedFiles files). $skippedInUse in-use and $skippedStaged active, dirty, or unverified VFS files were preserved."
+            } else {
+                $cacheUsageLabel.Text = 'Cache cleanup could not finish safely; refresh cache status to retry.'
+            }
+        } catch {
+            $cacheUsageLabel.Text = 'Cache cleanup could not finish safely; refresh cache status to retry.'
+        }
+    }
+
     $isVisible = ($window.IsVisible -and $window.WindowState -ne [System.Windows.WindowState]::Minimized)
     if (-not $isVisible) {
         # Low-RAM background optimization: throttle ticks to 5s intervals when hidden/minimized
@@ -10423,11 +11343,8 @@ $timer.Add_Tick({
             if ($script:BackgroundTickCount -eq 1 -and (Get-Command Invoke-AdaptiveBandwidthCheck -ErrorAction SilentlyContinue)) {
                 Invoke-AdaptiveBandwidthCheck | Out-Null
             }
-            if ($script:BackgroundTickCount -eq 2 -and (Get-Command Invoke-PostTransferCacheCleanup -ErrorAction SilentlyContinue)) {
-                Invoke-PostTransferCacheCleanup | Out-Null
-            }
-            if ($script:BackgroundTickCount -eq 3 -and (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue)) {
-                try { Process-CloudTransferQueue | Out-Null } catch { }
+            if ($script:BackgroundTickCount -eq 3 -and (Get-Command Request-CloudTransferQueueProcessing -ErrorAction SilentlyContinue)) {
+                try { Request-CloudTransferQueueProcessing | Out-Null } catch { }
             }
             return
         }
@@ -10440,10 +11357,10 @@ $timer.Add_Tick({
         }
     } catch { }
 
-    if ($hasPendingJobs -and (Get-Command Process-CloudTransferQueue -ErrorAction SilentlyContinue)) {
+    if ($hasPendingJobs -and (Get-Command Request-CloudTransferQueueProcessing -ErrorAction SilentlyContinue)) {
         if (([DateTime]::UtcNow - $script:LastTransferQueueProcess).TotalSeconds -ge 3.0) {
             $script:LastTransferQueueProcess = [DateTime]::UtcNow
-            try { Process-CloudTransferQueue | Out-Null } catch { }
+            try { Request-CloudTransferQueueProcessing | Out-Null } catch { }
         }
     }
 
@@ -10493,12 +11410,11 @@ $timer.Add_Tick({
         }
     }
 
-    # Periodic safe cache inactivity eviction (runs at most once every 60 seconds)
+    # Periodic safe cache inactivity eviction. The recursive cache scan and mount
+    # ownership checks can touch thousands of entries, so keep them off the UI thread.
     if (([DateTime]::UtcNow - $script:LastInactivityCacheCheck).TotalSeconds -ge 60) {
         $script:LastInactivityCacheCheck = [DateTime]::UtcNow
-        try {
-            Invoke-InactivityCacheEviction -CacheDirectory $script:CacheDirectory | Out-Null
-        } catch { }
+        [void](Start-InactivityCacheEvictionWorker)
     }
 })
 $timer.Start()
