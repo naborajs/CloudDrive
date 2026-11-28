@@ -45,6 +45,8 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-TransferBandwidthAndQueue.ps1'),
     (Join-Path $PSScriptRoot 'Test-TransferRecoveryAndProgression.ps1'),
     (Join-Path $PSScriptRoot 'Test-CacheManagement.ps1'),
+    (Join-Path $PSScriptRoot 'Test-CacheUiOperationManager.ps1'),
+    (Join-Path $PSScriptRoot 'Test-StagedCacheCleanupWorker.ps1'),
     (Join-Path $PSScriptRoot 'Test-MountIsolationAndAnalyticsDormancy.ps1'),
     (Join-Path $PSScriptRoot 'Test-StartupBehavior.ps1'),
     (Join-Path $PSScriptRoot 'Test-EndToEndAcceptance.ps1'),
@@ -54,6 +56,7 @@ $testScripts = @(
     (Join-Path $PSScriptRoot 'Test-StagedVfsQueueAdoption.ps1'),
     (Join-Path $PSScriptRoot 'Test-TransferAdoptionToWorkerE2E.ps1'),
     (Join-Path $PSScriptRoot 'Test-TransferDirectionAndIdentity.ps1'),
+    (Join-Path $PSScriptRoot 'Test-MountOwnershipSafety.ps1'),
     (Join-Path $PSScriptRoot 'Test-OrderedDictionaryAccountTransfer.ps1'),
     (Join-Path $PSScriptRoot 'Test-EmptyPendingUploadsSummary.ps1'),
     (Join-Path $PSScriptRoot '..\scripts\Test-RcloneConfigPassword.ps1')
