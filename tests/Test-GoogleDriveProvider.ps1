@@ -37,8 +37,9 @@ Write-Output '  [PASS] Rclone helper stdout/stderr draining and bounded timeout 
 
 # All providers receive WinFsp ThreadCount=64 dispatcher capacity to prevent
 # Explorer and Windows Photos RPC timeouts and crashes.
-$googleMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive_personal' -DriveLetter 'G' -ConfigPath ''
-$teraBoxMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath ''
+$mountArgsCacheDirectory = Join-Path $env:TEMP ('gdrive-provider-mount-args-' + [Guid]::NewGuid().ToString('N'))
+$googleMountArgs = Build-RcloneMountArguments -RemoteName 'gdrive_personal' -DriveLetter 'G' -ConfigPath '' -CacheDirectory $mountArgsCacheDirectory
+$teraBoxMountArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ConfigPath '' -CacheDirectory $mountArgsCacheDirectory
 if ($googleMountArgs -notcontains '--fuse-flag' -or $googleMountArgs -notcontains '--ThreadCount=64') {
     throw 'Google Drive mount arguments must pass the WinFsp ThreadCount flag.'
 }
