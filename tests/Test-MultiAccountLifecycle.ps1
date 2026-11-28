@@ -248,15 +248,15 @@ try {
     # 4. ReadOnly mount chain and false-success prevention (structural + local
     #    builder checks; nothing is launched).
     # --------------------------------------------------------------------------
-    $builderArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'X' -ReadOnly
+    $builderArgs = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'X' -CacheDirectory $env:TEMP -ReadOnly
     if ($builderArgs -notcontains '--read-only') {
         throw 'Build-RcloneMountArguments ignores the ReadOnly switch.'
     }
-    $builderArgsRw = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'Y'
+    $builderArgsRw = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'Y' -CacheDirectory $env:TEMP
     if ($builderArgsRw -contains '--read-only') {
         throw 'Build-RcloneMountArguments added --read-only to a read-write mount.'
     }
-    $builderArgsWithAccountCache = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'Y' -CacheMaxGigabytes 7
+    $builderArgsWithAccountCache = Build-RcloneMountArguments -RemoteName 'gdrive' -DriveLetter 'Y' -CacheDirectory $env:TEMP -CacheMaxGigabytes 7
     $cacheLimitIndex = $builderArgsWithAccountCache.IndexOf('--vfs-cache-max-size')
     if ($cacheLimitIndex -lt 0 -or $builderArgsWithAccountCache[$cacheLimitIndex + 1] -ne '7G') {
         throw 'Build-RcloneMountArguments did not apply the selected account''s VFS cache limit.'
