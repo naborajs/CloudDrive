@@ -9,6 +9,11 @@ Write-Output 'Testing Backend Correctness, Cache Inactivity TTL, Cancellation & 
 . (Join-Path $PSScriptRoot '..\src\services\VirtualDriveManager.ps1')
 . (Join-Path $PSScriptRoot '..\src\services\CloudTransferManager.ps1')
 
+# Keep the TTL fixture independent of the developer machine's saved retention
+# preference. This suite explicitly verifies the five-minute remove-after-confirmation policy.
+$script:CacheTestSettings = @{ PostTransferCachePolicy = 'RemoveAfterVerifiedUpload'; PostTransferRetentionMinutes = 60; CacheDirectory = '' }
+function Get-NSCloudDriveSettings { return $script:CacheTestSettings }
+
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('backend_test_' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
@@ -181,9 +186,15 @@ try {
     [System.IO.File]::SetLastAccessTimeUtc($fileLocked, $now.AddMinutes(-60))
     @{ ModTime = $now.AddMinutes(-60).ToString('o'); Size = 50; Dirty = $false } | ConvertTo-Json | Set-Content -LiteralPath $metaLocked -Encoding UTF8
     $lockStream = [System.IO.File]::Open($fileLocked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    $originalCacheAccounts = (Get-Command Get-CloudAccounts).ScriptBlock
+    $originalCacheVfsStats = (Get-Command Get-VirtualDriveVfsStats).ScriptBlock
+    $originalCacheDriveStatus = (Get-Command Get-VirtualDriveStatus).ScriptBlock
 
     try {
-        $evictRes = Invoke-InactivityCacheEviction -CacheDirectory $ttlRoot
+        Set-Item -Path Function:\Get-CloudAccounts -Value { return @() }
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value { param([string]$DriveLetter = '', [string]$AccountId = '', [string]$ProviderId = '') return @{ IsActive = $false; State = 'Unmounted'; DiskCachePath = '' } }
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value { param([string]$DriveLetter = '', [string]$AccountId = '', [string]$ProviderId = '') return @{ IsMounted = $false; ProcessRunning = $false } }
+        $evictRes = Invoke-InactivityCacheEviction -CacheDirectory $ttlRoot -ActiveCacheOwnershipKnown
         
         if ($evictRes.EvictedFiles -ne 1) {
             throw "Expected 1 evicted file (small_old.bin), got: $($evictRes.EvictedFiles)"
@@ -210,6 +221,9 @@ try {
             throw "In-use locked file was destroyed by inactivity eviction!"
         }
     } finally {
+        Set-Item -Path Function:\Get-CloudAccounts -Value $originalCacheAccounts
+        Set-Item -Path Function:\Get-VirtualDriveVfsStats -Value $originalCacheVfsStats
+        Set-Item -Path Function:\Get-VirtualDriveStatus -Value $originalCacheDriveStatus
         $lockStream.Close()
         $lockStream.Dispose()
     }
