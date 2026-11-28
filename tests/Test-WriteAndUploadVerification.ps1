@@ -16,23 +16,27 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 . (Join-Path $srcDir 'providers\TeraBoxProvider.ps1')
 . (Join-Path $srcDir 'services\VirtualDriveManager.ps1')
 
+# The checks below inspect the argument vector; use a sandbox cache path rather
+# than requiring free space on the user's configured D:\CloudCache volume.
+$testCacheDirectory = Join-Path ([System.IO.Path]::GetTempPath()) 'NSCloudDriveMountArgumentTests'
+
 # ------------------------------------------------------------------------------
 # 1. Mount Arguments & Write-Protection Prevention
 # ------------------------------------------------------------------------------
-$rwArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T'
+$rwArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -CacheDirectory $testCacheDirectory
 if ($rwArgs -contains '--read-only') {
     throw 'Default mount arguments must NOT contain --read-only; write protection must be disabled.'
 }
-if ($rwArgs -notcontains '--vfs-cache-mode' -or $rwArgs -notcontains 'full') {
-    throw 'Mount arguments must include --vfs-cache-mode full to support Explorer write streams.'
+if ($rwArgs -notcontains '--vfs-cache-mode' -or $rwArgs -notcontains 'writes') {
+    throw 'Mount arguments must include --vfs-cache-mode writes to support Explorer write streams without caching ordinary reads.'
 }
 if ($rwArgs -notcontains '--vfs-write-back') {
     throw 'Mount arguments must include --vfs-write-back to ensure asynchronous flush.'
 }
-Write-Output '  [PASS] Mount arguments builder defaults to read-write with VFS full cache'
+Write-Output '  [PASS] Mount arguments builder defaults to read-write with write-only VFS cache'
 
 # Explicit read-only verification
-$roArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -ReadOnly
+$roArgs = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -CacheDirectory $testCacheDirectory -ReadOnly
 if ($roArgs -notcontains '--read-only') {
     throw 'Explicit -ReadOnly switch must include --read-only in mount arguments.'
 }
