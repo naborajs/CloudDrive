@@ -12,7 +12,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\providers\S3Provider.ps1')
 
 $script:DefaultDriveLetter = 'T'
-$script:DefaultCacheDirectory = 'D:\CloudCache'
+$script:DefaultCacheDirectory = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+    $cacheHome = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+    Join-Path $cacheHome 'CloudCache'
+} else {
+    'D:\CloudCache'
+}
 $script:ActiveMountProcesses = @{}
 $script:ProviderDriveMapping = @{}
 $script:MountProcess = $null
@@ -284,7 +289,13 @@ function Test-DriveLetterAvailable([string]$DriveLetter) {
     return (-not $used)
 }
 
-function Get-VirtualDriveRcPort([string]$DriveLetter) {
+function Get-VirtualDriveRcPort([string]$DriveLetter, [string]$AccountId = '', [string]$ProviderId = '') {
+    if ($AccountId -or $ProviderId) {
+        $mountKey = if ($AccountId) { $AccountId } else { $ProviderId }
+        $mountProcess = Find-ActiveMountProcess -DriveLetter $DriveLetter -MountKey $mountKey
+        if (-not $mountProcess -or [bool]$mountProcess.OwnershipUnknown -or [int]$mountProcess.RcPort -lt 1) { return 0 }
+        return [int]$mountProcess.RcPort
+    }
     if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return 5580 }
     $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
     if ($letter.Length -ne 1) { return 5580 }
@@ -420,29 +431,212 @@ function Test-MountProcessOwnership([string]$CommandLine, [string]$DriveLetter, 
     return ($CommandLine -match $targetPattern) -and ($CommandLine -match $logPattern)
 }
 
-function Find-ActiveMountProcess([string]$DriveLetter = '', [string]$MountKey = '') {
-    if ([string]::IsNullOrWhiteSpace($DriveLetter)) { return $null }
+function Get-VirtualDriveMountProcessSnapshot {
+    if (Test-IsLinuxOperatingSystem) {
+        $snapshots = [System.Collections.Generic.List[object]]::new()
+        $allInspectable = $true
+        try {
+            $rcloneProcesses = [System.Diagnostics.Process]::GetProcessesByName('rclone')
+        } catch {
+            return @{ Known = $false; Processes = @() }
+        }
+
+        foreach ($process in @($rcloneProcesses)) {
+            try {
+                $processId = [int]$process.Id
+                $commandLinePath = "/proc/$processId/cmdline"
+                $commandLineBytes = [System.IO.File]::ReadAllBytes($commandLinePath)
+                if ($commandLineBytes.Length -eq 0) {
+                    throw 'The process command line is empty.'
+                }
+
+                $commandLineText = [System.Text.Encoding]::UTF8.GetString($commandLineBytes)
+                $arguments = @($commandLineText.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries))
+                if ($arguments.Count -eq 0) {
+                    throw 'The process command line could not be parsed.'
+                }
+
+                $snapshots.Add([ordered]@{
+                    ProcessId = $processId
+                    Arguments = $arguments
+                    CommandLine = ($arguments -join ' ')
+                    Inspectable = $true
+                })
+            } catch {
+                $processExited = $false
+                try { $processExited = [bool]$process.HasExited } catch { }
+                if (-not $processExited) { $allInspectable = $false }
+            } finally {
+                try { $process.Dispose() } catch { }
+            }
+        }
+
+        return @{ Known = $allInspectable; Processes = $snapshots.ToArray() }
+    }
 
     try {
-        $procs = Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction SilentlyContinue
-        if ($procs) {
-            foreach ($p in $procs) {
-                $ownsMount = if ($MountKey) {
-                    Test-MountProcessOwnership -CommandLine ([string]$p.CommandLine) -DriveLetter $DriveLetter -MountKey $MountKey
-                } else {
-                    $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
-                    $targetPattern = "(?i)\bmount\b.*\s+[`"']?${letter}:\\?[`"']?(\s+|$)"
-                    [bool]($p.CommandLine -and ($p.CommandLine -match $targetPattern))
+        $rcloneProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'rclone.exe'" -ErrorAction Stop)
+        $snapshots = [System.Collections.Generic.List[object]]::new()
+        foreach ($process in $rcloneProcesses) {
+            $commandLine = [string]$process.CommandLine
+            if ([string]::IsNullOrWhiteSpace($commandLine)) {
+                return @{ Known = $false; Processes = $snapshots.ToArray() }
+            }
+            $snapshots.Add([ordered]@{
+                ProcessId = [int]$process.ProcessId
+                CommandLine = $commandLine
+                Inspectable = $true
+            })
+        }
+        return @{ Known = $true; Processes = $snapshots.ToArray() }
+    } catch {
+        return @{ Known = $false; Processes = @() }
+    }
+}
+
+function Get-LinuxRcloneMountProcessEvidence {
+    [CmdletBinding()]
+    param(
+        [object[]]$ProcessSnapshots = @(),
+        [string]$MountKey = '',
+        [bool]$EnumerationSucceeded = $true
+    )
+
+    $unknown = @{ Known = $false; IsActive = $false; ProcessId = 0; IsReadOnly = $false; RcPort = 0 }
+    if (-not $EnumerationSucceeded) { return $unknown }
+
+    $matchedProcesses = [System.Collections.Generic.List[object]]::new()
+    foreach ($process in @($ProcessSnapshots)) {
+        if ($null -eq $process -or -not [bool]$process.Inspectable) { return $unknown }
+        $arguments = @($process.Arguments)
+        if ($arguments.Count -eq 0) { return $unknown }
+
+        $mountCommandFound = $false
+        foreach ($argument in $arguments) {
+            if ([string]::Equals([string]$argument, 'mount', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $mountCommandFound = $true
+                break
+            }
+        }
+        if (-not $mountCommandFound) { continue }
+
+        $hasMatchingIdentity = [string]::IsNullOrWhiteSpace($MountKey)
+        if (-not $hasMatchingIdentity) {
+            $expectedLog = "rclone-$MountKey.log"
+            $expectedConfig = "mount-$MountKey.conf"
+            for ($argumentIndex = 0; $argumentIndex -lt $arguments.Count; $argumentIndex++) {
+                $argument = [string]$arguments[$argumentIndex]
+                $value = ''
+                if ($argument -in @('--log-file', '--config') -and ($argumentIndex + 1) -lt $arguments.Count) {
+                    $value = [string]$arguments[$argumentIndex + 1]
+                } elseif ($argument -match '^(?:--log-file|--config)=(.*)$') {
+                    $value = [string]$Matches[1]
                 }
-                if ($ownsMount) {
-                    return [ordered]@{
-                        ProcessId = [int]$p.ProcessId
-                        IsReadOnly = ($p.CommandLine -match '--read-only')
-                    }
+                if (-not $value) { continue }
+                $leaf = @($value -split '[\\/]')[-1]
+                if ([string]::Equals($leaf, $expectedLog, [System.StringComparison]::Ordinal) -or
+                    [string]::Equals($leaf, $expectedConfig, [System.StringComparison]::Ordinal)) {
+                    $hasMatchingIdentity = $true
+                    break
                 }
             }
         }
-    } catch { }
+        if (-not $hasMatchingIdentity) { continue }
+
+        $rcPort = 0
+        for ($argumentIndex = 0; $argumentIndex -lt $arguments.Count; $argumentIndex++) {
+            $argument = [string]$arguments[$argumentIndex]
+            $rcAddress = ''
+            if ($argument -eq '--rc-addr' -and ($argumentIndex + 1) -lt $arguments.Count) {
+                $rcAddress = [string]$arguments[$argumentIndex + 1]
+            } elseif ($argument -match '^--rc-addr=(.+)$') {
+                $rcAddress = [string]$Matches[1]
+            }
+            if ($rcAddress -match ':(?<port>[0-9]{1,5})$') {
+                $parsedPort = 0
+                if ([int]::TryParse($Matches['port'], [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
+                    $rcPort = $parsedPort
+                }
+            }
+        }
+
+        $isReadOnly = $arguments -contains '--read-only'
+        $processId = 0
+        if (-not [int]::TryParse([string]$process.ProcessId, [ref]$processId)) { return $unknown }
+        $matchedProcesses.Add([object]@{ ProcessId = $processId; IsReadOnly = $isReadOnly; RcPort = $rcPort })
+    }
+
+    if ($matchedProcesses.Count -gt 1) { return $unknown }
+    if ($matchedProcesses.Count -eq 0) {
+        return @{ Known = $true; IsActive = $false; ProcessId = 0; IsReadOnly = $false; RcPort = 0 }
+    }
+
+    return @{
+        Known = $true
+        IsActive = $true
+        ProcessId = [int]$matchedProcesses[0].ProcessId
+        IsReadOnly = [bool]$matchedProcesses[0].IsReadOnly
+        RcPort = [int]$matchedProcesses[0].RcPort
+    }
+}
+
+function Find-ActiveMountProcess([string]$DriveLetter = '', [string]$MountKey = '') {
+    if ([string]::IsNullOrWhiteSpace($DriveLetter) -and [string]::IsNullOrWhiteSpace($MountKey)) { return $null }
+
+    $snapshot = Get-VirtualDriveMountProcessSnapshot
+    if (-not [bool]$snapshot.Known) {
+        return @{ ProcessId = 0; IsReadOnly = $false; RcPort = 0; OwnershipUnknown = $true }
+    }
+
+    if (Test-IsLinuxOperatingSystem) {
+        $evidence = Get-LinuxRcloneMountProcessEvidence `
+            -ProcessSnapshots @($snapshot.Processes) `
+            -MountKey $MountKey `
+            -EnumerationSucceeded ([bool]$snapshot.Known)
+        if (-not [bool]$evidence.Known) {
+            return @{ ProcessId = 0; IsReadOnly = $false; RcPort = 0; OwnershipUnknown = $true }
+        }
+        if (-not [bool]$evidence.IsActive) { return $null }
+        if ([string]::IsNullOrWhiteSpace($MountKey)) {
+            return @{ ProcessId = [int]$evidence.ProcessId; IsReadOnly = [bool]$evidence.IsReadOnly; RcPort = [int]$evidence.RcPort; OwnershipUnknown = $true }
+        }
+        return @{ ProcessId = [int]$evidence.ProcessId; IsReadOnly = [bool]$evidence.IsReadOnly; RcPort = [int]$evidence.RcPort; OwnershipUnknown = $false }
+    }
+
+    $matchedProcesses = [System.Collections.Generic.List[object]]::new()
+    foreach ($process in @($snapshot.Processes)) {
+        $commandLine = [string]$process.CommandLine
+        $ownsMount = if ($MountKey -and $DriveLetter) {
+            Test-MountProcessOwnership -CommandLine $commandLine -DriveLetter $DriveLetter -MountKey $MountKey
+        } elseif ($MountKey) {
+            $commandLine -match '(?i)(?:^|[\\/"\s])rclone-' + [regex]::Escape($MountKey) + '\.log(?:["\s]|$)'
+        } else {
+            $letter = $DriveLetter.ToUpperInvariant().TrimEnd(':').TrimEnd('\')
+            $targetPattern = "(?i)\bmount\b.*\s+[`"']?${letter}:\\?[`"']?(\s+|$)"
+            [bool]($commandLine -and ($commandLine -match $targetPattern))
+        }
+        if (-not $ownsMount) { continue }
+
+        $rcPort = 0
+        if ($commandLine -match '(?i)--rc-addr(?:=|\s+)"?[^:\s"]+:(?<port>[0-9]{1,5})') {
+            $parsedPort = 0
+            if ([int]::TryParse($Matches['port'], [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
+                $rcPort = $parsedPort
+            }
+        }
+        $matchedProcesses.Add([object]@{
+            ProcessId = [int]$process.ProcessId
+            IsReadOnly = ($commandLine -match '(?i)(?:^|\s)--read-only(?:\s|$)')
+            RcPort = $rcPort
+        })
+    }
+
+    if ($matchedProcesses.Count -gt 1) {
+        return @{ ProcessId = 0; IsReadOnly = $false; RcPort = 0; OwnershipUnknown = $true }
+    }
+    if ($matchedProcesses.Count -eq 1) {
+        return @{ ProcessId = [int]$matchedProcesses[0].ProcessId; IsReadOnly = [bool]$matchedProcesses[0].IsReadOnly; RcPort = [int]$matchedProcesses[0].RcPort; OwnershipUnknown = $false }
+    }
     return $null
 }
 
@@ -488,8 +682,20 @@ function Get-VirtualDriveStatus(
         $letter = $script:DefaultDriveLetter
     }
 
-    $driveRoot = "$letter`:\"
-    $driveInfo = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -eq $driveRoot }
+    $onLinux = Test-IsLinuxOperatingSystem
+    if ($onLinux) {
+        $driveRoot = if (Get-Command Resolve-ProviderMountPoint -ErrorAction SilentlyContinue) {
+            Resolve-ProviderMountPoint -ProviderId $ProviderId -AccountId $AccountId -DriveLetter $DriveLetter
+        } else {
+            $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+            $mountKeyForPath = if ($AccountId) { $AccountId } elseif ($ProviderId) { $ProviderId } else { $letter }
+            Join-Path (Join-Path $homeDir 'CloudDrives') ($mountKeyForPath -replace '[^a-zA-Z0-9_\-]', '_')
+        }
+        $driveInfo = $null
+    } else {
+        $driveRoot = "$letter`:\"
+        $driveInfo = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.Name -eq $driveRoot }
+    }
 
     $activeProc = if ($mountKey) {
         Find-ActiveMountProcess -DriveLetter $letter -MountKey $mountKey
@@ -512,6 +718,26 @@ function Get-VirtualDriveStatus(
         if ($p -and (-not $p.HasExited)) {
             $processAlive = $true
             $procId = $p.Id
+        }
+    }
+
+    if ($onLinux) {
+        $ownershipUnknown = [bool]($activeProc -and $activeProc.OwnershipUnknown)
+        return [ordered]@{
+            IsMounted = [bool]($processAlive -and -not $ownershipUnknown)
+            ProviderId = $ProviderId
+            AccountId = $AccountId
+            DriveLetter = $letter
+            DriveRoot = $driveRoot
+            VolumeLabel = $null
+            Format = $null
+            FreeSpace = [int64]0
+            TotalSize = [int64]0
+            IsReadOnly = $isReadOnly
+            ProcessRunning = $processAlive
+            ProcessId = $procId
+            MountState = if ($ownershipUnknown) { 'Mount ownership unknown' } elseif ($processAlive) { 'Mounted' } else { 'Unmounted' }
+            OwnershipKnown = (-not $ownershipUnknown)
         }
     }
 
@@ -565,20 +791,37 @@ function Build-RcloneMountArguments(
     [string]$DriveLetter = $script:DefaultDriveLetter,
     [string]$VolumeLabel = '',
     [string]$CacheDirectory = $script:DefaultCacheDirectory,
-    [string]$ConfigPath = (Join-Path $env:APPDATA 'rclone\rclone.conf'),
+    [string]$ConfigPath = '',
     [string]$LogFile = '',
     [int]$CacheMaxGigabytes = 20,
     [switch]$ReadOnly = $false,
     [switch]$FixedDisk = $false,
     [int]$RcPort = 0,
     [string]$InitialBwLimit = '',
-    [string]$MountPoint = ''
+    [string]$MountPoint = '',
+    [string]$VfsCacheMaxAge = '5m'
 ) {
     if ($CacheMaxGigabytes -lt 1 -or $CacheMaxGigabytes -gt 1024) {
         throw 'The VFS cache limit must be between 1 and 1024 GB.'
     }
+    if ($VfsCacheMaxAge -notmatch '^[1-9][0-9]*(?:ms|s|m|h|d|w)$') {
+        throw 'The VFS cache max age must be a positive rclone duration (for example 5m or 72h).'
+    }
 
     $onLinux = Test-IsLinuxOperatingSystem
+    if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+        if ($onLinux) {
+            $configHome = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else {
+                $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+                Join-Path $homeDir '.config'
+            }
+            $ConfigPath = Join-Path (Join-Path $configHome 'rclone') 'rclone.conf'
+        } elseif ($env:APPDATA) {
+            $ConfigPath = Join-Path (Join-Path $env:APPDATA 'rclone') 'rclone.conf'
+        } else {
+            throw 'The rclone configuration path is unavailable because APPDATA is not defined.'
+        }
+    }
 
     $driveRoot = ''
     if ($onLinux) {
@@ -636,9 +879,12 @@ function Build-RcloneMountArguments(
     $args += @(
         '--volname', $volName,
         '--cache-dir', $safeCache,
-        '--vfs-cache-mode', 'full',
+        # Cache only writes. Full mode also writes every read/preview/stream to disk,
+        # which made ordinary browsing look like pending transfer data and filled the
+        # cache with files the user never selected for upload.
+        '--vfs-cache-mode', 'writes',
         '--vfs-cache-max-size', "${CacheMaxGigabytes}G",
-        '--vfs-cache-max-age', '72h',
+        '--vfs-cache-max-age', $VfsCacheMaxAge,
         '--vfs-cache-poll-interval', '2s',
         '--vfs-write-back', '1s',
         '--vfs-fast-fingerprint',
@@ -735,6 +981,23 @@ function Start-VirtualDriveMount(
 
     $resolvedProvider = if (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
     $mountKey = if (-not [string]::IsNullOrEmpty($AccountId)) { $AccountId } elseif (-not [string]::IsNullOrEmpty($ProviderId)) { $ProviderId } else { $RemoteName }
+
+    # Keep clean write-back data for the configured retention only. The default and
+    # "remove after verified upload" policies use a short rclone-owned cleanup age;
+    # user-selected retention is bounded before it reaches the native process.
+    $vfsCacheMaxAge = '5m'
+    try {
+        $cacheSettings = Get-NSCloudDriveSettings
+        $cachePolicy = if ($cacheSettings.PostTransferCachePolicy) { [string]$cacheSettings.PostTransferCachePolicy } else { 'RemoveAfterVerifiedUpload' }
+        if ($cachePolicy -eq 'KeepCache') {
+            $vfsCacheMaxAge = '45m'
+        } elseif ($cachePolicy -eq 'CustomRetention') {
+            $retentionMinutes = 60
+            if (-not [int]::TryParse([string]$cacheSettings.PostTransferRetentionMinutes, [ref]$retentionMinutes)) { $retentionMinutes = 60 }
+            $retentionMinutes = [Math]::Max(1, [Math]::Min(43200, $retentionMinutes))
+            $vfsCacheMaxAge = "${retentionMinutes}m"
+        }
+    } catch { }
 
     # If TeraBox is being mounted, start the local CPX WebDAV bridge on Windows or configure direct rclone backend on Linux
     if ($RemoteName -eq 'terabox' -or $resolvedProvider -eq 'terabox') {
@@ -942,7 +1205,7 @@ function Start-VirtualDriveMount(
         } catch { }
     }
     $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
-    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk -RcPort $rcPort -InitialBwLimit $InitialBwLimit
+    $mountArgs = Build-RcloneMountArguments -RemoteName $RemoteName -DriveLetter $letter -VolumeLabel $volName -CacheDirectory $providerCache -ConfigPath $mountConfigPath -LogFile $logPath -CacheMaxGigabytes $CacheMaxGigabytes -ReadOnly:$ReadOnly -FixedDisk -RcPort $rcPort -InitialBwLimit $InitialBwLimit -VfsCacheMaxAge $vfsCacheMaxAge
     # Ensure mount target is clean drive letter without trailing backslash (e.g. 'G:') for rclone/WinFsp
     # This prevents Windows command-line escaping into '"G:\\"' and avoids fallback network share caching
     $mountArgs[2] = "$letter`:"
@@ -1378,7 +1641,29 @@ function Get-CacheUsageStatistics([string]$CacheDirectory = $script:DefaultCache
         } catch { }
     }
 
-    $targetMaxBytes = [int64](20L * 1024L * 1024L * 1024L) # 20 GiB
+    # Cache limits are applied per mount, not once to the shared parent folder.
+    # Report the sum of account limits that use this base directory so the UI does
+    # not display a fictitious 20 GiB global quota.
+    $targetGigabytes = 0L
+    try {
+        $settings = Get-NSCloudDriveSettings
+        $basePath = ConvertTo-NormalizedFullPath -Path $CacheDirectory
+        $globalLimit = ConvertTo-AccountCacheMaxGigabytes -Value $settings.CacheMaxGigabytes
+        if ($globalLimit -le 0) { $globalLimit = 20 }
+        $matchingAccounts = 0
+        foreach ($account in @($settings.Accounts)) {
+            $accountBase = if ($account.CacheDirectory) { [string]$account.CacheDirectory } else { [string]$settings.CacheDirectory }
+            if ((ConvertTo-NormalizedFullPath -Path $accountBase) -ne $basePath) { continue }
+            $accountLimit = ConvertTo-AccountCacheMaxGigabytes -Value $account.CacheMaxGigabytes
+            if ($accountLimit -le 0) { $accountLimit = $globalLimit }
+            $targetGigabytes += [int64]$accountLimit
+            $matchingAccounts++
+        }
+        if ($matchingAccounts -eq 0 -or $targetGigabytes -le 0) {
+            $targetGigabytes = [int64]$globalLimit
+        }
+    } catch { $targetGigabytes = 20L }
+    $targetMaxBytes = [int64]($targetGigabytes * 1024L * 1024L * 1024L)
     $volumeFreeBytes = [int64]0
     try {
         $root = [System.IO.Path]::GetPathRoot($CacheDirectory)
@@ -1393,7 +1678,7 @@ function Get-CacheUsageStatistics([string]$CacheDirectory = $script:DefaultCache
         UsedBytes = $usedBytes
         UsedFormatted = "$([Math]::Round($usedBytes / 1GB, 2)) GiB"
         TargetMaxBytes = $targetMaxBytes
-        TargetMaxFormatted = "20.00 GiB"
+        TargetMaxFormatted = "$(([Math]::Round($targetMaxBytes / 1GB, 2)).ToString('F2', [System.Globalization.CultureInfo]::InvariantCulture)) GiB"
         VolumeFreeBytes = $volumeFreeBytes
         VolumeFreeFormatted = "$([Math]::Round($volumeFreeBytes / 1GB, 2)) GiB"
     }
@@ -1457,7 +1742,7 @@ function Get-VirtualDriveVfsStats {
         }
     }
 
-    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter
+    $rcPort = Get-VirtualDriveRcPort -DriveLetter $letter -AccountId $AccountId -ProviderId $ProviderId
 
     try {
         $vfsResp = Invoke-RestMethod -Uri "http://127.0.0.1:$rcPort/vfs/stats" -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 1 -ErrorAction Stop
@@ -1968,6 +2253,10 @@ function Sync-VirtualDriveOrphanedVfsCache {
         [switch]$CopyIntoActiveCache
     )
 
+    $isCaseSensitiveFileSystem = ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix)
+    $pathComparison = if ($isCaseSensitiveFileSystem) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    $pathComparer = if ($isCaseSensitiveFileSystem) { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+
     $results = [System.Collections.Generic.List[PSObject]]::new()
     if ([string]::IsNullOrWhiteSpace($CacheDirectory)) {
         $CacheDirectory = $script:DefaultCacheDirectory
@@ -2026,8 +2315,8 @@ function Sync-VirtualDriveOrphanedVfsCache {
             $candidateMetaPath = if ($TargetVfsMetaPath) { ConvertTo-NormalizedFullPath -Path $TargetVfsMetaPath } else { '' }
             $vfsRootPrefix = (ConvertTo-NormalizedFullPath -Path $vfsBase) + [System.IO.Path]::DirectorySeparatorChar
             $metaRootPrefix = (ConvertTo-NormalizedFullPath -Path $metaBase) + [System.IO.Path]::DirectorySeparatorChar
-            if (-not $candidateVfsPath.StartsWith($vfsRootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-                -not $candidateMetaPath.StartsWith($metaRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not $candidateVfsPath.StartsWith($vfsRootPrefix, $pathComparison) -or
+                -not $candidateMetaPath.StartsWith($metaRootPrefix, $pathComparison)) {
                 throw 'The runtime-reported VFS paths are outside the selected account cache roots; refusing to copy staged data.'
             }
             $activeVfs = $candidateVfsPath
@@ -2053,13 +2342,13 @@ function Sync-VirtualDriveOrphanedVfsCache {
                     if ($vfsStats -and $vfsStats.PSObject.Properties['IsActive'] -and $vfsStats.IsActive -eq $true) {
                         if ($vfsStats.PSObject.Properties['DiskCachePath'] -and $vfsStats.DiskCachePath) {
                             $rawPath = ConvertFrom-ExtendedLengthPath -Path ([string]$vfsStats.DiskCachePath)
-                            if ($rawPath.StartsWith($vfsBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            if ($rawPath.StartsWith($vfsBase, $pathComparison)) {
                                 $activeVfs = $rawPath.TrimEnd('\', '/')
                             }
                         }
                         if ($vfsStats.PSObject.Properties['DiskCacheMetaPath'] -and $vfsStats.DiskCacheMetaPath) {
                             $rawMeta = ConvertFrom-ExtendedLengthPath -Path ([string]$vfsStats.DiskCacheMetaPath)
-                            if ($rawMeta.StartsWith($metaBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            if ($rawMeta.StartsWith($metaBase, $pathComparison)) {
                                 $activeMeta = $rawMeta.TrimEnd('\', '/')
                             }
                         }
@@ -2102,7 +2391,7 @@ function Sync-VirtualDriveOrphanedVfsCache {
 
         foreach ($d in $allVfsDirs) {
             $normDir = ConvertTo-NormalizedFullPath -Path $d.FullName
-            if (-not $normDir.Equals($normActiveVfs, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not $normDir.Equals($normActiveVfs, $pathComparison)) {
                 $orphanDirs.Add($d)
             }
         }
@@ -2140,15 +2429,16 @@ function Sync-VirtualDriveOrphanedVfsCache {
 
         # Pre-scan paths before copying. Any path with multiple historical copies or
         # an existing active copy is ambiguous and must stay outside the mounted root.
-        $orphanPathCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $orphanPathCounts = [System.Collections.Generic.Dictionary[string, int]]::new($pathComparer)
         foreach ($scanOrphan in $sortedOrphans) {
-            $scanPrefix = $scanOrphan.FullName.TrimEnd([char]92, '/') + [char]92
+            $scanPrefix = $scanOrphan.FullName.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
             foreach ($scanFile in @(Get-ChildItem -LiteralPath $scanOrphan.FullName -Recurse -File -Force -ErrorAction SilentlyContinue)) {
                 if ($scanFile.Name -like '*.tmp' -or $scanFile.Name -like '*.partial' -or $scanFile.Name -like '*.lock' -or
                     $scanFile.Name -like '*.rclone-tmp' -or $scanFile.Name -like '*~' -or $scanFile.Name -like '.write_test_*') { continue }
-                $scanRelPath = if ($scanFile.FullName.StartsWith($scanPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $scanRelPath = if ($scanFile.FullName.StartsWith($scanPrefix, $pathComparison)) {
                     $scanFile.FullName.Substring($scanPrefix.Length)
                 } else { $scanFile.Name }
+                $scanRelPath = $scanRelPath.Replace('\', '/')
                 if ($orphanPathCounts.ContainsKey($scanRelPath)) { $orphanPathCounts[$scanRelPath]++ }
                 else { $orphanPathCounts[$scanRelPath] = 1 }
             }
@@ -2160,7 +2450,7 @@ function Sync-VirtualDriveOrphanedVfsCache {
             $orphanMetaDir = Join-Path $metaBase $orphanLeaf
 
             $orphanFiles = @(Get-ChildItem -LiteralPath $orphanVfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
-            $orphanVfsPrefix = $orphanVfsDir + '\'
+            $orphanVfsPrefix = $orphanVfsDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 
             foreach ($of in $orphanFiles) {
                 # Skip temporary / lock / partial files
@@ -2173,11 +2463,12 @@ function Sync-VirtualDriveOrphanedVfsCache {
                     continue
                 }
 
-                $relPath = if ($of.FullName.StartsWith($orphanVfsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $relPath = if ($of.FullName.StartsWith($orphanVfsPrefix, $pathComparison)) {
                     $of.FullName.Substring($orphanVfsPrefix.Length)
                 } else {
                     $of.Name
                 }
+                $relPath = $relPath.Replace('\', '/')
 
                 $targetVfsFile = Join-Path $activeVfs $relPath
                 $targetMetaFile = Join-Path $activeMeta $relPath
@@ -2316,10 +2607,14 @@ function Get-VirtualDrivePendingUploads {
     param(
         [string]$CacheDirectory = $script:DefaultCacheDirectory,
         [string[]]$MountCacheDirectories = @(),
-        [string[]]$ActiveCachePaths = @()
+        [string[]]$ActiveCachePaths = @(),
+        [switch]$ActiveCacheOwnershipKnown
     )
 
-    $pendingMap = [System.Collections.Generic.Dictionary[string, PSObject]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $isCaseSensitiveFileSystem = ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix)
+    $pathComparison = if ($isCaseSensitiveFileSystem) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    $pathComparer = if ($isCaseSensitiveFileSystem) { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+    $pendingMap = [System.Collections.Generic.Dictionary[string, PSObject]]::new($pathComparer)
     if (-not (Test-Path -LiteralPath $CacheDirectory)) {
         return @()
     }
@@ -2363,7 +2658,7 @@ function Get-VirtualDrivePendingUploads {
             $files = @(Get-ChildItem -LiteralPath $vfsDir -Recurse -File -Force -ErrorAction SilentlyContinue)
             if ($files.Count -eq 0) { continue }
 
-            $vfsPrefix = $vfsDir.TrimEnd('\', '/') + '\'
+            $vfsPrefix = $vfsDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
 
             foreach ($f in $files) {
                 # Ignore temporary / lock / partial files
@@ -2423,7 +2718,7 @@ function Get-VirtualDrivePendingUploads {
                     }
 
                     # Determine logical relative path inside virtual drive (strip remote{hash} / remote folder)
-                    $relToVfs = if ($f.FullName.StartsWith($vfsPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $relToVfs = if ($f.FullName.StartsWith($vfsPrefix, $pathComparison)) {
                         $f.FullName.Substring($vfsPrefix.Length)
                     } else {
                         $f.Name
@@ -2434,7 +2729,7 @@ function Get-VirtualDrivePendingUploads {
                     if ($firstSlash -gt 0) {
                         $firstSeg = $relToVfs.Substring(0, $firstSlash)
                         $isRemoteCacheRoot = ($provId -and $firstSeg -eq $provId) -or
-                            ($firstSeg -match '^(?:gdrive|terabox|vps|proton)\{[^\}]+\}$')
+                            ($firstSeg -match '^(?:gdrive|terabox|vps|proton|mega|s3)\{[^\}]+\}$')
                         if ($isRemoteCacheRoot) {
                             $logicalRelPath = $relToVfs.Substring($firstSlash + 1)
                         }
@@ -2449,12 +2744,17 @@ function Get-VirtualDrivePendingUploads {
                             $normalizedActiveRoot = ConvertTo-NormalizedFullPath -Path $activeCachePath
                             if (-not $normalizedActiveRoot) { continue }
                             $normalizedActivePath = $normalizedActiveRoot + [System.IO.Path]::DirectorySeparatorChar
-                            if ((ConvertTo-NormalizedFullPath -Path $f.FullName).StartsWith($normalizedActivePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $normalizedFilePath = ConvertTo-NormalizedFullPath -Path $f.FullName
+                            if ($normalizedFilePath.StartsWith($normalizedActivePath, $pathComparison)) {
                                 $fileIsInActiveRoot = $true
                                 break
                             }
                         }
                         $outsideActiveCache = -not $fileIsInActiveRoot
+                } elseif ($ActiveCacheOwnershipKnown) {
+                    # A known-empty inventory means no live mount owns these dirty
+                    # staged files, so restart recovery may adopt them safely.
+                    $outsideActiveCache = $true
                     }
 
                     # Deduplicate across multiple hash folders for the same account & file path
