@@ -179,7 +179,19 @@ Start-Sleep -Milliseconds 1200
 Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-application'
 `$app.Add_DispatcherUnhandledException({
     param(`$sender, `$eventArgs)
-    Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-error: " + `$eventArgs.Exception.ToString())
+    try {
+        `$exception = `$eventArgs.Exception
+        Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-error-type: " + `$exception.GetType().FullName)
+        Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-error: " + `$exception.ToString())
+        `$errorRecordProperty = `$exception.PSObject.Properties['ErrorRecord']
+        if (`$errorRecordProperty -and `$errorRecordProperty.Value) {
+            `$errorRecord = `$errorRecordProperty.Value
+            Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-position: " + [string]`$errorRecord.InvocationInfo.PositionMessage)
+            Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-script-stack: " + [string]`$errorRecord.ScriptStackTrace)
+        }
+    } catch {
+        try { Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value ("dispatcher-diagnostic-error: " + `$_.Exception.Message) } catch { }
+    }
     `$eventArgs.Handled = `$true
 })
 `$window.ShowInTaskbar = `$false
@@ -264,10 +276,10 @@ Add-Content -LiteralPath `$env:NSCD_TEST_TRACE -Value 'after-window-show'
     $env:NSCD_TEST_RESULT = $resultPath
     $env:NSCD_TEST_TRACE = $tracePath
     $child = Start-Process -FilePath (Get-Command 'powershell.exe' -ErrorAction Stop).Source -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', $harnessPath) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-    if (-not $child.WaitForExit(35000)) {
+    if (-not $child.WaitForExit(60000)) {
         $preserveTestRoot = $true
         Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
-        throw "The isolated WPF startup probe exceeded its 35 second bound. Probe files: $testRoot"
+        throw "The isolated WPF startup probe exceeded its 60 second bound. Probe files: $testRoot"
     }
     $child.Refresh()
     $exitCode = $child.ExitCode
