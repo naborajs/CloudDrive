@@ -96,8 +96,9 @@ The **Options** screen allows customization of visual themes, SSD staging folder
   - **Pure Black**: Deep OLED dark theme with vibrant color-coded status badges.
 - **Cache Management**:
   - **Cache Folder**: Configurable dedicated high-speed SSD location (default: `D:\CloudCache`).
-  - **Maximum Cache Quota**: Set cache limits from 5 GB up to 100 GB.
-  - **Post-Transfer Cleanup Policy**: Automatically evict completed files using size-dependent inactivity TTLs (5m for <1GB, 20m for 1-3GB, 45m for >3GB) with strict `Test-FileInUse` lock protection.
+  - **Default Per-Drive Cache Limit**: Set the default VFS write-cache cap; account-specific limits are applied per mounted drive. The cache usage card reports the combined limit for accounts using that folder.
+  - **Post-Transfer Cleanup Policy**: New installs remove verified staged uploads. New mounts cache writes only, so normal reads and previews do not accumulate in the local VFS cache. Clean data in an inactive old mount root expires after the selected retention; dirty, unknown, locked, and active data is preserved.
+  - **Cache Inspector**: Large scans run in the background and show up to 250 matching files at once. Filter by name, account, or path to narrow the list before reviewing or evicting entries.
 
 ---
 
@@ -158,31 +159,31 @@ Mount high-performance object storage buckets as local drives:
 
 ## 8. Intelligent Pre-Transfer Deduplication & Delta Classifier
 
-When moving hundreds or thousands of files to the cloud, NS Cloud Drive ensures you never waste time or bandwidth re-uploading files that already exist on your drive:
+When you select files or folders, NS Cloud Drive records only those selected paths in the durable transfer queue. It checks the destination in a background worker before sending file data, so browsing the mounted drive does not add files to the upload selection.
 
 ### 8.1 How Pre-Transfer Deduplication Works
-1. **Remote Cloud Inspection**: Before scheduling an upload, NS Cloud Drive rapidly inspects the destination directory in cloud storage (via local mount cache or direct API query).
+1. **Remote Cloud Inspection**: The queued job checks the live destination folder in the provider before sending file data. This scan runs outside the Windows UI thread. If the provider cannot be checked, the job waits and retries instead of assuming the file is absent.
 2. **Format Verification**: Checks whether the file extension/format matches (e.g. `.png` vs `.png`, `.jpg` vs `.jpg`). If the local file has been converted (for example, from PNG to JPG), it is flagged as a format mismatch and queued for transfer.
 3. **Exact Size Match**: Verifies exact byte sizes between local and cloud files. If sizes differ, the file is recognized as modified and queued for re-upload.
-4. **Instant Skip**: If the remote file exists with the exact same format and byte count, it is classified as `AlreadyInCloud` and marked complete in milliseconds without touching your network connection!
-5. **Durable Ledger Across Restarts**: Verified files are recorded in `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`. When restarting your PC or re-adding folders, the system remembers previous confirmations instantly—eliminating hours of redundant re-uploads.
+4. **Skip Exact Destination Matches**: A matching name, destination path, format, and byte size is marked `AlreadyInCloud`; the file payload is not uploaded again. The provider still receives metadata requests for the live destination check.
+5. **Durable Restart Recovery**: Explicitly selected jobs and their progress are persisted. After restart, the queue rechecks the provider before sending an unconfirmed file, so a file completed before shutdown is skipped. Old staged cache entries that have no durable selection are held for review and require the user to select the original files again.
 
 ### 8.2 The Multi-File Restart Scenario (100-File Interruption Recovery)
 Consider a common high-volume workflow:
 - You are transferring **100 large files** into your cloud drive.
-- After **85 files** have transferred, your PC loses power, network connectivity drops, or you shut down the machine.
+- After **75 files** have transferred, your PC loses power, network connectivity drops, or you shut down the machine.
 - Later, you power on your PC and drag & drop all **100 files** again into your cloud drive or virtual drive folder.
 
 In traditional sync tools, the application blindly re-sends all 100 files from the beginning—wasting hours re-transferring the 85 files that were already safely in the cloud.
 
 With NS Cloud Drive:
-1. **Durable Confirmation Memory**: Every file that completes verification is immediately committed to `%LOCALAPPDATA%\NSCloudDrive\cache\cloud-dedup-ledger.json`.
-2. **Instant Triple-Check**: On restart, when you drop the 100 files again, the engine evaluates each file by:
+1. **Durable Jobs**: The selected file paths and transfer states are persisted before their uploads begin.
+2. **Live Destination Check**: On restart, pending jobs recheck each destination file by:
    - **Name**: e.g., `document_042.pdf`
    - **File Location**: destination folder in the cloud
    - **Byte Size & Format**: exact byte-for-byte size and media format
-3. **85 Files Skipped with 0 Overhead**: The 85 previously confirmed files are classified as `AlreadyInCloud` and skipped in <10 milliseconds with **0 bytes transmitted**.
-4. **Only 15 Remaining Files Transferred**: The transfer engine queues and uploads only the 15 remaining unconfirmed files.
+3. **75 Files Skipped**: The 75 previously completed files are classified as `AlreadyInCloud`; no file payload is retransmitted for them.
+4. **Only 25 Remaining Files Transferred**: The transfer engine resumes the 25 outstanding jobs. If a previous queue record is unavailable, reselect the original files; the destination check still skips matching remote files.
 5. **Modification Protection**: If you modified any of the 85 files (different byte size) or changed their format (e.g. from `.png` to `.jpg`), NS Cloud Drive immediately detects the delta and re-sends the updated file.
 
 ### 8.3 Native Drag-and-Drop Ingestion on Drive Cards
@@ -190,7 +191,7 @@ You can drag and drop files or complete directory hierarchies directly onto any 
 - **Visual Highlight**: Dragging files over a drive card highlights its border in bright accent color.
 - **Automatic Directory Expansion**: Folders are expanded recursively and checked against the cloud deduplication ledger.
 - **Desktop Toast Notification**: Once dropped, a balloon alert notifies you of the exact delta result:
-  `Deduplication: 85 file(s) already in cloud (skipped). 15 remaining file(s) queued for transfer.`
+  `Deduplication: 75 file(s) already in cloud (skipped). 25 remaining file(s) queued for transfer.`
 
 ### 8.4 Command-Line Deduplication Inspection
 You can test and inspect file deduplication before uploading using the CLI tool:
