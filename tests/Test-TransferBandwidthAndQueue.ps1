@@ -19,6 +19,7 @@ Write-Host "=== NS Cloud Drive Transfer Bandwidth & Resilient Queue Test Suite =
 $sandboxDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ns_transfer_queue_test_" + [Guid]::NewGuid().ToString('N'))
 $null = [System.IO.Directory]::CreateDirectory($sandboxDir)
 Set-TransferQueueFilePath -Path (Join-Path $sandboxDir 'transfer-jobs.json')
+$testCacheDirectory = Join-Path $sandboxDir 'mount-cache'
 
 # ==============================================================================
 # 1. SETTINGS & EFFECTIVE BANDWIDTH LIMITS
@@ -72,7 +73,7 @@ Write-Host "  [PASS] Custom bandwidth values (MB/s and KB/s) formatted correctly
 Write-Host "`n2. Testing Virtual Drive Mount Tuning & Concurrency Arguments..." -ForegroundColor Yellow
 
 # Test poll and writeback intervals
-$gdArgs = Build-RcloneMountArguments -RemoteName 'gdrive_primary' -DriveLetter 'G' -InitialBwLimit '2M'
+$gdArgs = Build-RcloneMountArguments -RemoteName 'gdrive_primary' -DriveLetter 'G' -CacheDirectory $testCacheDirectory -InitialBwLimit '2M'
 $pollIdx = $gdArgs.IndexOf('--vfs-cache-poll-interval')
 if ($pollIdx -lt 0 -or $gdArgs[$pollIdx + 1] -ne '2s') {
     throw "Expected --vfs-cache-poll-interval 2s, got '$($gdArgs[$pollIdx + 1])'"
@@ -99,7 +100,7 @@ if ($gdArgs[$gdArgs.IndexOf('--bwlimit') + 1] -ne '2M') {
 Write-Host "  [PASS] Google Drive streaming tuning (32M chunks, 4 transfers, 2M bwlimit) verified." -ForegroundColor Green
 
 # Test provider tuning: TeraBox transfers (2 workers to avoid 429 locks)
-$tbArgs = Build-RcloneMountArguments -RemoteName 'terabox_personal' -DriveLetter 'T'
+$tbArgs = Build-RcloneMountArguments -RemoteName 'terabox_personal' -DriveLetter 'T' -CacheDirectory $testCacheDirectory
 if ($tbArgs[$tbArgs.IndexOf('--transfers') + 1] -ne '2') {
     throw "Expected TeraBox --transfers 2"
 }
@@ -178,10 +179,38 @@ Write-Host "  [PASS] Single item cancellation verified." -ForegroundColor Green
 
 # 4.3 Test Transient Failure Backoff and Non-Blocking Scheduling
 Clear-CloudTransferQueue -All
-$failItem1 = Add-CloudTransferQueueItem -SourceAccount @{ Id = 'acc_err1'; ProviderId = 'invalid_prov'; DisplayName = 'Err1' } -SourcePath 'fail1.bin' -DestinationAccount @{ Id = 'acc_err2'; ProviderId = 'invalid_prov'; DisplayName = 'Err2' } -MaxRetries 1
-$failItem2 = Add-CloudTransferQueueItem -SourceAccount @{ Id = 'acc_err1'; ProviderId = 'invalid_prov'; DisplayName = 'Err1' } -SourcePath 'fail2.bin' -DestinationAccount @{ Id = 'acc_err2'; ProviderId = 'invalid_prov'; DisplayName = 'Err2' } -MaxRetries 1
+# Keep this retry test deterministic and offline: a successful empty destination
+# listing lets each item reach the transfer launcher, which then simulates a
+# transient network failure. Without these mocks, unavailable-provider preflight
+# correctly pauses the jobs without consuming a transfer retry.
+function Get-RemoteFileInventoryMap {
+    [CmdletBinding()]
+    param(
+        [object]$DestinationAccount,
+        [string[]]$DestinationFolderPaths = @(),
+        [switch]$BypassLedger
+    )
+    return [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
+}
+function Start-CloudTransfer {
+    [CmdletBinding()]
+    param(
+        [object]$SourceAccount,
+        [string]$SourcePath,
+        [object]$DestinationAccount,
+        [string]$DestinationPath = '',
+        [string]$ConflictAction = 'Skip',
+        [switch]$IsMove,
+        [string]$OperationType = '',
+        [int64]$FileSizeBytes = 0L,
+        [string]$BandwidthLimit = ''
+    )
+    throw 'Network timeout while connecting to the mocked provider.'
+}
+$failItem1 = Add-CloudTransferQueueItem -SourceAccount @{ Id = 'local_err'; ProviderId = 'local'; DisplayName = 'Local source' } -SourcePath 'fail1.bin' -DestinationAccount @{ Id = 'gdrive_err'; ProviderId = 'gdrive'; DisplayName = 'Mock Google Drive' } -MaxRetries 1
+$failItem2 = Add-CloudTransferQueueItem -SourceAccount @{ Id = 'local_err'; ProviderId = 'local'; DisplayName = 'Local source' } -SourcePath 'fail2.bin' -DestinationAccount @{ Id = 'gdrive_err'; ProviderId = 'gdrive'; DisplayName = 'Mock Google Drive' } -MaxRetries 1
 
-# Process queue: item 1 fails immediately on Start-CloudTransfer, backs off to 'Waiting for network/provider', item 2 is scheduled next
+# Process queue: each item passes empty inventory preflight, hits the mocked transient error, and backs off without wedging the scheduler.
 $resProg = Process-CloudTransferQueue -MaxConcurrent 2
 if ($resProg[0].Status -ne 'Waiting for network/provider' -or $resProg[0].RetryCount -ne 1) {
     throw "Expected Item 1 to enter 'Waiting for network/provider' with RetryCount 1, got $($resProg[0].Status)"
