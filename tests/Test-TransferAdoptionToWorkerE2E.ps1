@@ -269,9 +269,10 @@ try {
     }
     [System.IO.File]::WriteAllBytes($unknownAcctItem.Path, [byte[]]::new(100))
     $adoptionUnknown = Import-StagedVfsFilesToTransferQueue -StagedFiles @($unknownAcctItem) -Accounts $accounts
-    Check 'Unknown account file creates stub job (fails at worker stage)' ([int]$adoptionUnknown.AdoptedCount -eq 1) ("adopted=$($adoptionUnknown.AdoptedCount)")
-    Check 'Stub job will fail at worker (unknown remote)' ($true)
-    Check 'Queue now has 3 jobs (2 valid + 1 stub)' (@(Get-FlatQueue).Count -eq 3)
+    Check 'Unknown account file is rejected before queueing' ([int]$adoptionUnknown.AdoptedCount -eq 0) ("adopted=$($adoptionUnknown.AdoptedCount)")
+    Check 'Unknown account file is reported as skipped' ([int]$adoptionUnknown.SkippedCount -eq 1) ("skipped=$($adoptionUnknown.SkippedCount)")
+    Check 'Unknown account staged bytes remain available for reconciliation' (Test-Path -LiteralPath $unknownAcctItem.Path)
+    Check 'Queue remains at 2 valid jobs' (@(Get-FlatQueue).Count -eq 2)
 
     # --------------------------------------------------------------------------
     # STAGE 9: Pending count accuracy
@@ -279,12 +280,14 @@ try {
     Write-Host "`nSTAGE 9: Pending count consistency" -ForegroundColor Yellow
 
     $summary = Get-CloudTransferPendingSummary -QueueItems @(Get-FlatQueue) -StagedFiles $pending
-    Check 'Pending count = 3 uploads (2 valid + 1 stub)' ([int]$summary.PendingCount -eq 3) ("pending=$($summary.PendingCount)")
-    Check 'Upload count = 3' ([int]$summary.UploadCount -eq 3) ("uploads=$($summary.UploadCount)")
-    Check 'StagedOnlyCount = 0 (all adopted)' ([int]$summary.StagedOnlyCount -eq 0) ("stagedOnly=$($summary.StagedOnlyCount)")
+    Check 'Pending count includes only the 2 valid uploads' ([int]$summary.PendingCount -eq 2) ("pending=$($summary.PendingCount)")
+    Check 'Upload count includes only the 2 valid uploads' ([int]$summary.UploadCount -eq 2) ("uploads=$($summary.UploadCount)")
+    Check 'StagedOnlyCount = 0 (both valid files are adopted)' ([int]$summary.StagedOnlyCount -eq 0) ("stagedOnly=$($summary.StagedOnlyCount)")
 
     Write-Host "`n=== E2E Pipeline Results: $script:passed passed, $script:failed failed ===" -ForegroundColor Cyan
-    if ($script:failed -gt 0) { exit 1 }
+    if ($script:failed -gt 0) {
+        throw "Transfer adoption E2E test failed $script:failed assertion(s)."
+    }
 } finally {
     foreach ($dir in @($sandbox)) {
         if (Test-Path -LiteralPath $dir) {
