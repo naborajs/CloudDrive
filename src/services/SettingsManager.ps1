@@ -113,8 +113,9 @@ function Get-DefaultSettings {
         KeepTransfersAliveInTray = $true
 
         # Post-Transfer Cache Cleanup
-        PostTransferCachePolicy = 'KeepCache' # 'KeepCache', 'RemoveAfterVerifiedUpload', 'CustomRetention'
+        PostTransferCachePolicy = 'RemoveAfterVerifiedUpload' # 'KeepCache', 'RemoveAfterVerifiedUpload', 'CustomRetention'
         PostTransferRetentionMinutes = 60
+        PostTransferCachePolicyVersion = 1
 
         # UI Presentation Order
         CardDisplayOrder = @()
@@ -139,6 +140,11 @@ function Get-NSCloudDriveSettings {
         $raw = Get-Content -LiteralPath $settingsPath -Raw -ErrorAction Stop
         $json = $raw | ConvertFrom-Json
         $defaults = Get-DefaultSettings
+
+        # Older settings exposed KeepCache as a selectable policy, so an
+        # unversioned value may be an explicit user preference. Preserve it;
+        # new settings use the verified-upload default above.
+        $persistedCachePolicy = if ($json.PSObject.Properties['PostTransferCachePolicy'] -and -not [string]::IsNullOrEmpty($json.PostTransferCachePolicy)) { [string]$json.PostTransferCachePolicy } else { [string]$defaults.PostTransferCachePolicy }
 
         $accountsList = @()
         if ($json.PSObject.Properties['Accounts'] -and $json.Accounts) {
@@ -206,8 +212,9 @@ function Get-NSCloudDriveSettings {
             KeepTransfersAliveInTray = if ($json.PSObject.Properties['KeepTransfersAliveInTray'] -and $null -ne $json.KeepTransfersAliveInTray) { [bool]$json.KeepTransfersAliveInTray } else { $defaults.KeepTransfersAliveInTray }
 
             # Post-Transfer Cache Cleanup
-            PostTransferCachePolicy = if ($json.PSObject.Properties['PostTransferCachePolicy'] -and -not [string]::IsNullOrEmpty($json.PostTransferCachePolicy)) { [string]$json.PostTransferCachePolicy } else { $defaults.PostTransferCachePolicy }
+            PostTransferCachePolicy = $persistedCachePolicy
             PostTransferRetentionMinutes = if ($json.PSObject.Properties['PostTransferRetentionMinutes'] -and $null -ne $json.PostTransferRetentionMinutes) { [int]$json.PostTransferRetentionMinutes } else { $defaults.PostTransferRetentionMinutes }
+            PostTransferCachePolicyVersion = 1
 
             # UI Presentation Order
             CardDisplayOrder = if ($json.PSObject.Properties['CardDisplayOrder'] -and $json.CardDisplayOrder) { @($json.CardDisplayOrder | ForEach-Object { [string]$_ }) } else { @() }
