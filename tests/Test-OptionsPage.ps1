@@ -56,7 +56,8 @@ Assert-True ($mainContent -match 'Translucent Liquid Glass') 'Translucent Liquid
 # 5. Cache Management: 200 GB option, Confirmation Dialog, Honest Reporting
 Assert-True ($mainContent -match '200') '200 GB option is included in Cache Quota list'
 Assert-True ($mainContent -match 'Clean Local Cache' -and $mainContent -match 'MessageBoxButton\]::YesNo') 'Clean Cache requires clear user confirmation before proceeding'
-Assert-True ($mainContent -match 'Invoke-SafeCacheCleanup') 'Clean Cache executes safe cleanup preserving in-use files'
+Assert-True ($mainContent -match '(?s)\$cleanCacheBtn\.Add_Click.*?Start-CacheUiOperation.*?-Action Clean' -and
+    $mainContent -match 'Complete-CacheUiOperation') 'Clean Cache executes safe cleanup in a background worker'
 Assert-True ($mainContent -match 'SkippedInUseCount') 'Clean Cache honestly reports preserved in-use files'
 Assert-True ($mainContent -match 'Start-ExplorerWindow \$script:CacheDirectory') 'Open Cache Folder launches Explorer with active cache path'
 
@@ -71,7 +72,7 @@ Assert-True ($mainContent -match 'Invoke-MemoryTrim') 'Trim Memory Now invokes W
 Assert-True ($mainContent -match 'WorkingSet64' -and $mainContent -match 'reclaimed') 'Memory trimming measures and reports before/after working set'
 
 # 8. StartMinimized Startup Integration
-Assert-True ($mainContent -match 'param\(\s*\[switch\]\$Minimized\s*\)') 'StartMinimized CLI parameter is supported'
+Assert-True ($mainContent -match 'param\(\s*\[switch\]\$Minimized\s*,\s*\[switch\]\$FromLauncher\s*\)') 'Minimized and launcher arguments are supported'
 Assert-True ($mainContent -match 'if \(-not \$PSBoundParameters\.ContainsKey\(''Minimized''\)\) \{\s*\$Minimized = \[switch\]\$false\s*\}') 'Interactive launch defaults Minimized to false so main window opens'
 
 # 9. Settings Manager Integration: Round-trip persistence of all 5 General Options
