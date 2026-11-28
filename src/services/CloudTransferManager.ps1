@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'CacheFileSafety.ps1')
+
 $onWindows = if ($null -ne (Get-Variable -Name 'IsWindows' -ValueOnly -ErrorAction SilentlyContinue)) {
     [bool](Get-Variable -Name 'IsWindows' -ValueOnly)
 } else {
@@ -197,6 +199,7 @@ namespace NSCloudDrive
 $script:ActiveTransferJobs = @{}
 $script:CloudTransferQueue = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
 $script:TransferQueueStateUnavailable = $false
+$script:CloudTransferVfsOwnershipCache = @{}
 $script:CustomTransferQueueFile = $null
 
 function Get-TransferQueueFilePath {
@@ -223,7 +226,7 @@ $script:TransferQueueFile = (Get-TransferQueueFilePath)
 # Staged revisions already confirmed on the provider, keyed by the same identity the
 # pending summary uses. This is deliberately independent of queue jobs: clearing the
 # completed list must not turn a preserved staged file back into a fresh upload.
-$script:CloudTransferSettledStaged = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$script:CloudTransferSettledStaged = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
 $script:CloudTransferSettledStagedLimit = 5000
 
 function Get-CloudTransferFieldValue {
@@ -362,12 +365,18 @@ function Get-CloudTransferPathIdentity {
             $localPath = $localPath.Substring(4)
         }
         try {
-            return [System.IO.Path]::GetFullPath($localPath).TrimEnd('\', '/').ToUpperInvariant()
+            $normalizedLocalPath = [System.IO.Path]::GetFullPath($localPath).TrimEnd('\', '/')
+            if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { return $normalizedLocalPath }
+            return $normalizedLocalPath.ToUpperInvariant()
         } catch {
-            return $localPath.Replace('\', '/').TrimEnd('/').ToUpperInvariant()
+            $fallbackLocalPath = $localPath.Replace('\', '/').TrimEnd('/')
+            if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { return $fallbackLocalPath }
+            return $fallbackLocalPath.ToUpperInvariant()
         }
     }
-    return (Normalize-CloudPath -Path $Path).ToLowerInvariant()
+    # Provider paths are case-sensitive even when the local client runs on
+    # Windows. Preserve path case so distinct cloud objects never collapse.
+    return (Normalize-CloudPath -Path $Path)
 }
 
 function Resolve-CloudTransferOperation {
@@ -2009,7 +2018,25 @@ function Set-TransferStateInitializedMarker {
     }
 }
 
-function Save-DurableTransferQueue {
+function ConvertTo-TransferUtcTimestampString {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [DateTime]) { return ([DateTime]$Value).ToUniversalTime().ToString('o') }
+    $raw = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($raw)) { return '' }
+    $parsed = [DateTime]::MinValue
+    if ([DateTime]::TryParse($raw, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) {
+        return $parsed.ToUniversalTime().ToString('o')
+    }
+    if ([DateTime]::TryParse($raw, [System.Globalization.CultureInfo]::CurrentCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+        return $parsed.ToUniversalTime().ToString('o')
+    }
+    return $raw
+}
+
+function Save-DurableTransferQueueCore {
     [CmdletBinding()]
     param(
         [string]$FilePath = ''
@@ -2060,8 +2087,13 @@ function Save-DurableTransferQueue {
             # Staged-cache adoption linkage. Without these fields a restart would lose
             # the evidence needed to match a confirmed upload to its staged revision.
             StagedSourcePath = if ($item.ContainsKey('StagedSourcePath')) { [string]$item['StagedSourcePath'] } else { '' }
-            StagedSourceLastWriteUtc = if ($item.ContainsKey('StagedSourceLastWriteUtc')) { [string]$item['StagedSourceLastWriteUtc'] } else { '' }
+            StagedSourceLastWriteUtc = if ($item.ContainsKey('StagedSourceLastWriteUtc')) { ConvertTo-TransferUtcTimestampString $item['StagedSourceLastWriteUtc'] } else { '' }
+            StagedSourceSha256 = if ($item.ContainsKey('StagedSourceSha256')) { [string]$item['StagedSourceSha256'] } else { '' }
+            StagedMetadataSha256 = if ($item.ContainsKey('StagedMetadataSha256')) { [string]$item['StagedMetadataSha256'] } else { '' }
+            StagedCleanupRetryAfterUtc = if ($item.ContainsKey('StagedCleanupRetryAfterUtc')) { ConvertTo-TransferUtcTimestampString $item['StagedCleanupRetryAfterUtc'] } else { '' }
+            ClearWhenStagedCleanupCompletes = if ($item.ContainsKey('ClearWhenStagedCleanupCompletes')) { [bool]$item['ClearWhenStagedCleanupCompletes'] } else { $false }
             RecoveredFromVfsCache = if ($item.ContainsKey('RecoveredFromVfsCache')) { [bool]$item['RecoveredFromVfsCache'] } else { $false }
+            StagedCleanupStatus = if ($item.ContainsKey('StagedCleanupStatus')) { [string]$item['StagedCleanupStatus'] } elseif ($item.ContainsKey('RecoveredFromVfsCache') -and [bool]$item['RecoveredFromVfsCache']) { 'Pending' } else { 'NotRequired' }
             RecoveryBatchId = if ($item.ContainsKey('RecoveryBatchId')) { [string]$item['RecoveryBatchId'] } else { '' }
             AccountId = if ($item.ContainsKey('AccountId')) { [string]$item['AccountId'] } else { '' }
             ProviderId = if ($item.ContainsKey('ProviderId')) { [string]$item['ProviderId'] } else { '' }
@@ -2080,7 +2112,7 @@ function Save-DurableTransferQueue {
             NextRetryUtc = $nextRetryStr
             LastError = if ($item.ContainsKey('LastError')) { [string]$item['LastError'] } else { '' }
             EnqueuedUtc = $enqueuedStr
-            SourceLastWriteUtc = if ($item.ContainsKey('SourceLastWriteUtc')) { [string]$item['SourceLastWriteUtc'] } else { '' }
+            SourceLastWriteUtc = if ($item.ContainsKey('SourceLastWriteUtc')) { ConvertTo-TransferUtcTimestampString $item['SourceLastWriteUtc'] } else { '' }
             StartedUtc = $startedStr
             CompletedUtc = $completedStr
             LastProgressUtc = $lastProgStr
@@ -2124,10 +2156,22 @@ function Save-DurableTransferQueue {
         })
     }
 
-    $json = if (([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
-        [NSCloudDrive.QueueFastIO]::FastSerialize($payload)
+    if (([System.Management.Automation.PSTypeName]'NSCloudDrive.QueueFastIO').Type) {
+        try {
+            $json = [NSCloudDrive.QueueFastIO]::FastSerialize($payload)
+        } catch {
+            # Windows PowerShell 5.1 can surface some provider-supplied extended
+            # property values that JavaScriptSerializer cannot handle, while the
+            # PowerShell serializer safely writes the normalized queue DTO. Keep
+            # the fast path for normal payloads and fall back only on this error.
+            try {
+                $json = ConvertTo-Json -InputObject $payload -Depth 10
+            } catch {
+                throw "The durable transfer queue could not be serialized by either serializer. Fast serializer: $($_.Exception.Message)"
+            }
+        }
     } else {
-        $payload | ConvertTo-Json -Depth 10
+        $json = ConvertTo-Json -InputObject $payload -Depth 10
     }
 
     # Write in the destination directory so replacement stays on one volume.
@@ -2181,6 +2225,24 @@ function Save-DurableTransferQueue {
         if (Test-Path -LiteralPath $tmpFile) {
             try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch { }
         }
+    }
+}
+
+function Save-DurableTransferQueue {
+    [CmdletBinding()]
+    param([string]$FilePath = '')
+
+    $queueRoot = $null
+    $lockTaken = $false
+    try {
+        if ($null -ne $script:CloudTransferQueue -and $script:CloudTransferQueue.SyncRoot) {
+            $queueRoot = $script:CloudTransferQueue.SyncRoot
+            [System.Threading.Monitor]::Enter($queueRoot)
+            $lockTaken = $true
+        }
+        return Save-DurableTransferQueueCore -FilePath $FilePath
+    } finally {
+        if ($lockTaken) { [System.Threading.Monitor]::Exit($queueRoot) }
     }
 }
 
@@ -2374,8 +2436,13 @@ function Load-DurableTransferQueue {
             ReconciliationStatus = if ($j.PSObject.Properties['ReconciliationStatus'] -and $j.ReconciliationStatus) { [string]$j.ReconciliationStatus } else { 'None' }
             StatusBeforeReconciliation = if ($j.PSObject.Properties['StatusBeforeReconciliation'] -and $j.StatusBeforeReconciliation) { [string]$j.StatusBeforeReconciliation } else { '' }
             StagedSourcePath = if ($j.PSObject.Properties['StagedSourcePath'] -and $j.StagedSourcePath) { [string]$j.StagedSourcePath } else { '' }
-            StagedSourceLastWriteUtc = if ($j.PSObject.Properties['StagedSourceLastWriteUtc'] -and $j.StagedSourceLastWriteUtc) { [string]$j.StagedSourceLastWriteUtc } else { '' }
+            StagedSourceLastWriteUtc = if ($j.PSObject.Properties['StagedSourceLastWriteUtc'] -and $j.StagedSourceLastWriteUtc) { ConvertTo-TransferUtcTimestampString $j.StagedSourceLastWriteUtc } else { '' }
+            StagedSourceSha256 = if ($j.PSObject.Properties['StagedSourceSha256'] -and $j.StagedSourceSha256) { [string]$j.StagedSourceSha256 } else { '' }
+            StagedMetadataSha256 = if ($j.PSObject.Properties['StagedMetadataSha256'] -and $j.StagedMetadataSha256) { [string]$j.StagedMetadataSha256 } else { '' }
+            StagedCleanupRetryAfterUtc = if ($j.PSObject.Properties['StagedCleanupRetryAfterUtc'] -and $j.StagedCleanupRetryAfterUtc) { ConvertTo-TransferUtcTimestampString $j.StagedCleanupRetryAfterUtc } else { '' }
+            ClearWhenStagedCleanupCompletes = if ($j.PSObject.Properties['ClearWhenStagedCleanupCompletes']) { [bool]$j.ClearWhenStagedCleanupCompletes } else { $false }
             RecoveredFromVfsCache = if ($j.PSObject.Properties['RecoveredFromVfsCache']) { [bool]$j.RecoveredFromVfsCache } else { $false }
+            StagedCleanupStatus = if ($j.PSObject.Properties['StagedCleanupStatus'] -and $j.StagedCleanupStatus) { [string]$j.StagedCleanupStatus } elseif ($j.PSObject.Properties['RecoveredFromVfsCache'] -and [bool]$j.RecoveredFromVfsCache) { 'Pending' } else { 'NotRequired' }
             RecoveryBatchId = if ($j.PSObject.Properties['RecoveryBatchId'] -and $j.RecoveryBatchId) { [string]$j.RecoveryBatchId } else { '' }
             AccountId = if ($j.PSObject.Properties['AccountId'] -and $j.AccountId) { [string]$j.AccountId } else { '' }
             ProviderId = if ($j.PSObject.Properties['ProviderId'] -and $j.ProviderId) { [string]$j.ProviderId } else { '' }
@@ -2394,7 +2461,7 @@ function Load-DurableTransferQueue {
             NextRetryUtc = $nextRetry
             LastError = if ($j.PSObject.Properties['LastError'] -and $j.LastError) { [string]$j.LastError } else { '' }
             EnqueuedUtc = $enqueued
-            SourceLastWriteUtc = if ($j.PSObject.Properties['SourceLastWriteUtc'] -and $j.SourceLastWriteUtc) { [string]$j.SourceLastWriteUtc } else { '' }
+            SourceLastWriteUtc = if ($j.PSObject.Properties['SourceLastWriteUtc'] -and $j.SourceLastWriteUtc) { ConvertTo-TransferUtcTimestampString $j.SourceLastWriteUtc } else { '' }
             StartedUtc = $started
             CompletedUtc = $completed
             LastProgressUtc = $lastProg
@@ -2998,6 +3065,180 @@ function Add-CloudTransferFolderBatch {
     }
 }
 
+function Set-CloudTransferStagedCacheCleanupLink {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Job,
+        [object[]]$Candidates = @(),
+        [string]$DestinationAccountId = '',
+        [string]$DestinationProviderId = '',
+        [string]$DestinationRelativePath = '',
+        [int64]$ExpectedSizeBytes = -1L,
+        [string]$ExpectedSha256 = ''
+    )
+
+    if ($Job.Contains('RecoveredFromVfsCache') -and [bool]$Job['RecoveredFromVfsCache']) { return $false }
+    $expectedAccountKey = Get-CloudTransferAccountKey -AccountId $DestinationAccountId -ProviderId $DestinationProviderId
+    $expectedRelative = Normalize-CloudPath -Path $DestinationRelativePath
+    $pathComparison = if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    $candidateMatches = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($candidate in @($Candidates)) {
+        if ($null -eq $candidate -or -not [bool](Get-CloudTransferFieldValue $candidate 'IsOutsideActiveCache')) { continue }
+        $candidateState = [string](Get-CloudTransferFieldValue $candidate 'State')
+        $ambiguousReview = $candidateState -match '^Needs review' -and $candidateState -notmatch 'outside the active rclone cache root'
+        if ([bool](Get-CloudTransferFieldValue $candidate 'HasStagedPathConflict') -or $ambiguousReview) { continue }
+        $candidateProvider = ([string](Get-CloudTransferFieldValue $candidate 'ProviderId')).ToLowerInvariant()
+        $candidateAccountKey = Get-CloudTransferAccountKey `
+            -AccountId ([string](Get-CloudTransferFieldValue $candidate 'AccountId')) `
+            -ProviderId $candidateProvider
+        $candidateRelative = Normalize-CloudPath -Path ([string](Get-CloudTransferFieldValue $candidate 'RelativePath'))
+        if (-not $expectedAccountKey -or $candidateAccountKey -ne $expectedAccountKey -or
+            $candidateProvider -ne ([string]$DestinationProviderId).ToLowerInvariant() -or
+            -not [string]::Equals($candidateRelative, $expectedRelative, $pathComparison)) { continue }
+
+        $candidatePath = [string](Get-CloudTransferFieldValue $candidate 'Path')
+        if (-not $candidatePath -or -not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { continue }
+        try {
+            if (Get-Command Test-CloudTransferPathContainsReparsePoint -ErrorAction SilentlyContinue) {
+                if (Test-CloudTransferPathContainsReparsePoint -Path $candidatePath) { continue }
+            }
+            $candidateInfo = Get-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
+            $candidateSize = [int64](Get-CloudTransferFieldValue $candidate 'Length' -1L)
+            $candidateWrite = Get-CloudTransferFieldValue $candidate 'LastWriteTimeUtc' $null
+            $candidateWriteUtc = [DateTime]::MinValue
+            if ($candidateWrite -is [DateTime]) {
+                $candidateWriteUtc = ([DateTime]$candidateWrite).ToUniversalTime()
+            } elseif (-not [DateTime]::TryParse([string]$candidateWrite, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$candidateWriteUtc)) {
+                continue
+            }
+            if ($candidateInfo.Length -ne $ExpectedSizeBytes -or $candidateSize -ne $ExpectedSizeBytes -or
+                $candidateInfo.LastWriteTimeUtc.Ticks -ne $candidateWriteUtc.Ticks) { continue }
+            $candidateMatches.Add([pscustomobject]@{ Path = $candidatePath; LastWriteUtc = $candidateInfo.LastWriteTimeUtc.ToString('o') })
+        } catch { }
+    }
+
+    if ($candidateMatches.Count -ne 1 -or $ExpectedSha256 -notmatch '^[A-Fa-f0-9]{64}$') { return $false }
+    $Job['RecoveredFromVfsCache'] = $true
+    $Job['StagedSourcePath'] = [string]$candidateMatches[0].Path
+    $Job['StagedSourceLastWriteUtc'] = [string]$candidateMatches[0].LastWriteUtc
+    $Job['StagedSourceSha256'] = $ExpectedSha256.ToLowerInvariant()
+    $Job['StagedCleanupStatus'] = 'Pending'
+    return $true
+}
+
+function Get-CloudTransferStagedCacheLinkPlans {
+    [CmdletBinding()]
+    param([object[]]$Jobs = @(), [object[]]$Candidates = @())
+
+    $plans = [System.Collections.Generic.List[object]]::new()
+    $isUnix = ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix)
+    $pathComparison = if ($isUnix) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    $pathComparer = if ($isUnix) { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+    $usedPaths = [System.Collections.Generic.HashSet[string]]::new($pathComparer)
+
+    foreach ($job in @($Jobs)) {
+        if ($null -eq $job -or [bool](Get-CloudTransferFieldValue $job 'RecoveredFromVfsCache')) { continue }
+        if ([string](Get-CloudTransferFieldValue $job 'Origin') -ne 'UserDrop' -or
+            [string](Get-CloudTransferFieldValue $job 'OperationType') -ne 'Upload') { continue }
+        if ([string](Get-CloudTransferFieldValue $job 'Status') -notin @(
+            'Queued', 'Uploading', 'Staging', 'Waiting for network/provider',
+            'Upload pending remote confirmation', 'Awaiting remote confirmation',
+            'Verifying remote file', 'Completed and remotely confirmed')) { continue }
+
+        $sourcePath = [string](Get-CloudTransferFieldValue $job 'SourcePath')
+        $sourceWriteRaw = [string](Get-CloudTransferFieldValue $job 'SourceLastWriteUtc')
+        $expectedSize = [int64](Get-CloudTransferFieldValue $job 'FileSizeBytes' -1L)
+        $providerId = ([string](Get-CloudTransferFieldValue $job 'DestinationProvider')).ToLowerInvariant()
+        $accountId = [string](Get-CloudTransferFieldValue $job 'DestinationAccountId')
+        $relativePath = Normalize-CloudPath -Path ([string](Get-CloudTransferFieldValue $job 'DestinationFilePath'))
+        if (-not $sourcePath -or $expectedSize -lt 0 -or -not $providerId -or -not $accountId -or -not $relativePath) { continue }
+
+        try {
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or
+                (Get-Command Test-CloudTransferPathContainsReparsePoint -ErrorAction SilentlyContinue) -and
+                (Test-CloudTransferPathContainsReparsePoint -Path $sourcePath)) { continue }
+            $sourceInfo = Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+            $expectedSourceWrite = [DateTime]::MinValue
+            if ($sourceInfo.Length -ne $expectedSize -or
+                -not [DateTime]::TryParse($sourceWriteRaw, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$expectedSourceWrite)) { continue }
+            if ($expectedSourceWrite.Kind -ne [DateTimeKind]::Utc) { $expectedSourceWrite = $expectedSourceWrite.ToUniversalTime() }
+            if ($sourceInfo.LastWriteTimeUtc.Ticks -ne $expectedSourceWrite.Ticks) { continue }
+        } catch { continue }
+
+        $accountKey = Get-CloudTransferAccountKey -AccountId $accountId -ProviderId $providerId
+        $matchingCandidates = [System.Collections.Generic.List[object]]::new()
+        foreach ($candidate in @($Candidates)) {
+            if ($null -eq $candidate -or -not [bool](Get-CloudTransferFieldValue $candidate 'IsOutsideActiveCache')) { continue }
+            if ([bool](Get-CloudTransferFieldValue $candidate 'HasStagedPathConflict')) { continue }
+            $candidateState = [string](Get-CloudTransferFieldValue $candidate 'State')
+            if ($candidateState -match '^Needs review' -and $candidateState -notmatch 'outside the active rclone cache root') { continue }
+            $candidateProvider = ([string](Get-CloudTransferFieldValue $candidate 'ProviderId')).ToLowerInvariant()
+            $candidateAccountKey = Get-CloudTransferAccountKey `
+                -AccountId ([string](Get-CloudTransferFieldValue $candidate 'AccountId')) `
+                -ProviderId $candidateProvider
+            $candidateRelative = Normalize-CloudPath -Path ([string](Get-CloudTransferFieldValue $candidate 'RelativePath'))
+            if ($candidateProvider -ne $providerId -or $candidateAccountKey -ne $accountKey -or
+                -not [string]::Equals($candidateRelative, $relativePath, $pathComparison)) { continue }
+            $candidatePath = [string](Get-CloudTransferFieldValue $candidate 'Path')
+            if (-not $candidatePath -or $usedPaths.Contains($candidatePath) -or -not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { continue }
+            try {
+                if (Get-Command Test-CloudTransferPathContainsReparsePoint -ErrorAction SilentlyContinue) {
+                    if (Test-CloudTransferPathContainsReparsePoint -Path $candidatePath) { continue }
+                }
+                $candidateInfo = Get-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
+                $candidateSize = [int64](Get-CloudTransferFieldValue $candidate 'Length' -1L)
+                $candidateWrite = Get-CloudTransferFieldValue $candidate 'LastWriteTimeUtc' $null
+                $candidateWriteUtc = [DateTime]::MinValue
+                if ($candidateInfo.Length -ne $expectedSize -or $candidateSize -ne $expectedSize -or
+                    -not ($candidateWrite -is [DateTime])) { continue }
+                $candidateWriteUtc = ([DateTime]$candidateWrite).ToUniversalTime()
+                if ($candidateInfo.LastWriteTimeUtc.Ticks -ne $candidateWriteUtc.Ticks) { continue }
+                $matchingCandidates.Add([pscustomobject]@{ Item = $candidate; Path = $candidatePath; WriteUtc = $candidateWriteUtc })
+            } catch { }
+        }
+        if ($matchingCandidates.Count -ne 1) { continue }
+
+        $match = $matchingCandidates[0]
+        $sourceStream = $null
+        $stagedStream = $null
+        try {
+            # This worker hashes only candidates that already match an explicit job
+            # by provider/account, cloud path, and size; no whole-cache hashing occurs.
+            $sourceStream = [System.IO.File]::Open($sourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            $stagedStream = [System.IO.File]::Open([string]$match.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            if ($sourceStream.Length -ne $expectedSize -or $stagedStream.Length -ne $expectedSize) { continue }
+            $sourceHash = Get-CacheStreamSha256 -Stream $sourceStream
+            $stagedHash = Get-CacheStreamSha256 -Stream $stagedStream
+            $sourceInfoAfter = Get-Item -LiteralPath $sourcePath -Force -ErrorAction Stop
+            $stagedInfoAfter = Get-Item -LiteralPath ([string]$match.Path) -Force -ErrorAction Stop
+            if ($sourceHash -ne $stagedHash -or $sourceInfoAfter.Length -ne $expectedSize -or
+                $sourceInfoAfter.LastWriteTimeUtc.Ticks -ne $expectedSourceWrite.Ticks -or
+                $stagedInfoAfter.Length -ne $expectedSize -or
+                $stagedInfoAfter.LastWriteTimeUtc.Ticks -ne $match.WriteUtc.Ticks) { continue }
+
+            $plans.Add([pscustomobject]@{
+                QueueId = [string](Get-CloudTransferFieldValue $job 'QueueId')
+                CandidatePath = [string]$match.Path
+                Candidate = $match.Item
+                DestinationAccountId = $accountId
+                DestinationProvider = $providerId
+                DestinationRelativePath = $relativePath
+                ExpectedSizeBytes = $expectedSize
+                ExpectedSha256 = $sourceHash
+            })
+            [void]$usedPaths.Add([string]$match.Path)
+        } catch {
+            continue
+        } finally {
+            if ($sourceStream) { $sourceStream.Dispose() }
+            if ($stagedStream) { $stagedStream.Dispose() }
+        }
+    }
+
+    return @($plans.ToArray())
+}
+
 function Add-CloudTransferDroppedItems {
     [CmdletBinding()]
     param(
@@ -3015,6 +3256,11 @@ function Add-CloudTransferDroppedItems {
 
         [Parameter(Mandatory = $false)]
         [string]$BatchName = '',
+
+        # UI callers can persist explicit user selections immediately and let the
+        # background queue perform remote deduplication, avoiding a provider scan
+        # on the dispatcher thread.
+        [switch]$DeferRemotePreflight,
 
         [Parameter(Mandatory = $false)]
         [string]$BandwidthLimit = ''
@@ -3109,7 +3355,11 @@ function Add-CloudTransferDroppedItems {
         $targetParent = if ($destinationPath.Contains('/')) { $destinationPath.Substring(0, $destinationPath.LastIndexOf('/')) } else { '' }
         [void]$targetRemoteFolders.Add($targetParent)
     }
-    $remoteInventory = Get-RemoteFileInventoryMap -DestinationAccount $DestinationAccount -DestinationFolderPaths @($targetRemoteFolders) -BypassLedger
+    $remoteInventory = if ($DeferRemotePreflight) {
+        [System.Collections.Generic.Dictionary[string, hashtable]]::new([System.StringComparer]::Ordinal)
+    } else {
+        Get-RemoteFileInventoryMap -DestinationAccount $DestinationAccount -DestinationFolderPaths @($targetRemoteFolders) -BypassLedger
+    }
 
     $skippedFiles = [System.Collections.Generic.List[hashtable]]::new()
     $queuedJobs = [System.Collections.Generic.List[hashtable]]::new()
@@ -3135,11 +3385,19 @@ function Add-CloudTransferDroppedItems {
         $destParentDir = if ($destRel.Contains('/')) { $destRel.Substring(0, $destRel.LastIndexOf('/')) } else { '' }
 
         # Check deduplication: Name, File Location, and exact File Size / Format
-        $classification = Classify-TransferCandidate `
-            -LocalFilePath $fp `
-            -DestinationRelativePath $destRel `
-            -RemoteInventoryMap $remoteInventory `
-            -DestinationAccount $DestinationAccount
+        $classification = if ($DeferRemotePreflight) {
+            [ordered]@{
+                Status = 'PreflightPending'
+                Reason = 'Remote inventory will be checked by the background transfer scheduler.'
+                LocalFormat = [string](Get-FileFormatCategory ([System.IO.Path]::GetExtension($fp)))
+            }
+        } else {
+            Classify-TransferCandidate `
+                -LocalFilePath $fp `
+                -DestinationRelativePath $destRel `
+                -RemoteInventoryMap $remoteInventory `
+                -DestinationAccount $DestinationAccount
+        }
 
         $isAlreadyInCloud = ($classification.Status -eq 'AlreadyInCloud')
         $dedupReason = [string]$classification.Reason
@@ -3925,6 +4183,9 @@ function Add-CloudTransferQueueItem {
         PreviousJobId = $PreviousJobId
         ReconciliationStatus = $reconciliationStatus
         StatusBeforeReconciliation = ''
+        StagedCleanupStatus = 'NotRequired'
+        StagedCleanupRetryAfterUtc = ''
+        ClearWhenStagedCleanupCompletes = $false
         # AccountId/ProviderId remain the destination aliases expected by the
         # existing Transfer Center and pending-summary code.
         AccountId = $dstAccId
@@ -4000,8 +4261,500 @@ function Get-CloudTransferStagedIdentity {
     # Must stay byte-identical to the identity built inside Get-CloudTransferPendingSummary
     # so an adopted job is recognized as covering its staged source.
     $normalized = Get-CloudTransferAccountKey -AccountId $AccountId -ProviderId $ProviderId
-    $path = ([string]$RelativePath).Replace('\', '/').Trim('/').ToLowerInvariant()
+    $path = ([string]$RelativePath).Replace('\', '/').Trim('/')
     return "$normalized|$path"
+}
+
+function Test-CloudTransferPathContainsReparsePoint {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $cursor = ConvertTo-NormalizedFullPath -Path $Path
+    if (-not $cursor) { return $true }
+    $isCaseSensitiveFileSystem = ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix)
+    $pathComparison = if ($isCaseSensitiveFileSystem) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        try {
+            $attributes = [System.IO.File]::GetAttributes($cursor)
+            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }
+        } catch {
+            if (Test-Path -LiteralPath $cursor) { return $true }
+        }
+        $parent = [System.IO.Directory]::GetParent($cursor)
+        if ($null -eq $parent) { break }
+        $parentPath = [string]$parent.FullName
+        if ([string]::Equals($parentPath, $cursor, $pathComparison)) { break }
+        $cursor = $parentPath
+    }
+    return $false
+}
+
+function Get-CloudTransferVfsOwnershipState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Account, [string]$AccountId = '')
+
+    $driveLetter = [string](Get-CloudTransferFieldValue $Account 'DriveLetter')
+    $providerId = Get-CloudTransferProviderId $Account
+    if (-not $driveLetter -and $AccountId -and (Get-Command Get-CloudAccount -ErrorAction SilentlyContinue)) {
+        try {
+            $storedAccount = Get-CloudAccount -AccountId $AccountId
+            $driveLetter = [string](Get-CloudTransferFieldValue $storedAccount 'DriveLetter')
+        } catch { }
+    }
+    if (-not $AccountId -and -not $driveLetter) { return @{ Known = $false; Root = '' } }
+
+    # Cleanup decisions are destructive and mount state can change between queue
+    # ticks. Never reuse a cached "unmounted" result across mount lifecycle changes.
+    $state = @{ Known = $false; Root = '' }
+    try {
+        if (Get-Command Get-VirtualDriveVfsStats -ErrorAction SilentlyContinue) {
+            $vfsStats = Get-VirtualDriveVfsStats -DriveLetter $driveLetter -AccountId $AccountId -ProviderId $providerId
+            $activeRoot = [string](Get-CloudTransferFieldValue $vfsStats 'DiskCachePath')
+            if ([bool](Get-CloudTransferFieldValue $vfsStats 'IsActive') -and $activeRoot) {
+                $state.Known = $true
+                $state.Root = ConvertTo-NormalizedFullPath -Path $activeRoot
+                return $state
+            } elseif ([bool](Get-CloudTransferFieldValue $vfsStats 'IsActive')) {
+                return $state
+            }
+        }
+        if (Get-Command Get-VirtualDriveStatus -ErrorAction SilentlyContinue) {
+            $mountStatus = Get-VirtualDriveStatus -DriveLetter $driveLetter -AccountId $AccountId -ProviderId $providerId
+            if (-not [bool](Get-CloudTransferFieldValue $mountStatus 'IsMounted') -and
+                -not [bool](Get-CloudTransferFieldValue $mountStatus 'ProcessRunning')) {
+                $state.Known = $true
+                $state.Root = ''
+            }
+        }
+    } catch { }
+    return $state
+}
+
+function Save-CloudTransferStagedCleanupCheckpointIfQueued {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Job)
+
+    if (-not (Get-Command Save-DurableTransferQueue -ErrorAction SilentlyContinue)) { return }
+    $queueId = [string](Get-CloudTransferFieldValue $Job 'QueueId')
+    foreach ($queuedJob in @($script:CloudTransferQueue)) {
+        if ([object]::ReferenceEquals($queuedJob, $Job) -or
+            ($queueId -and [string](Get-CloudTransferFieldValue $queuedJob 'QueueId') -eq $queueId)) {
+            Save-DurableTransferQueue | Out-Null
+            return
+        }
+    }
+}
+
+function Invoke-ConfirmedStagedVfsSourceCleanup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Job)
+
+    if (-not [bool](Get-CloudTransferFieldValue $Job 'RecoveredFromVfsCache')) {
+        $Job['StagedCleanupStatus'] = 'NotRequired'
+        return @{ Success = $true; Status = 'NotRequired'; BytesRemoved = 0L; Reason = 'Source is not an adopted VFS cache file.' }
+    }
+    if ([string](Get-CloudTransferFieldValue $Job 'Status') -ne 'Completed and remotely confirmed') {
+        return @{ Success = $false; Status = 'Pending: remote confirmation required'; BytesRemoved = 0L; Reason = 'The destination has not been remotely confirmed.' }
+    }
+
+    $previousStatus = [string](Get-CloudTransferFieldValue $Job 'StagedCleanupStatus')
+    if ($previousStatus -in @('Removed', 'Already missing', 'NotRequired', 'Preserved: staged revision changed', 'Preserved: unverified staged metadata')) {
+        return @{ Success = $true; Status = $previousStatus; BytesRemoved = 0L; Reason = 'The staged source is already settled.' }
+    }
+
+    $sourcePathRaw = [string](Get-CloudTransferFieldValue $Job 'StagedSourcePath')
+    if ([string]::IsNullOrWhiteSpace($sourcePathRaw)) {
+        $Job['StagedCleanupStatus'] = 'Pending: staged path is unavailable'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The durable job has no staged source path.' }
+    }
+
+    $destinationAccount = Get-CloudTransferFieldValue $Job 'DestinationAccount'
+    $accountId = [string](Get-CloudTransferFieldValue $Job 'AccountId')
+    $providerId = ([string](Get-CloudTransferFieldValue $Job 'ProviderId')).ToLowerInvariant()
+    if (-not $accountId) { $accountId = [string](Get-CloudTransferFieldValue $destinationAccount 'Id') }
+    if (-not $providerId) { $providerId = (Get-CloudTransferProviderId $destinationAccount).ToLowerInvariant() }
+    if ($providerId -notin @('gdrive', 'terabox', 'vps', 'proton', 'mega', 's3')) {
+        $Job['StagedCleanupStatus'] = 'Pending: provider namespace is not recognized'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The provider namespace could not be validated.' }
+    }
+
+    $settings = Get-NSCloudDriveSettings
+    $cacheBase = [string](Get-CloudTransferFieldValue $destinationAccount 'CacheDirectory')
+    if ([string]::IsNullOrWhiteSpace($cacheBase)) { $cacheBase = [string](Get-CloudTransferFieldValue $settings 'CacheDirectory') }
+    if ([string]::IsNullOrWhiteSpace($cacheBase)) {
+        $cacheBase = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+            $homeDir = if ($env:HOME) { $env:HOME } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
+            Join-Path $homeDir 'CloudCache'
+        } else { 'D:\CloudCache' }
+    }
+
+    $normalizedBase = ConvertTo-NormalizedFullPath -Path $cacheBase
+    $normalizedSource = ConvertTo-NormalizedFullPath -Path $sourcePathRaw
+    if (-not $normalizedBase -or -not $normalizedSource -or -not (Test-Path -LiteralPath $normalizedBase -PathType Container)) {
+        $Job['StagedCleanupStatus'] = 'Pending: cache root is unavailable'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The configured cache root could not be resolved.' }
+    }
+
+    $isCaseSensitiveFileSystem = ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix)
+    $pathComparison = if ($isCaseSensitiveFileSystem) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    $nameComparer = if ($isCaseSensitiveFileSystem) { [System.StringComparer]::Ordinal } else { [System.StringComparer]::OrdinalIgnoreCase }
+    $accountNames = [System.Collections.Generic.HashSet[string]]::new($nameComparer)
+    foreach ($candidateId in @($accountId, [string](Get-CloudTransferFieldValue $destinationAccount 'Id'))) {
+        if ([string]::IsNullOrWhiteSpace($candidateId) -or $candidateId -match '[\\/]' -or $candidateId -in @('.', '..')) { continue }
+        [void]$accountNames.Add($candidateId)
+        [void]$accountNames.Add("${providerId}_$candidateId")
+    }
+    if (-not $accountId) { [void]$accountNames.Add($providerId) }
+
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $basePrefix = $normalizedBase.TrimEnd('\', '/') + $separator
+    if (-not $normalizedSource.StartsWith($basePrefix, $pathComparison)) {
+        $Job['StagedCleanupStatus'] = 'Pending: staged source is outside the account cache'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged path is outside the configured cache directory.' }
+    }
+
+    $relativeToBase = $normalizedSource.Substring($basePrefix.Length)
+    $segments = @($relativeToBase -split '[\\/]' | Where-Object { $_ -ne '' })
+    if ($segments.Count -lt 3 -or -not $accountNames.Contains([string]$segments[0]) -or
+        -not [string]::Equals([string]$segments[1], 'vfs', $pathComparison)) {
+        $Job['StagedCleanupStatus'] = 'Pending: staged source is outside the account VFS cache'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = "The staged path does not match this account's VFS cache namespace." }
+    }
+
+    $accountRoot = Join-Path $normalizedBase ([string]$segments[0])
+    $vfsRoot = Join-Path $accountRoot 'vfs'
+    $expectedSource = $vfsRoot
+    for ($segmentIndex = 2; $segmentIndex -lt $segments.Count; $segmentIndex++) {
+        $expectedSource = Join-Path $expectedSource ([string]$segments[$segmentIndex])
+    }
+    $expectedSource = ConvertTo-NormalizedFullPath -Path $expectedSource
+    if (-not [string]::Equals($expectedSource, $normalizedSource, $pathComparison)) {
+        $Job['StagedCleanupStatus'] = 'Pending: staged path normalization failed'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged path could not be validated against its account root.' }
+    }
+
+    $metaRoot = ConvertTo-NormalizedFullPath -Path (Join-Path $accountRoot 'vfsMeta')
+    $metaPath = $metaRoot
+    for ($segmentIndex = 2; $segmentIndex -lt $segments.Count; $segmentIndex++) {
+        $metaPath = Join-Path $metaPath ([string]$segments[$segmentIndex])
+    }
+    $metaPath = ConvertTo-NormalizedFullPath -Path $metaPath
+    $metaRootPrefix = $metaRoot.TrimEnd('\', '/') + $separator
+    if (-not $metaPath.StartsWith($metaRootPrefix, $pathComparison)) {
+        $Job['StagedCleanupStatus'] = 'Pending: staged metadata is outside the account cache'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The paired metadata path is outside the configured account cache.' }
+    }
+
+    # Never remove data from the VFS root owned by a currently mounted rclone
+    # process. Orphan recovery should normally point elsewhere; this is a second
+    # guard for stale or manually edited durable queue records.
+    $ownership = Get-CloudTransferVfsOwnershipState -Account $destinationAccount -AccountId $accountId
+    if (-not $ownership.Known) {
+        $Job['StagedCleanupStatus'] = 'Pending: active mount cache ownership is unknown'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The current mount cache root could not be verified safely.' }
+    }
+    $normalizedActiveRoot = [string]$ownership.Root
+    if ($normalizedActiveRoot) {
+        $activePrefix = $normalizedActiveRoot.TrimEnd('\', '/') + $separator
+        if ([string]::Equals($normalizedSource, $normalizedActiveRoot, $pathComparison) -or $normalizedSource.StartsWith($activePrefix, $pathComparison)) {
+            $Job['StagedCleanupStatus'] = 'Pending: source belongs to an active mount'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged source belongs to the currently mounted rclone cache.' }
+        }
+    }
+
+    # Inspect every existing ancestor through the cache root and both paired file
+    # paths so symlinks/junctions cannot redirect a deletion outside this account.
+    foreach ($boundary in @($normalizedBase, $accountRoot, $vfsRoot, $normalizedSource, $metaRoot, $metaPath)) {
+        if (Test-CloudTransferPathContainsReparsePoint -Path $boundary) {
+            $Job['StagedCleanupStatus'] = 'Pending: reparse-point path is protected'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'A managed cache path or one of its ancestors is a reparse point or could not be inspected.' }
+        }
+    }
+
+    # The exact source revision must still be the one the durable job uploaded.
+    $expectedSize = [int64](Get-CloudTransferFieldValue $Job 'FileSizeBytes')
+    $expectedWriteRaw = [string](Get-CloudTransferFieldValue $Job 'StagedSourceLastWriteUtc')
+    $expectedSha256 = [string](Get-CloudTransferFieldValue $Job 'StagedSourceSha256')
+    $expectedMetadataSha256 = [string](Get-CloudTransferFieldValue $Job 'StagedMetadataSha256')
+    if ($expectedSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        $Job['StagedCleanupStatus'] = 'Pending: staged content fingerprint is unavailable'
+        return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged source has no durable SHA-256 fingerprint; it was preserved.' }
+    }
+    $bytesRemoved = 0L
+    $sourceExistedAtStart = Test-Path -LiteralPath $normalizedSource -PathType Leaf
+    $sourceStream = $null
+    $metaStream = $null
+    $metadataHashAtOpen = ''
+    if ($sourceExistedAtStart) {
+        try {
+            # Open without write/delete sharing so the checked file object cannot be
+            # replaced or modified before handle-based deletion on Windows.
+            $sourceStream = Open-CacheFileExclusiveRead -Path $normalizedSource
+            $sourceInfo = Get-Item -LiteralPath $normalizedSource -Force -ErrorAction Stop
+        } catch {
+            if ($sourceStream) { $sourceStream.Dispose(); $sourceStream = $null }
+            $Job['StagedCleanupStatus'] = 'Pending: staged source could not be read'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged source could not be read safely.' }
+        }
+        if (($sourceInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Test-CloudTransferPathContainsReparsePoint -Path $normalizedSource)) {
+            $sourceStream.Dispose()
+            $Job['StagedCleanupStatus'] = 'Pending: staged source is a reparse point'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged source is a reparse point.' }
+        }
+        if ($sourceInfo.Length -ne $expectedSize -or $sourceStream.Length -ne $expectedSize) {
+            # The uploaded revision no longer occupies this path. Preserve the newer
+            # bytes; startup reconciliation can enqueue that new revision separately.
+            $sourceStream.Dispose()
+            $Job['StagedCleanupStatus'] = 'Preserved: staged revision changed'
+            return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'A newer staged revision was preserved for a separate transfer.' }
+        }
+        $expectedWrite = [DateTime]::MinValue
+        if (-not [DateTime]::TryParse($expectedWriteRaw, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$expectedWrite)) {
+            $sourceStream.Dispose()
+            $Job['StagedCleanupStatus'] = 'Pending: staged revision timestamp is missing'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The queued staged revision has no valid timestamp.' }
+        }
+        if ($expectedWrite.Kind -ne [DateTimeKind]::Utc) { $expectedWrite = $expectedWrite.ToUniversalTime() }
+        if ($sourceInfo.LastWriteTimeUtc.Ticks -ne $expectedWrite.Ticks) {
+            $sourceStream.Dispose()
+            $Job['StagedCleanupStatus'] = 'Preserved: staged revision changed'
+            return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'A newer staged revision was preserved for a separate transfer.' }
+        }
+
+        $actualSha256 = Get-CacheStreamSha256 -Stream $sourceStream
+        if (-not [string]::Equals($actualSha256, $expectedSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $sourceStream.Dispose()
+            $Job['StagedCleanupStatus'] = 'Preserved: staged revision changed'
+            return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged content no longer matches the SHA-256 fingerprint recorded before confirmation.' }
+        }
+
+        try {
+            if ((Test-CloudTransferPathContainsReparsePoint -Path $normalizedSource) -or (Test-CloudTransferPathContainsReparsePoint -Path $normalizedBase)) {
+                $Job['StagedCleanupStatus'] = 'Pending: reparse-point path is protected'
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'A cache path changed to a reparse point before deletion.' }
+            }
+            $finalOwnership = Get-CloudTransferVfsOwnershipState -Account $destinationAccount -AccountId $accountId
+            if (-not $finalOwnership.Known) {
+                $Job['StagedCleanupStatus'] = 'Pending: active mount cache ownership is unknown'
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'Mount ownership changed or became unknown before staged cleanup.' }
+            }
+            $finalActiveRoot = [string]$finalOwnership.Root
+            if ($finalActiveRoot) {
+                $finalActivePrefix = $finalActiveRoot.TrimEnd('\', '/') + $separator
+                if ([string]::Equals($normalizedSource, $finalActiveRoot, $pathComparison) -or $normalizedSource.StartsWith($finalActivePrefix, $pathComparison)) {
+                    $Job['StagedCleanupStatus'] = 'Pending: source belongs to an active mount'
+                    return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged source became owned by an active mount before cleanup.' }
+                }
+            }
+
+            # Lock and fingerprint the paired metadata before removing the data. The
+            # same handle is retained through deletion so a new/dirty sidecar cannot
+            # appear in the old data-delete -> metadata-open gap.
+            if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+                $metaStream = Open-CacheFileExclusiveRead -Path $metaPath
+                if (Test-CloudTransferPathContainsReparsePoint -Path $metaPath) {
+                    throw 'The staged metadata path is a reparse point.'
+                }
+                $metadataHashAtOpen = Get-CacheStreamSha256 -Stream $metaStream
+                if ($expectedMetadataSha256 -and ($expectedMetadataSha256 -eq 'ABSENT' -or
+                    -not [string]::Equals($metadataHashAtOpen, $expectedMetadataSha256, [System.StringComparison]::OrdinalIgnoreCase))) {
+                    $metaStream.Dispose()
+                    $metaStream = $null
+                    $Job['StagedCleanupStatus'] = 'Pending: staged metadata changed'
+                    return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The paired metadata changed since cleanup was checkpointed; both files were preserved.' }
+                }
+                $Job['StagedMetadataSha256'] = $metadataHashAtOpen
+                $expectedMetadataSha256 = $metadataHashAtOpen
+                Save-CloudTransferStagedCleanupCheckpointIfQueued -Job $Job
+            } elseif ($expectedMetadataSha256 -and $expectedMetadataSha256 -ne 'ABSENT') {
+                # A prior durable cleanup attempt recorded a paired sidecar
+                # fingerprint. If that sidecar is now missing while the staged
+                # data still exists, do not infer that it was safely removed;
+                # preserve the data until the exact metadata revision can be
+                # verified again.
+                $Job['StagedCleanupStatus'] = 'Pending: staged metadata is missing'
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The paired metadata recorded by an earlier cleanup checkpoint is missing; the staged data was preserved.' }
+            } elseif (-not $expectedMetadataSha256) {
+                # Persist an explicit absence marker. If a sidecar appears after this
+                # point, it is a new revision and must not be removed by this job.
+                $Job['StagedMetadataSha256'] = 'ABSENT'
+                $expectedMetadataSha256 = 'ABSENT'
+                Save-CloudTransferStagedCleanupCheckpointIfQueued -Job $Job
+            }
+
+            $bytesRemoved = [int64]$sourceInfo.Length
+            Remove-CacheFileByExclusiveHandle -Path $normalizedSource -Stream $sourceStream -ExpectedSha256 $expectedSha256
+        } catch {
+            if ($metaStream) { $metaStream.Dispose(); $metaStream = $null }
+            $removalExceptionType = if ($_.Exception) { $_.Exception.GetType().Name } else { 'UnknownException' }
+            if ([string]$Job['StagedCleanupStatus'] -eq 'Pending: staged metadata changed') {
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The paired metadata changed and the staged data was preserved.' }
+            }
+            $Job['StagedCleanupStatus'] = "Pending: staged source removal failed ($removalExceptionType)"
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = "The staged source could not be removed ($removalExceptionType)." }
+        } finally {
+            if ($sourceStream) { $sourceStream.Dispose(); $sourceStream = $null }
+        }
+    }
+
+    # A new revision may have appeared at the same logical path after the old
+    # source was removed. Preserve its metadata rather than deleting by pathname.
+    if (Test-Path -LiteralPath $normalizedSource -PathType Leaf) {
+        $Job['StagedCleanupStatus'] = 'Preserved: staged revision changed'
+        return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'A newer staged revision appeared during cleanup and was preserved.' }
+    }
+
+    if (-not $sourceExistedAtStart -and -not $expectedMetadataSha256 -and
+        (Test-Path -LiteralPath $metaPath -PathType Leaf)) {
+        # Legacy jobs may predate durable metadata fingerprints. With the payload
+        # already absent there is no evidence tying the current sidecar to the
+        # remotely confirmed revision, so keep it instead of adopting its hash.
+        $Job['StagedCleanupStatus'] = 'Preserved: unverified staged metadata'
+        return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = 0L; Reason = 'The staged payload is already missing and its sidecar has no durable fingerprint; the unverified metadata was preserved.' }
+    }
+
+    if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+        try {
+            if (-not $metaStream) {
+                if ($sourceExistedAtStart -or $expectedMetadataSha256 -eq 'ABSENT') {
+                    $Job['StagedCleanupStatus'] = 'Pending: new staged metadata appeared during cleanup'
+                    return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'A paired metadata file appeared after its data revision was checked; the new metadata was preserved.' }
+                }
+                $metaStream = Open-CacheFileExclusiveRead -Path $metaPath
+                $metadataHashAtOpen = Get-CacheStreamSha256 -Stream $metaStream
+                if ($expectedMetadataSha256 -and $expectedMetadataSha256 -ne 'ABSENT' -and
+                    -not [string]::Equals($metadataHashAtOpen, $expectedMetadataSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $metaStream.Dispose()
+                    $metaStream = $null
+                    $Job['StagedCleanupStatus'] = 'Pending: staged metadata changed'
+                    return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'The paired metadata differs from the cleanup checkpoint and was preserved.' }
+                }
+                if (-not $expectedMetadataSha256) {
+                    $expectedMetadataSha256 = $metadataHashAtOpen
+                    $Job['StagedMetadataSha256'] = $metadataHashAtOpen
+                    Save-CloudTransferStagedCleanupCheckpointIfQueued -Job $Job
+                }
+            }
+        } catch {
+            if ($metaStream) { $metaStream.Dispose(); $metaStream = $null }
+        }
+        if (-not $metaStream -or (Test-CloudTransferPathContainsReparsePoint -Path $metaPath)) {
+            if ($metaStream) { $metaStream.Dispose(); $metaStream = $null }
+            $Job['StagedCleanupStatus'] = 'Pending: staged metadata is in use'
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'The staged data is gone but its metadata is in use or its path is redirected.' }
+        }
+        try {
+            $metadataHashBeforeRemoval = Get-CacheStreamSha256 -Stream $metaStream
+            if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) {
+                # Unix permits unlink/replace while a file is open. Re-read the
+                # pathname itself as well as the held inode before unlinking it.
+                $metadataPathHash = Get-CachePathSha256 -Path $metaPath
+                if (-not [string]::Equals($metadataPathHash, $metadataHashBeforeRemoval, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $Job['StagedCleanupStatus'] = 'Pending: staged metadata changed'
+                    return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'The metadata path now refers to a different revision; that metadata was preserved.' }
+                }
+            }
+            if ($expectedMetadataSha256 -eq 'ABSENT' -or
+                -not [string]::Equals($metadataHashBeforeRemoval, $expectedMetadataSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $Job['StagedCleanupStatus'] = 'Pending: staged metadata changed'
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'The paired metadata changed during staged cleanup and was preserved.' }
+            }
+            if (Test-Path -LiteralPath $normalizedSource -PathType Leaf) {
+                $Job['StagedCleanupStatus'] = 'Preserved: staged revision changed'
+                return @{ Success = $true; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'A newer staged revision appeared before metadata removal.' }
+            }
+            if ((Test-CloudTransferPathContainsReparsePoint -Path $metaPath) -or (Test-CloudTransferPathContainsReparsePoint -Path $normalizedBase)) {
+                $Job['StagedCleanupStatus'] = 'Pending: reparse-point path is protected'
+                return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = 'A cache metadata path changed to a reparse point before deletion.' }
+            }
+            Remove-CacheFileByExclusiveHandle -Path $metaPath -Stream $metaStream -ExpectedSha256 $expectedMetadataSha256
+        } catch {
+            $metadataRemovalExceptionType = if ($_.Exception) { $_.Exception.GetType().Name } else { 'UnknownException' }
+            $Job['StagedCleanupStatus'] = "Pending: staged metadata removal failed ($metadataRemovalExceptionType)"
+            return @{ Success = $false; Status = [string]$Job['StagedCleanupStatus']; BytesRemoved = $bytesRemoved; Reason = "The staged data is gone but its metadata could not be removed ($metadataRemovalExceptionType)." }
+        } finally {
+            if ($metaStream) { $metaStream.Dispose(); $metaStream = $null }
+        }
+    } elseif ($metaStream) {
+        $metaStream.Dispose()
+        $metaStream = $null
+    }
+
+    $finalStatus = if ($bytesRemoved -gt 0 -or -not (Test-Path -LiteralPath $normalizedSource -PathType Leaf)) { 'Removed' } else { 'Already missing' }
+    $Job['StagedCleanupStatus'] = $finalStatus
+    return @{ Success = $true; Status = $finalStatus; BytesRemoved = $bytesRemoved; Reason = 'The remotely confirmed staged revision and its metadata were removed.' }
+}
+
+function Register-ConfirmedStagedCleanupCheckpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$AccountId,
+        [Parameter(Mandatory = $true)][string]$ProviderId,
+        [Parameter(Mandatory = $true)][int64]$Length,
+        [Parameter(Mandatory = $true)][string]$LastWriteUtc,
+        [Parameter(Mandatory = $true)][object]$DestinationAccount,
+        [string]$BatchId = ''
+    )
+
+    $normalizedAccountId = Get-CloudTransferAccountKey -AccountId $AccountId -ProviderId $ProviderId
+    if (-not $normalizedAccountId) { $normalizedAccountId = $AccountId }
+    $normalizedRelative = Normalize-CloudPath -Path $RelativePath
+    $destinationDir = if ($normalizedRelative.Contains('/')) { $normalizedRelative.Substring(0, $normalizedRelative.LastIndexOf('/')) } else { '' }
+    $job = Add-CloudTransferQueueItem `
+        -SourceAccount @{ Id = 'local'; ProviderId = 'local'; Label = 'Local staging cache' } `
+        -SourcePath $Path `
+        -DestinationAccount $DestinationAccount `
+        -DestinationPath $destinationDir `
+        -ConflictAction 'Overwrite' `
+        -FileSizeBytes $Length `
+        -BatchId $BatchId `
+        -RelativePath $normalizedRelative `
+        -SourceLastWriteUtc $LastWriteUtc `
+        -OperationType 'Upload' `
+        -Origin 'ConfirmedStagedCleanup' `
+        -SkipPersist
+
+    if ($null -eq $job) {
+        $identity = Get-CloudTransferStagedIdentity -AccountId $AccountId -ProviderId $ProviderId -RelativePath $normalizedRelative
+        foreach ($existing in @($script:CloudTransferQueue)) {
+            $existingPath = [string](Get-CloudTransferFieldValue $existing 'DestinationFilePath')
+            if (-not $existingPath) { $existingPath = [string](Get-CloudTransferFieldValue $existing 'RelativePath') }
+            $existingIdentity = Get-CloudTransferStagedIdentity -AccountId ([string](Get-CloudTransferFieldValue $existing 'AccountId')) -ProviderId ([string](Get-CloudTransferFieldValue $existing 'ProviderId')) -RelativePath $existingPath
+            if ($existingIdentity -eq $identity) { $job = $existing; break }
+        }
+    }
+    if ($null -eq $job) { return $null }
+
+    # The remote provider already confirmed this exact path and size. This checkpoint
+    # is terminal by design: it exists solely to retry safe local cleanup after a lock,
+    # restart, or transient filesystem failure, never to enqueue the cloud upload again.
+    $job['StagedSourcePath'] = $Path
+    $job['StagedSourceLastWriteUtc'] = $LastWriteUtc
+    $checkpointStream = $null
+    try {
+        $checkpointStream = Open-CacheFileExclusiveRead -Path $Path
+        $job['StagedSourceSha256'] = Get-CacheStreamSha256 -Stream $checkpointStream
+    } catch {
+        $job['RecoveredFromVfsCache'] = $true
+        $job['StagedCleanupStatus'] = 'Pending: staged content fingerprint is unavailable'
+        $job['Status'] = 'Completed and remotely confirmed'
+        $job['CompletedUtc'] = [DateTime]::UtcNow
+        $job['WorkerPid'] = 0
+        $job['WorkerLeaseUtc'] = $null
+        return $job
+    } finally {
+        if ($checkpointStream) { $checkpointStream.Dispose() }
+    }
+    $job['RecoveredFromVfsCache'] = $true
+    $job['StagedCleanupStatus'] = 'Pending'
+    $job['Status'] = 'Completed and remotely confirmed'
+    $job['CompletedUtc'] = [DateTime]::UtcNow
+    $job['WorkerPid'] = 0
+    $job['WorkerLeaseUtc'] = $null
+    return $job
 }
 
 function Import-StagedVfsFilesToTransferQueue {
@@ -4013,7 +4766,8 @@ function Import-StagedVfsFilesToTransferQueue {
     left in a superseded cache root (for example after the cache root name changes)
     is never transmitted by the running process. This function turns each such file
     into a durable transfer job that the application uploads and verifies itself,
-    without copying, moving, or deleting the staged source.
+     without copying or moving the staged source. The source is removed only after
+     live remote confirmation and exact staged-revision checks.
     #>
     [CmdletBinding()]
     param(
@@ -4027,7 +4781,10 @@ function Import-StagedVfsFilesToTransferQueue {
         [string]$BatchName = 'Recovered staged uploads',
 
         [Parameter(Mandatory = $false)]
-        [int]$MaxFilesPerPass = 250
+        [int]$MaxFilesPerPass = 250,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DeferRemotePreflight
     )
 
     $result = [ordered]@{
@@ -4068,9 +4825,9 @@ function Import-StagedVfsFilesToTransferQueue {
         }
     }
 
-    $coveredIdentities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $activeIdentityJobs = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $settledRevisions = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $coveredIdentities = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $activeIdentityJobs = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $settledRevisions = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
     # Durable settlements survive the completed list being cleared.
     foreach ($ledgerEntry in $script:CloudTransferSettledStaged.GetEnumerator()) {
         $settledRevisions[$ledgerEntry.Key] = [pscustomobject]@{
@@ -4110,9 +4867,16 @@ function Import-StagedVfsFilesToTransferQueue {
     }
     $localSourceAccount = @{ Id = 'local'; ProviderId = 'local'; Label = 'Local staging cache' }
     $adoptedJobs = [System.Collections.Generic.List[object]]::new()
+    $cleanupCheckpointJobs = [System.Collections.Generic.List[object]]::new()
     $supersededJobs = [System.Collections.Generic.List[object]]::new()
 
+    $processedFileCount = 0
+    $totalStagedFileCount = @($StagedFiles).Count
     foreach ($file in @($StagedFiles)) {
+        $processedFileCount++
+        if (($processedFileCount % 25) -eq 0) {
+            Write-Verbose "Processed $processedFileCount of $totalStagedFileCount staged cache entries."
+        }
         if ($result.AdoptedCount -ge $MaxFilesPerPass) { break }
         if ($null -eq $file) { continue }
 
@@ -4142,6 +4906,18 @@ function Import-StagedVfsFilesToTransferQueue {
         if ($hasConflict -or $ambiguousReview) { $result.SkippedCount++; continue }
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $result.FailedCount++; continue }
 
+        try {
+            $currentStagedFile = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ([int64]$currentStagedFile.Length -ne $length) { $result.SkippedCount++; continue }
+            if ($lastWriteRaw -is [DateTime] -and $currentStagedFile.LastWriteTimeUtc.Ticks -ne ([DateTime]$lastWriteRaw).ToUniversalTime().Ticks) {
+                $result.SkippedCount++
+                continue
+            }
+        } catch {
+            $result.FailedCount++
+            continue
+        }
+
         $lastWriteUtc = ''
         if ($lastWriteRaw -is [DateTime]) {
             $lastWriteUtc = ([DateTime]$lastWriteRaw).ToUniversalTime().ToString('o')
@@ -4155,13 +4931,38 @@ function Import-StagedVfsFilesToTransferQueue {
             $settled = $settledRevisions[$identity]
             if ([int64]$settled.Size -eq $length -and -not [string]::IsNullOrEmpty($settled.LastWriteUtc) -and $settled.LastWriteUtc -eq $lastWriteUtc) {
                 $result.AlreadySettledCount++
+                $accountLookupKey = Get-CloudTransferAccountKey -AccountId $accountId -ProviderId $providerId
+                $accountForFile = if ($accountLookupKey -and $accountIndex.ContainsKey($accountLookupKey)) { $accountIndex[$accountLookupKey] } else { @{ Id = if ($accountLookupKey) { $accountLookupKey } else { $accountId }; ProviderId = $providerId } }
+                $checkpoint = Register-ConfirmedStagedCleanupCheckpoint -Path $path -RelativePath $relativePath -AccountId $accountId -ProviderId $providerId -Length $length -LastWriteUtc $lastWriteUtc -DestinationAccount $accountForFile -BatchId $batchId
+                if ($checkpoint -and -not $cleanupCheckpointJobs.Contains($checkpoint)) { $cleanupCheckpointJobs.Add($checkpoint) }
                 continue
             }
         }
 
+        # Avoid provider round-trips for work already represented by the exact
+        # durable staged revision. Production recovery defers remote inventory to
+        # Process-CloudTransferQueue, which batches by destination folder.
+        if ($activeIdentityJobs.ContainsKey($identity)) {
+            $activeJob = $activeIdentityJobs[$identity]
+            $activeStatus = [string](& $readField $activeJob 'Status')
+            $activeSize = [int64](& $readField $activeJob 'FileSizeBytes')
+            $activeWrite = [string](& $readField $activeJob 'StagedSourceLastWriteUtc')
+            if ($activeSize -eq $length -and -not [string]::IsNullOrEmpty($activeWrite) -and $activeWrite -eq $lastWriteUtc) {
+                $result.AlreadyQueuedCount++
+                continue
+            }
+            if ($activeStatus -in @('Uploading', 'Staging', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')) {
+                $result.SkippedCount++
+                continue
+            }
+        }
+
+        $accountLookupKey = Get-CloudTransferAccountKey -AccountId $accountId -ProviderId $providerId
+        $accountForFile = if ($accountLookupKey -and $accountIndex.ContainsKey($accountLookupKey)) { $accountIndex[$accountLookupKey] } else { @{ Id = if ($accountLookupKey) { $accountLookupKey } else { $accountId }; ProviderId = $providerId } }
+
         # Check durable deduplication ledger and remote cloud storage before adoption:
         # If the file is already confirmed in the cloud with identical relative path and size, skip re-adoption.
-        if (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue) {
+        if (-not $DeferRemotePreflight -and (Get-Command Test-RemoteCloudFileDeduplication -ErrorAction SilentlyContinue)) {
             try {
                 $dedup = Test-RemoteCloudFileDeduplication `
                     -AccountId $accountId `
@@ -4169,7 +4970,7 @@ function Import-StagedVfsFilesToTransferQueue {
                     -RemotePath $relativePath `
                     -LocalSizeBytes $length `
                     -LocalFilePath $path `
-                    -Account $account
+                    -Account $accountForFile
                 if ($dedup.IsPresent) {
                     $result.AlreadySettledCount++
                     $script:CloudTransferSettledStaged[$identity] = @{
@@ -4177,13 +4978,17 @@ function Import-StagedVfsFilesToTransferQueue {
                         LastWriteUtc = $lastWriteUtc
                         ConfirmedUtc = [DateTime]::UtcNow.ToString('o')
                     }
+                    $checkpoint = Register-ConfirmedStagedCleanupCheckpoint -Path $path -RelativePath $relativePath -AccountId $accountId -ProviderId $providerId -Length $length -LastWriteUtc $lastWriteUtc -DestinationAccount $accountForFile -BatchId $batchId
+                    if ($checkpoint -and -not $cleanupCheckpointJobs.Contains($checkpoint)) { $cleanupCheckpointJobs.Add($checkpoint) }
                     continue
                 }
             } catch { }
-        } elseif (Get-Command Test-CloudDedupVerifiedFile -ErrorAction SilentlyContinue) {
+        } elseif (-not $DeferRemotePreflight -and (Get-Command Test-CloudDedupVerifiedFile -ErrorAction SilentlyContinue)) {
             try {
                 if (Test-CloudDedupVerifiedFile -AccountId $accountId -RemotePath $relativePath -SizeBytes $length) {
                     $result.AlreadySettledCount++
+                    $checkpoint = Register-ConfirmedStagedCleanupCheckpoint -Path $path -RelativePath $relativePath -AccountId $accountId -ProviderId $providerId -Length $length -LastWriteUtc $lastWriteUtc -DestinationAccount $accountForFile -BatchId $batchId
+                    if ($checkpoint -and -not $cleanupCheckpointJobs.Contains($checkpoint)) { $cleanupCheckpointJobs.Add($checkpoint) }
                     continue
                 }
             } catch { }
@@ -4227,17 +5032,26 @@ function Import-StagedVfsFilesToTransferQueue {
         $normalizedRelative = Normalize-CloudPath -Path $relativePath
         $destinationDir = if ($normalizedRelative.Contains('/')) { $normalizedRelative.Substring(0, $normalizedRelative.LastIndexOf('/')) } else { '' }
 
+        $destinationAccount = $accountForFile
         $normalizedAccountId = Get-CloudTransferAccountKey -AccountId $accountId -ProviderId $providerId
-        $destinationAccount = if ($normalizedAccountId -and $accountIndex.ContainsKey($normalizedAccountId)) {
-            $accountIndex[$normalizedAccountId]
-        } else {
-            @{ Id = if ($normalizedAccountId) { $normalizedAccountId } else { $accountId }; ProviderId = $providerId }
-        }
         if ($destinationAccount -isnot [System.Collections.IDictionary]) {
             $destinationAccount = ConvertTo-TransferAccountSnapshot -Account $destinationAccount
         }
         if (-not $destinationAccount.Contains('Id')) { $destinationAccount['Id'] = $accountId }
         if (-not $destinationAccount.Contains('ProviderId') -and $providerId) { $destinationAccount['ProviderId'] = $providerId }
+
+        $stagedHashStream = $null
+        try {
+            $stagedHashStream = Open-CacheFileExclusiveRead -Path $path
+            if ($stagedHashStream.Length -ne $length) { throw 'The staged file changed while being fingerprinted.' }
+            $stagedSha256 = Get-CacheStreamSha256 -Stream $stagedHashStream
+        } catch {
+            if ($stagedHashStream) { $stagedHashStream.Dispose() }
+            $result.FailedCount++
+            continue
+        } finally {
+            if ($stagedHashStream) { $stagedHashStream.Dispose() }
+        }
 
         try {
             $job = Add-CloudTransferQueueItem `
@@ -4262,6 +5076,8 @@ function Import-StagedVfsFilesToTransferQueue {
             }
             $job['StagedSourcePath'] = $path
             $job['StagedSourceLastWriteUtc'] = $lastWriteUtc
+            $job['StagedSourceSha256'] = $stagedSha256
+            $job['StagedCleanupStatus'] = 'Pending'
             # The scheduler re-checks this revision before uploading, so a staged file
             # that changes while queued is reported instead of uploading stale bytes.
             $job['SourceLastWriteUtc'] = $lastWriteUtc
@@ -4277,11 +5093,15 @@ function Import-StagedVfsFilesToTransferQueue {
         }
     }
 
-    if ($adoptedJobs.Count -gt 0 -or $supersededJobs.Count -gt 0) {
+    if ($adoptedJobs.Count -gt 0 -or $cleanupCheckpointJobs.Count -gt 0 -or $supersededJobs.Count -gt 0) {
         try {
             Save-DurableTransferQueue | Out-Null
         } catch {
             foreach ($job in $adoptedJobs) { [void]$script:CloudTransferQueue.Remove($job) }
+            foreach ($job in $cleanupCheckpointJobs) {
+                # Existing terminal jobs are updated in place; do not remove those.
+                if ($job['Origin'] -eq 'ConfirmedStagedCleanup') { [void]$script:CloudTransferQueue.Remove($job) }
+            }
             foreach ($entry in $supersededJobs) {
                 $entry.Job['Status'] = $entry.PreviousStatus
                 $entry.Job['LastError'] = $entry.PreviousError
@@ -4299,7 +5119,7 @@ function Import-StagedVfsFilesToTransferQueue {
         if (Get-Command Write-NSCloudLog -ErrorAction SilentlyContinue) {
             try {
                 Write-NSCloudLog -Severity 'Info' -Operation 'staged-upload-adoption' `
-                    -Message "Adopted $($result.AdoptedCount) orphaned staged file(s) ($($result.AdoptedBytes) bytes) into the durable transfer queue; staged sources were left untouched."
+                    -Message "Adopted $($result.AdoptedCount) staged file(s) ($($result.AdoptedBytes) bytes); exact staged sources are eligible for cleanup only after remote confirmation."
             } catch { }
         }
     }
@@ -4311,15 +5131,16 @@ function Get-CloudTransferPendingSummary {
     [CmdletBinding()]
     param(
         [object[]]$QueueItems = @(),
-        [object[]]$StagedFiles = @()
+        [object[]]$StagedFiles = @(),
+        [switch]$RequireSelectionForOrphanedStaging
     )
 
-    $seenJobs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $stagedCovered = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $seenStaged = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $seenJobs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $stagedCovered = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $seenStaged = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     # Remotely confirmed revisions: a staged source whose exact size and write time
     # were already verified on the provider must not keep inflating the pending count.
-    $settledRevisions = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $settledRevisions = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
     # Durable settlements remain valid even after the completed jobs are cleared.
     foreach ($ledgerEntry in $script:CloudTransferSettledStaged.GetEnumerator()) {
         $settledRevisions[$ledgerEntry.Key] = [pscustomobject]@{
@@ -4341,6 +5162,7 @@ function Get-CloudTransferPendingSummary {
         DuplicateJobCount = 0
         ConflictCount = 0
         NeedsReviewCount = 0
+        UntrackedStagedCount = 0
         ReconciliationCount = 0
         SupersededCount = 0
         UploadCount = 0
@@ -4372,7 +5194,7 @@ function Get-CloudTransferPendingSummary {
         $jobId = if ($item.Contains('JobId')) { [string]$item['JobId'] } elseif ($item.Contains('QueueId')) { [string]$item['QueueId'] } else { '' }
         $recordKey = if ($item.Contains('TransferKey') -and $item['TransferKey']) { "transfer|$($item['TransferKey'])" } elseif ($item.Contains('QueueId') -and $item['QueueId']) { "queue|$($item['QueueId'])" } elseif ($jobId) { "job|$jobId" } else { "unknown|$([Guid]::NewGuid().ToString('N'))" }
         $accountKey = & $normalizeAccountKey $accountId $providerId
-        $pathKey = if ($accountKey -and $logicalPath) { "$accountKey|$($logicalPath.Replace('\','/').Trim('/').ToLowerInvariant())" } else { '' }
+        $pathKey = if ($accountKey -and $logicalPath) { "$accountKey|$($logicalPath.Replace('\','/').Trim('/'))" } else { '' }
         # A completed older revision must not hide a newer dirty VFS revision at the
         # same destination path. Other queue states already account for that path.
         if ($pathKey -and $status -ne 'Completed and remotely confirmed') { $stagedCovered.Add($pathKey) | Out-Null }
@@ -4451,10 +5273,11 @@ function Get-CloudTransferPendingSummary {
         if (-not $accountId -or -not $logicalPath) {
             if (-not $path -and -not $logicalPath) { continue }
             # Do not merge records when account/path identity is incomplete.
-            $identity = if ($path) { "staged|$($path.ToLowerInvariant())" } else { "staged|$([Guid]::NewGuid().ToString('N'))" }
+            $normalizedLocalPath = if ([Environment]::OSVersion.Platform -eq [System.PlatformID]::Unix) { $path } else { $path.ToUpperInvariant() }
+            $identity = if ($path) { "staged|$normalizedLocalPath" } else { "staged|$([Guid]::NewGuid().ToString('N'))" }
         } else {
             $accountKey = & $normalizeAccountKey $accountId $providerId
-            $identity = "$accountKey|$($logicalPath.Replace('\','/').Trim('/').ToLowerInvariant())"
+            $identity = "$accountKey|$($logicalPath.Replace('\','/').Trim('/'))"
         }
         if ($stagedCovered.Contains($identity)) { continue }
         if ($settledRevisions.ContainsKey($identity)) {
@@ -4466,6 +5289,12 @@ function Get-CloudTransferPendingSummary {
             }
         }
         if ($seenStaged.Add($identity)) {
+            $isOutsideActiveCache = [bool](Get-CloudTransferFieldValue $item 'IsOutsideActiveCache')
+            if ($RequireSelectionForOrphanedStaging -and $isOutsideActiveCache) {
+                $counts.UntrackedStagedCount++
+                $counts.NeedsReviewCount++
+                continue
+            }
             $counts.StagedOnlyCount++
             $hasConflict = if ($item -is [System.Collections.IDictionary]) { $item.Contains('HasStagedPathConflict') -and [bool]$item['HasStagedPathConflict'] } elseif ($item.PSObject.Properties['HasStagedPathConflict']) { [bool]$item.HasStagedPathConflict } else { $false }
             $state = if ($item -is [System.Collections.IDictionary] -and $item.Contains('State')) { [string]$item['State'] } elseif ($item.PSObject.Properties['State']) { [string]$item.State } else { '' }
@@ -4492,11 +5321,52 @@ function Get-CloudTransferQueue {
     return ,@($copy.ToArray())
 }
 
+function Get-CloudTransferInventoryCacheKey {
+    [CmdletBinding()]
+    param(
+        [string]$AccountId = '',
+        [string]$ProviderId = '',
+        [string]$FolderPath = ''
+    )
+
+    $accountKey = Get-CloudTransferAccountKey -AccountId $AccountId -ProviderId $ProviderId
+    $providerKey = ([string]$ProviderId).Trim().ToLowerInvariant()
+    $folderKey = (Normalize-CloudPath -Path $FolderPath).Trim('/')
+    return "$accountKey`0$providerKey`0$folderKey"
+}
+
+function Get-CloudTransferQueueItemRevisionKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Job)
+
+    $identity = [ordered]@{
+        QueueId = [string](Get-CloudTransferFieldValue $Job 'QueueId')
+        OperationType = [string](Get-CloudTransferFieldValue $Job 'OperationType')
+        SourceProvider = ([string](Get-CloudTransferFieldValue $Job 'SourceProvider')).ToLowerInvariant()
+        DestinationProvider = ([string](Get-CloudTransferFieldValue $Job 'DestinationProvider')).ToLowerInvariant()
+        SourceAccountId = ([string](Get-CloudTransferFieldValue $Job 'SourceAccountId')).ToLowerInvariant()
+        DestinationAccountId = ([string](Get-CloudTransferFieldValue $Job 'DestinationAccountId')).ToLowerInvariant()
+        SourcePath = [string](Get-CloudTransferFieldValue $Job 'SourcePath')
+        DestinationPath = [string](Get-CloudTransferFieldValue $Job 'DestinationFilePath')
+        FileSizeBytes = [int64](Get-CloudTransferFieldValue $Job 'FileSizeBytes')
+        SourceLastWriteUtc = [string](Get-CloudTransferFieldValue $Job 'SourceLastWriteUtc')
+    }
+    $payload = ConvertTo-Json -InputObject $identity -Compress -Depth 4
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payload))).TrimEnd('=')
+    } finally { $sha.Dispose() }
+}
+
 function Process-CloudTransferQueue {
     [CmdletBinding()]
     param(
         [int]$MaxConcurrent = 4,
-        [string]$GlobalBandwidthLimit = ''
+        [string]$GlobalBandwidthLimit = '',
+        [object]$PreflightInventoryCache = $null,
+        [object]$RemoteVerificationResults = $null,
+        [switch]$RequireCachedRemoteChecks,
+        [switch]$DeferStagedCleanup
     )
 
     if ($script:TransferQueueStateUnavailable) {
@@ -4533,7 +5403,17 @@ function Process-CloudTransferQueue {
     try {
         $now = [DateTime]::UtcNow
         $stateChanged = $false
-        $preflightInventoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        $preflightInventoryCache = if ($PreflightInventoryCache) {
+            $PreflightInventoryCache
+        } else {
+            [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        }
+        $remoteVerificationResults = if ($RemoteVerificationResults) {
+            $RemoteVerificationResults
+        } else {
+            [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        }
+        $remoteCheckDeferredQueueIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
         if ([string]::IsNullOrEmpty($GlobalBandwidthLimit)) {
             try {
@@ -4735,13 +5615,24 @@ function Process-CloudTransferQueue {
             } elseif ($status -in @('Awaiting remote confirmation', 'Upload pending remote confirmation', 'Verifying remote file')) {
                 $verificationDue = if ($item.ContainsKey('NextRetryUtc') -and $item['NextRetryUtc'] -is [DateTime]) { [DateTime]$item['NextRetryUtc'] } else { [DateTime]::MinValue }
                 if ($verificationDue -gt $now) { continue }
+                $verificationResult = $null
+                if ($RequireCachedRemoteChecks) {
+                    $verificationQueueId = [string]$item['QueueId']
+                    if (-not $verificationQueueId -or -not $remoteVerificationResults.ContainsKey($verificationQueueId)) { continue }
+                    $cachedVerification = $remoteVerificationResults[$verificationQueueId]
+                    $expectedRevisionKey = Get-CloudTransferQueueItemRevisionKey -Job $item
+                    if (-not [string]::Equals([string](Get-CloudTransferFieldValue $cachedVerification 'RevisionKey'), $expectedRevisionKey, [System.StringComparison]::Ordinal)) { continue }
+                    $verificationResult = Get-CloudTransferFieldValue $cachedVerification 'Result' $null
+                }
                 # Strict progression: transition to the verification state.
                 $item['Status'] = 'Verifying remote file'
 
                 $vRes = $null
-                try {
-                    $vRes = Test-CloudTransferJobDestination -Job $item
-                } catch { }
+                if ($verificationResult) {
+                    $vRes = $verificationResult
+                } elseif (-not $RequireCachedRemoteChecks) {
+                    try { $vRes = Test-CloudTransferJobDestination -Job $item } catch { }
+                }
 
                 if ($vRes -and $vRes['Verified']) {
                     $item['Status'] = 'Completed and remotely confirmed'
@@ -4836,6 +5727,7 @@ function Process-CloudTransferQueue {
             $eligible = $null
             foreach ($q in @($script:CloudTransferQueue)) {
                 if ($null -eq $q) { continue }
+                if ($RequireCachedRemoteChecks -and $q.ContainsKey('QueueId') -and $remoteCheckDeferredQueueIds.Contains([string]$q['QueueId'])) { continue }
                 if ([string]$q['ReconciliationStatus'] -eq 'Required') { continue }
 
                 $canRun = $false
@@ -4911,15 +5803,22 @@ function Process-CloudTransferQueue {
                 } else {
                     $destFileRel = [string]$eligible['FileName']
                 }
+                $destParentRel = if ($destFileRel.Contains('/')) { $destFileRel.Substring(0, $destFileRel.LastIndexOf('/')) } else { '' }
+                $dstAccId = if ($eligible.ContainsKey('DestinationAccountId') -and $eligible['DestinationAccountId']) { [string]$eligible['DestinationAccountId'] } else { [string](Get-CloudTransferFieldValue $destAcc 'Id') }
+                $dstProvId = if ($eligible.ContainsKey('DestinationProvider') -and $eligible['DestinationProvider']) { [string]$eligible['DestinationProvider'] } else { [string](Get-CloudTransferFieldValue $destAcc 'ProviderId') }
+                $inventoryCacheKey = Get-CloudTransferInventoryCacheKey -AccountId $dstAccId -ProviderId $dstProvId -FolderPath $destParentRel
+                if ($RequireCachedRemoteChecks -and (
+                    -not $preflightInventoryCache.ContainsKey($inventoryCacheKey) -or
+                    -not (Get-Command Get-RemoteFileInventoryMap -ErrorAction SilentlyContinue) -or
+                    -not (Get-Command Classify-TransferCandidate -ErrorAction SilentlyContinue))) {
+                    [void]$remoteCheckDeferredQueueIds.Add([string]$eligible['QueueId'])
+                    continue
+                }
 
                 try {
                     $fileSize = if ($eligible.ContainsKey('FileSizeBytes')) { [int64]$eligible['FileSizeBytes'] } else { 0L }
-                    $dstAccId = if ($eligible.ContainsKey('DestinationAccountId') -and $eligible['DestinationAccountId']) { [string]$eligible['DestinationAccountId'] } else { [string](Get-CloudTransferFieldValue $destAcc 'Id') }
-                    $dstProvId = if ($eligible.ContainsKey('DestinationProvider') -and $eligible['DestinationProvider']) { [string]$eligible['DestinationProvider'] } else { [string](Get-CloudTransferFieldValue $destAcc 'ProviderId') }
 
                     if ((Get-Command Get-RemoteFileInventoryMap -ErrorAction SilentlyContinue) -and (Get-Command Classify-TransferCandidate -ErrorAction SilentlyContinue)) {
-                        $destParentRel = if ($destFileRel.Contains('/')) { $destFileRel.Substring(0, $destFileRel.LastIndexOf('/')) } else { '' }
-                        $inventoryCacheKey = '{0}|{1}|{2}' -f $dstAccId, $dstProvId, $destParentRel
                         if (-not $preflightInventoryCache.ContainsKey($inventoryCacheKey)) {
                             try {
                                 $preflightMap = Get-RemoteFileInventoryMap `
@@ -4990,8 +5889,14 @@ function Process-CloudTransferQueue {
                 $srcProvId = [string](Get-CloudTransferFieldValue $eligible 'SourceProvider')
                 $dstAccId = [string](Get-CloudTransferFieldValue $eligible 'DestinationAccountId')
                 $dstProvId = [string](Get-CloudTransferFieldValue $eligible 'DestinationProvider')
-                $sourceInventoryKey = '{0}|{1}|{2}' -f $srcAccId, $srcProvId, $srcParentRel
-                $destinationInventoryKey = '{0}|{1}|{2}' -f $dstAccId, $dstProvId, $destParentRel
+                $sourceInventoryKey = Get-CloudTransferInventoryCacheKey -AccountId $srcAccId -ProviderId $srcProvId -FolderPath $srcParentRel
+                $destinationInventoryKey = Get-CloudTransferInventoryCacheKey -AccountId $dstAccId -ProviderId $dstProvId -FolderPath $destParentRel
+                if ($RequireCachedRemoteChecks -and (
+                    -not $preflightInventoryCache.ContainsKey($sourceInventoryKey) -or
+                    -not $preflightInventoryCache.ContainsKey($destinationInventoryKey))) {
+                    [void]$remoteCheckDeferredQueueIds.Add([string]$eligible['QueueId'])
+                    continue
+                }
                 $dedupCheck = $null
 
                 if (Get-Command Get-RemoteFileInventoryMap -ErrorAction SilentlyContinue) {
@@ -5124,6 +6029,18 @@ function Process-CloudTransferQueue {
             }
         }
 
+        # Completed cache-recovery jobs remain durable until the exact staged source
+        # and paired metadata have been safely removed. A lock, changed revision, or
+        # unavailable cache root leaves a retryable cleanup status on the job.
+        if (-not $DeferStagedCleanup) {
+            foreach ($cleanupJob in @($script:CloudTransferQueue)) {
+                if ([string]$cleanupJob['Status'] -ne 'Completed and remotely confirmed' -or -not [bool]$cleanupJob['RecoveredFromVfsCache']) { continue }
+                $previousCleanupStatus = [string]$cleanupJob['StagedCleanupStatus']
+                $cleanupResult = Invoke-ConfirmedStagedVfsSourceCleanup -Job $cleanupJob
+                if ([string]$cleanupJob['StagedCleanupStatus'] -ne $previousCleanupStatus) { $stateChanged = $true }
+            }
+        }
+
         if ($stateChanged) {
             Save-DurableTransferQueue | Out-Null
             if (Get-Command Save-CloudDedupLedger -ErrorAction SilentlyContinue) {
@@ -5174,21 +6091,42 @@ function Stop-CloudTransferQueueItem {
 function Clear-CloudTransferQueue {
     [CmdletBinding()]
     param(
-        [switch]$All = $false
+        [switch]$All = $false,
+        [switch]$DeferStagedCleanup
     )
 
+    $preserveForCleanup = [System.Collections.Generic.List[object]]::new()
     if ($All) {
         foreach ($item in @($script:CloudTransferQueue)) {
             if ($item.ContainsKey('JobId') -and $item['JobId'] -and $item['Status'] -in @('Uploading', 'Upload pending remote confirmation', 'Awaiting remote confirmation', 'Verifying remote file')) {
                 try { Stop-CloudTransfer -JobId [string]$item['JobId'] | Out-Null } catch { }
             }
+            if ($item['Status'] -eq 'Completed and remotely confirmed' -and [bool]$item['RecoveredFromVfsCache']) {
+                if ($DeferStagedCleanup) {
+                    $item['ClearWhenStagedCleanupCompletes'] = $true
+                    $preserveForCleanup.Add($item)
+                } else {
+                    $cleanupResult = Invoke-ConfirmedStagedVfsSourceCleanup -Job $item
+                    if (-not $cleanupResult.Success) { $preserveForCleanup.Add($item) }
+                }
+            }
         }
         $script:CloudTransferQueue.Clear()
+        foreach ($pendingCleanupJob in $preserveForCleanup) { [void]$script:CloudTransferQueue.Add($pendingCleanupJob) }
     } else {
         # Harvest settlement evidence before the completed jobs disappear.
         Update-CloudTransferSettledStagedLedger -Jobs @($script:CloudTransferQueue)
         $toRemove = @($script:CloudTransferQueue | Where-Object { $_['Status'] -in @('Completed and remotely confirmed', 'Failed', 'Cancelled') })
         foreach ($rem in $toRemove) {
+            if ($rem['Status'] -eq 'Completed and remotely confirmed' -and [bool]$rem['RecoveredFromVfsCache']) {
+                if ($DeferStagedCleanup) {
+                    $rem['ClearWhenStagedCleanupCompletes'] = $true
+                    continue
+                } else {
+                    $cleanupResult = Invoke-ConfirmedStagedVfsSourceCleanup -Job $rem
+                    if (-not $cleanupResult.Success) { continue }
+                }
+            }
             [void]$script:CloudTransferQueue.Remove($rem)
         }
     }
