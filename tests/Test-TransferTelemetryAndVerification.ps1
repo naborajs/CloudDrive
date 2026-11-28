@@ -17,6 +17,10 @@ $srcDir = Resolve-Path (Join-Path $PSScriptRoot '..\src')
 . (Join-Path $srcDir 'services\VirtualDriveManager.ps1')
 . (Join-Path $srcDir 'services\CloudTransferManager.ps1')
 
+# Mount-argument tests need a safe cache path, but must not depend on the user's
+# configured D:\CloudCache volume capacity.
+$testCacheDirectory = Join-Path ([System.IO.Path]::GetTempPath()) 'NSCloudDriveMountArgumentTests'
+
 # ------------------------------------------------------------------------------
 # 1. Pre-flight Check: TeraBox Free vs Premium Plan File Size Limits
 # ------------------------------------------------------------------------------
@@ -119,7 +123,7 @@ if ($portT -lt 5580 -or $portT -gt 5610) {
 Write-Output "  [PASS] Deterministic RC port mapping verified: T=$portT, G=$portG, H=$portH, I=$portI"
 
 # Verify Build-RcloneMountArguments with RcPort
-$argsWithRc = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -RcPort $portT
+$argsWithRc = Build-RcloneMountArguments -RemoteName 'terabox' -DriveLetter 'T' -CacheDirectory $testCacheDirectory -RcPort $portT
 if ($argsWithRc[0] -ne 'mount' -or $argsWithRc[1] -ne 'terabox:' -or $argsWithRc[2] -ne 'T:\') {
     throw 'Build-RcloneMountArguments corrupted leading positional mount arguments!'
 }
