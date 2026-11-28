@@ -16,6 +16,7 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$testTempRoot = [System.IO.Path]::GetTempPath()
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " NS Cloud Drive - Linux E2E Opaque-Box Test Suite         " -ForegroundColor White
@@ -100,7 +101,7 @@ $origGlobalIsLinux = Get-Variable -Name 'IsLinux' -ValueOnly -ErrorAction Silent
 $sandboxRoot = $null
 
 try {
-    $sandboxRoot = Join-Path $env:TEMP ("NSCloudDrive_E2E_" + [Guid]::NewGuid().ToString('N'))
+    $sandboxRoot = Join-Path $testTempRoot ("NSCloudDrive_E2E_" + [Guid]::NewGuid().ToString('N'))
     $sandboxHome = Join-Path $sandboxRoot 'home\vpsuser'
     $sandboxConfig = Join-Path $sandboxHome '.config'
     $sandboxData = Join-Path $sandboxHome '.local\share'
@@ -240,7 +241,7 @@ try {
     }
 
     Run-E2ETest 'Tier1' 'T1.7_R2' 'Windows CPX bridge bypass logic on Linux' {
-        $cpxExe = Join-Path $env:TEMP 'non_existent_cpx.exe'
+        $cpxExe = Join-Path $testTempRoot 'non_existent_cpx.exe'
         Assert-Condition (-not (Test-Path -LiteralPath $cpxExe)) 'Simulated CPX bridge absent'
         # TeraBox mount setup constructs native rclone environment without requiring CPX bridge
         $envVars = Get-TeraBoxRcloneEnvironment -SessionOverride @{ Secret = 'ndus=bridge_bypass_test' } -RemoteName 'terabox_bypass'
@@ -393,7 +394,7 @@ try {
         Assert-Condition $shouldSkip 'Duplicate file drop must be skipped from transfer queue'
     }
 
-    Run-E2ETest 'Tier1' 'T1.25_R5' 'Post-transfer cache cleanup evicts confirmed non-dirty cache files' {
+    Run-E2ETest 'Tier1' 'T1.25_R5' 'Post-transfer cleanup never sweeps unrelated VFS cache files' {
         $accCacheDir = Join-Path $sandboxTmpfs 'terabox_acc_dedup_test'
         $vfsDir = Join-Path $accCacheDir 'vfs'
         $vfsMetaDir = Join-Path $accCacheDir 'vfsMeta'
@@ -409,8 +410,8 @@ try {
             PostTransferCachePolicy = 'RemoveAfterVerifiedUpload'
             PostTransferRetentionMinutes = 60
         }
-        Assert-Condition ($res.EvictedFiles -ge 1) 'Confirmed non-dirty cache file must be evicted'
-        Assert-Condition (-not (Test-Path -LiteralPath $cFile)) 'Evicted cache payload deleted from disk'
+        Assert-Condition ($res.EvictedFiles -eq 0) 'A global cache sweep must not evict a file without its exact durable job'
+        Assert-Condition (Test-Path -LiteralPath $cFile) 'Unrelated VFS payload remains protected'
     }
 
     # --- Feature R6: Cross-Platform Hygiene ---
@@ -845,13 +846,14 @@ try {
         Record-CloudDedupVerifiedFile -AccountId 'acc_tb_comb' -ProviderId 'terabox' -RemotePath 'staged_video.mp4' -SizeBytes 24L
         Save-CloudDedupLedger
 
-        # 3. Post-transfer eviction cleans cache
+        # 3. The compatibility cleanup entry point cannot infer a queue job from a
+        # provider ledger record, so it must leave the cache entry untouched.
         $cleanupPost = Invoke-PostTransferCacheCleanup -CacheDirectory $sandboxTmpfs -Settings @{
             PostTransferCachePolicy = 'RemoveAfterVerifiedUpload'
             PostTransferRetentionMinutes = 60
         }
-        Assert-Condition ($cleanupPost.EvictedFiles -ge 1) 'Confirmed file evicted'
-        Assert-Condition (-not (Test-Path -LiteralPath $cFile)) 'Local tmpfs storage freed'
+        Assert-Condition ($cleanupPost.EvictedFiles -eq 0) 'The compatibility cleanup shim does not sweep all confirmed-looking entries'
+        Assert-Condition (Test-Path -LiteralPath $cFile) 'Only a durable staged job can authorize exact source deletion'
     }
 
     Run-E2ETest 'Tier3' 'T3.4_Comb' 'Daemon boot + multi-account mount filter (AutoMount=true vs AutoMount=false)' {
@@ -967,7 +969,7 @@ try {
         Record-CloudDedupVerifiedFile -AccountId 'acc_scenario2' -ProviderId 'terabox' -RemotePath $fileName -SizeBytes (Get-Item $dropFile).Length
         Save-CloudDedupLedger
 
-        # 4. Local tmpfs cache eviction via Invoke-PostTransferCacheCleanup
+        # 4. A cache folder scan cannot authorize deletion from a dedup ledger alone.
         $accCacheDir = Join-Path $sandboxTmpfs 'terabox_acc_scenario2'
         $vfsDir = Join-Path $accCacheDir 'vfs'
         $vfsMetaDir = Join-Path $accCacheDir 'vfsMeta'
@@ -982,8 +984,8 @@ try {
             PostTransferCachePolicy = 'RemoveAfterVerifiedUpload'
             PostTransferRetentionMinutes = 60
         }
-        Assert-Condition ($cleanRes.EvictedFiles -ge 1) 'Cache file evicted by cleanup policy'
-        Assert-Condition (-not (Test-Path -LiteralPath $cFile)) 'Tmpfs cache file freed after remote confirmation'
+        Assert-Condition ($cleanRes.EvictedFiles -eq 0) 'Compatibility cleanup avoids global cache sweeps'
+        Assert-Condition (Test-Path -LiteralPath $cFile) 'Exact durable staged-job linkage is required before cleanup'
 
         # 5. User drops identical file again -> Add-CloudTransferDroppedItems skips via dedup
         $secondDrop = Add-CloudTransferDroppedItems -DestinationAccount $acc -DroppedPaths @($dropFile)
