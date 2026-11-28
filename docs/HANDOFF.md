@@ -1,6 +1,6 @@
 # NS Cloud Drive Handover & Architecture Status
 
-**Reviewed & Updated:** 2026-10-23 (Final Production-Ready Release Gate)
+**Reviewed & Updated:** 2026-11-26 (Cache cleanup race hardening and Linux mount configuration)
 **Repository:** `C:\Users\Naboraj_sarkar\Documents\Codex\CloudDrive`
 **GitHub:** `https://github.com/naborajs/CloudDrive`
 **Branch:** `main` (synchronized with `origin/main`)
@@ -9,13 +9,21 @@
 
 ## 1. Executive Summary & Capabilities
 
-NS Cloud Drive has reached full production readiness. It is a lightweight, reliable, and secure Windows desktop application that mounts cloud storage (Google Drive and TeraBox) directly into Windows File Explorer as native virtual drives, providing seamless browsing, streaming playback, uploads, cloud-to-cloud transfers, and minimal local resource usage.
+NS Cloud Drive includes a Windows WPF desktop client and a Linux CLI/browser dashboard. Release qualification is still in progress: current local tests cover Windows PowerShell and Ubuntu WSL, while authenticated live-cloud runs and a native Linux distribution/desktop installation matrix remain outstanding.
+
+### Current transfer and cache behavior
+- The Windows upload picker records only the explicitly selected source paths in the durable queue; it does not copy them into the mounted VFS cache. Provider destination checks run in the background before file payloads are sent.
+- Durable jobs resume after restart and recheck the live destination. Same-provider copies to a different destination remain allowed; an exact same-account/path copy is a no-op.
+- Mounts use writes-only VFS caching. Newly created settings remove verified staging, while configured retention still applies to clean cache data.
+- A dirty cache entry without a durable selection is review-only and is never uploaded automatically. Re-selecting the original files can link an exact account/path/size/revision match; that staged entry is removed only after remote confirmation. Ambiguous cache data is preserved.
+- Exact staged cleanup persists and rechecks data/sidecar SHA-256 fingerprints. A missing checkpointed sidecar preserves its data across retries. Windows deletion uses exclusive handles; Linux atomically claims and verifies the path before deletion or restoration. Sidecar mapping changes only the account-root `vfs` segment, and Linux path normalization preserves trailing spaces. Cache cleanup, eviction, statistics, Inspector scans, and Analytics pending-upload scans run in background workers; the Inspector limits rendered rows to 250.
+- Current verification includes Windows PowerShell 5.1 regression suites and Ubuntu 24.04 WSL PowerShell 7.7/rclone 1.76 service/E2E suites recorded in `docs/engineering/INCIDENTS_AND_FIXES.md`. This is not a claim of live upload or cross-distribution release certification.
 
 ### Key Capabilities Verified:
 1. **Virtual Drive Mounting (Fixed Disk Integration):**
    - WinFsp-backed local fixed-disk filesystem mount (`FixedDisk`) eliminating network redirector "red X" artifacts, UNC drive issues, or `FUSE-rclone` labels.
    - Distinct provider and account volume labels in File Explorer (e.g. `Google Drive (G:)`, `TeraBox (T:)`).
-   - Read-write support with full VFS caching (`--vfs-cache-mode full`, `--vfs-write-back 5s`) enabling native drag-and-drop file copying and media streaming.
+   - Read-write support with writes-only VFS caching (`--vfs-cache-mode writes`, `--vfs-write-back 1s`) enabling native file copying without persisting ordinary reads/previews in the write cache.
    - Dynamic drive letter conflict resolution with automatic allocation of the next available drive letter.
 2. **Provider Implementations:**
    - **Google Drive:** One-click desktop OAuth 2.0 loopback flow (RFC 8252) with RFC 7636 PKCE, cryptographic state CSRF defense, and automatic token refresh on HTTP 401. Multi-account credential isolation and dynamic per-account rclone remote aliases (`gdrive_<id>`).
@@ -30,7 +38,7 @@ NS Cloud Drive has reached full production readiness. It is a lightweight, relia
    - In-use file lock detection (`Test-FileInUse`) guaranteeing that active streaming files, open handles, and pending uploads are never evicted.
    - OS drive protection warning if cache is placed on `%SystemDrive%`.
    - LRU quota bounding (configurable: 10 GB, 20 GB, 50 GB, 100 GB, 200 GB) based on file access times.
-   - Startup recovery of orphaned partial files (`.partial`, `.rclone-tmp`, `*~`).
+   - Startup recovery of stale app-owned temporary files and interrupted deletion claims; generic partial, rclone, and user temporary files are preserved.
 5. **Air Live Drive-Inspired 3-Theme User Interface:**
    - Three native themes: **Pure Black** (`#000000`), **Translucent Acrylic** (`#13161CE6`), and **Pure White** (`#F8FAFC`).
    - Clean navigation sidebar (Disks, Options, Help), dynamic multi-account cards, quick actions (Explorer, Upload, Options, Disconnect).
@@ -52,7 +60,7 @@ NS Cloud Drive has reached full production readiness. It is a lightweight, relia
 | **Cache Manager** | `src/services/CacheManager.ps1` | In-use file lock detection (`Test-FileInUse`), LRU cache quota enforcement, OS drive safety checks, and startup recovery. |
 | **Connection & Setup UI** | `src/ui/ProviderConnectionWindow.ps1` | Themed modal dialogs: `Show-CloudTransferModal`, `Show-AddCloudDiskModal`, `Show-CloudAccountSetupModal`, `Get-ModalThemePalette`. |
 | **Settings Manager** | `src/services/SettingsManager.ps1` | Multi-account registry, 3-theme resolution (`Resolve-AppTheme`), cache quota policies, and Windows startup management. |
-| **Virtual Drive Manager** | `src/services/VirtualDriveManager.ps1` | Orchestrates read-write `rclone mount` with WinFsp fixed disk mode, active mount reconciliation, VFS full caching, and clean unmounting. |
+| **Virtual Drive Manager** | `src/services/VirtualDriveManager.ps1` | Orchestrates read-write `rclone mount` with WinFsp fixed disk mode, active mount reconciliation, write-only VFS caching, retention-aware max-age, and clean unmounting. |
 | **TeraBox Bridge Manager** | `src/services/TeraBoxBridgeManager.ps1` | Manages local loopback WebDAV daemon, DPAPI secret exchange, and rclone environment configuration. |
 | **Embedded Browser** | `src/ui/EmbeddedBrowserWindow.ps1` | Edge WebView2 modal handling interactive sign-in, user-agent extraction, cookie synchronization, and clean lifecycle management. |
 | **TeraBox Provider** | `src/providers/TeraBoxProvider.ps1` | Session validation, regional API dispatch, quota retrieval, directory-aware DPAPI credential persistence, and strict ACLs. |
@@ -60,9 +68,9 @@ NS Cloud Drive has reached full production readiness. It is a lightweight, relia
 
 ---
 
-## 3. Automated Test Suite & CI
+## 3. Test Suite Inventory & CI
 
-The repository contains 15 automated test suites executed via `tests/Run-AllTests.ps1`. All 15 test suites pass cleanly (15 Passed, 0 Failed):
+The repository includes the following automated suites. The inventory below is a historical baseline and does not replace current, focused verification or qualify every supported operating system:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/Run-AllTests.ps1
@@ -116,3 +124,11 @@ or via PowerShell:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\src\NSCloudDrive.ps1
 ```
+
+## 6. Cache Recovery and Cross-Platform Release Status (2026-11-27)
+
+The current cache work keeps ordinary reads out of the write cache, queues only files explicitly selected in the picker, and treats unmatched dirty cache entries as review-only. Confirmed staged uploads are cleaned through per-job data and metadata fingerprints. The metadata fingerprint (or an explicit absent marker) is durably saved before removing the data file. A missing or changed checkpointed sidecar preserves the staged data across retry and restart. Cache sidecar paths are derived from only the account-root `vfs` segment. Linux deletion uses a private atomic claim directory with hash verification and stale-claim restoration; generic partial and temporary files are preserved during startup recovery.
+
+Options cleanup, Inspector cleanup and eviction, cache statistics, inactivity eviction, and Analytics pending-upload scans run off the WPF dispatcher. Linux mount configuration resolves rclone's config file through XDG paths. Windows cleanup uses exclusive native handles; Linux cleanup atomically claims paths and verifies the object hash before deletion. Linux path normalization preserves valid trailing-space filenames.
+
+Focused validation exited 0 under Windows PowerShell 5.1 for cache management, background cache UI operations, transfer identity/cleanup, desktop UI regression, and PowerShell parsing. Ubuntu 24.04 WSL PowerShell 7.7.0 passed cache management (including trailing-space paths, nested sidecars, and a path-replacement race), transfer identity/cleanup, and background cache UI operations. Cloud-provider E2E uses isolated local rclone remotes; a live upload, physical reboot, and Linux distribution/desktop install matrix remain outside this verification. ISSUE-41 remains in progress until the independent review is complete.
